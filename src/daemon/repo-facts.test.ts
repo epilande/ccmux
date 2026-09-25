@@ -181,31 +181,57 @@ describe("repo facts", () => {
     await load;
     expect(cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([pr]);
   });
-  it("refreshes on the timer and stops on shutdown", async () => {
-    let calls = 0;
+  function timed(interval: number, now?: () => number) {
+    const counter = { calls: 0 };
     const cache = new RepoFactsCache(
       {
         roots: async () => ["/repo"],
         headerPR: async () => false,
         local: async () => {
-          calls++;
+          counter.calls++;
           return repo;
         },
         prs: async () => failed,
         issues: async () => failed,
+        now,
       },
-      10,
+      interval,
     );
+    return { cache, counter };
+  }
+  it("refreshes on the timer and stops on shutdown", async () => {
+    const { cache, counter } = timed(10);
+    cache.snapshot(["/repo"]);
+    const reading = setInterval(() => cache.snapshot(["/repo"]), 5);
     cache.start();
     try {
       await new Promise((done) => setTimeout(done, 45));
-      expect(calls).toBeGreaterThan(1);
+      expect(counter.calls).toBeGreaterThan(1);
+    } finally {
+      cache.stop();
+      clearInterval(reading);
+    }
+    const stopped = counter.calls;
+    await new Promise((done) => setTimeout(done, 30));
+    expect(counter.calls).toBe(stopped);
+  });
+  it("leaves the timer idle while nobody reads snapshots", async () => {
+    let clock = 0;
+    const { cache, counter } = timed(10, () => clock);
+    cache.start();
+    try {
+      await new Promise((done) => setTimeout(done, 35));
+      expect(counter.calls).toBe(0);
+      cache.snapshot(["/repo"]);
+      await new Promise((done) => setTimeout(done, 25));
+      expect(counter.calls).toBeGreaterThan(0);
+      const read = counter.calls;
+      clock = 21;
+      await new Promise((done) => setTimeout(done, 25));
+      expect(counter.calls).toBe(read);
     } finally {
       cache.stop();
     }
-    const stopped = calls;
-    await new Promise((done) => setTimeout(done, 30));
-    expect(calls).toBe(stopped);
   });
 });
 

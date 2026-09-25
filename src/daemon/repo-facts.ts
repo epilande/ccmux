@@ -51,7 +51,9 @@ interface Dependencies {
 }
 
 /** Read-through snapshots never await GitHub. Each source publishes independently;
- * a failure preserves only an answer that really succeeded, marked stale. */
+ * a failure preserves only an answer that really succeeded, marked stale.
+ * The timer runs only while snapshots are being read: with no client
+ * watching, it would spend the user's GitHub quota for nobody. */
 export class RepoFactsCache {
   private facts = new Map<string, RepoFacts>();
   private inFlight = new Map<
@@ -61,6 +63,7 @@ export class RepoFactsCache {
   private attempted = new Map<string, number>();
   private requestedSources = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
+  private readAt: number | undefined;
   private now: () => number;
   constructor(
     private deps: Dependencies,
@@ -69,6 +72,7 @@ export class RepoFactsCache {
     this.now = deps.now ?? Date.now;
   }
   snapshot(roots: string[]): RepoFacts[] {
+    this.readAt = this.now();
     return roots.map(
       (root) =>
         this.facts.get(root) ?? {
@@ -80,6 +84,11 @@ export class RepoFactsCache {
   start(): void {
     if (this.timer) return;
     const tick = async () => {
+      if (
+        this.readAt === undefined ||
+        this.now() - this.readAt > 2 * this.intervalMs
+      )
+        return;
       const roots = await this.deps.roots();
       await this.refresh(roots);
     };

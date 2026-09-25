@@ -310,8 +310,9 @@ async function configGet(
   return { ok: true, value: result.stdout.trim() };
 }
 
-/** Badges allow local-ahead commits when the upstream identifies the PR.
- * Without that identity, only an exact local tip is evidence of association.
+/** An exact local tip always associates. Upstream identity additionally
+ * allows local-ahead commits, except a trunk tracked under another name: a
+ * branch cut from origin/main tracks main without being main's PR.
  * These are local ref/config reads; never fetch or inspect dirty files.
  * Fork checkouts store a URL in `branch.<name>.remote` with no named remote,
  * so the upstream atoms on `for-each-ref` are empty even when that config is set. */
@@ -345,6 +346,15 @@ export async function associatedBranchPRs(
       remoteRepo = parseRepoSlug(url.stdout);
     }
   }
+  const upstream = merge.startsWith("refs/heads/")
+    ? merge.slice("refs/heads/".length)
+    : "";
+  const tracksTrunk =
+    !!remoteRepo &&
+    !!upstream &&
+    upstream !== branch &&
+    prs.some((pr) => pr.headRefName === upstream) &&
+    (await isTrunk(git, cwd, remote, upstream));
   return {
     ok: true,
     value: prs.filter((pr) => {
@@ -364,8 +374,30 @@ export async function associatedBranchPRs(
             }
           : null;
       return (
-        merge === `refs/heads/${pr.headRefName}` && sameRepo(remoteRepo, head)
+        merge === `refs/heads/${pr.headRefName}` &&
+        !tracksTrunk &&
+        sameRepo(remoteRepo, head)
       );
     }),
   };
+}
+
+/** `main`/`master`, or the remote's `HEAD` target when it is recorded. An
+ *  unreadable `HEAD` is not a trunk: the conventional names already cover
+ *  the common case, and a URL remote has no `HEAD` ref to read. */
+async function isTrunk(
+  git: GitRun,
+  cwd: string,
+  remote: string,
+  name: string,
+): Promise<boolean> {
+  if (name === "main" || name === "master") return true;
+  if (looksLikeRemoteUrl(remote)) return false;
+  const head = await git(cwd, [
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    `refs/remotes/${remote}/HEAD`,
+  ]);
+  return head.exitCode === 0 && head.stdout.trim() === `${remote}/${name}`;
 }

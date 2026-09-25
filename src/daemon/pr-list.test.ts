@@ -485,6 +485,71 @@ describe("branch PR identity", () => {
       ),
     ).toEqual({ ok: true, value: [] });
   });
+  describe("a branch tracking the trunk under another name", () => {
+    const fromMain: OpenPR = {
+      ...pr,
+      number: 9,
+      url: "https://github.com/o/r/pull/9",
+      headRefName: "main",
+      headRefOid: "main-tip",
+      headRepository: { owner: "o", name: "r" },
+    };
+    const release: OpenPR = {
+      ...fromMain,
+      number: 10,
+      url: "https://github.com/o/r/pull/10",
+      headRefName: "develop",
+    };
+    function tracking(merge: string, remoteHead = "") {
+      return async (_cwd: string, args: string[]) => {
+        const last = args[args.length - 1] ?? "";
+        const out = (stdout: string) => ({
+          exitCode: stdout ? 0 : 1,
+          stderr: "",
+          stdout: stdout ? `${stdout}\n` : "",
+        });
+        if (args[0] === "rev-parse") return out("local-ahead");
+        if (args[0] === "symbolic-ref") return out(remoteHead);
+        if (last.endsWith(".remote")) return out("origin");
+        if (last.endsWith(".merge")) return out(merge);
+        return out("https://github.com/o/r");
+      };
+    }
+    it("does not inherit a PR whose head is main", async () => {
+      expect(
+        await associatedBranchPRs(
+          "/repo",
+          "feature",
+          [fromMain],
+          tracking("refs/heads/main"),
+        ),
+      ).toEqual({ ok: true, value: [] });
+    });
+    it("keeps that PR for the main checkout itself", async () => {
+      expect(
+        await associatedBranchPRs(
+          "/repo",
+          "main",
+          [fromMain],
+          tracking("refs/heads/main"),
+        ),
+      ).toEqual({ ok: true, value: [fromMain] });
+    });
+    it("reads a custom trunk from the remote's HEAD", async () => {
+      const git = tracking("refs/heads/develop", "origin/develop");
+      expect(
+        await associatedBranchPRs("/repo", "feature", [release], git),
+      ).toEqual({ ok: true, value: [] });
+      expect(
+        await associatedBranchPRs(
+          "/repo",
+          "feature",
+          [release],
+          tracking("refs/heads/develop", "origin/main"),
+        ),
+      ).toEqual({ ok: true, value: [release] });
+    });
+  });
   it("understands an explicit pull ref tracked from the base repository", async () => {
     expect(
       await select(
