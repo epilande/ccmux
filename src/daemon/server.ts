@@ -631,6 +631,11 @@ export class DaemonServer {
   private warnedAboutGitFlags = false;
   /** Coalesces concurrent lookups for one cwd onto a single git spawn. */
   private gitInfoInflight = new Map<string, Promise<GitInfo>>();
+  /** `/repo-facts` caller directories resolved to a main checkout root. */
+  private repoFactsRootCache = new Map<
+    string,
+    { root: string | null; expiresAt: number }
+  >();
   private prResolver: PRResolver;
   private lastActivePaneId: string | null = null;
   /**
@@ -660,10 +665,7 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   private headerPR = true;
   private repoFacts = new RepoFactsCache({
-    roots: async () =>
-      this.sessionRepoRoots(
-        await this.enrichSessions(this.sessionManager.getSessions(), true),
-      ),
+    roots: () => this.cachedSessionRepoRoots(),
     local: (root) => listRepoWorktreeInventory(root),
     counts: (root) => readRepoSourceCounts(root),
     prs: (root, refresh) => this.openPRsFor(root, refresh),
@@ -1429,12 +1431,7 @@ export class DaemonServer {
       (path === "/repo-facts" && req.method === "GET") ||
       (path === "/repo-facts/refresh" && req.method === "POST")
     ) {
-      const sessions = await this.enrichSessions(
-        this.sessionManager.getSessions(),
-        true,
-      );
-      const roots = await this.worktreeRepoRoots(
-        sessions,
+      const roots = await this.repoFactsRoots(
         url.searchParams.get("repo"),
         url.searchParams.get("cwd"),
       );
@@ -1780,6 +1777,50 @@ export class DaemonServer {
       if (session.mainRepoRoot) roots.add(session.mainRepoRoot);
     }
     return [...roots];
+  }
+
+  /** The same roots as `sessionRepoRoots(enrichSessions(...))`, read from the
+   *  git-info cache alone: every open TUI polls `/repo-facts` every 2s. */
+  private async cachedSessionRepoRoots(): Promise<string[]> {
+    const paneCache = this.getPaneCache();
+    const infos = await Promise.all(
+      this.sessionManager
+        .getSessions()
+        .map((session) =>
+          this.getGitInfo(this.effectiveCwd(session, paneCache)),
+        ),
+    );
+    return [...new Set(infos.flatMap((info) => info.mainRepoRoot ?? []))];
+  }
+
+  private async cachedMainRepoRoot(dir: string): Promise<string | null> {
+    const cached = this.repoFactsRootCache.get(dir);
+    if (cached && cached.expiresAt > Date.now()) return cached.root;
+    const root = await this.resolveMainRepoRoot(dir);
+    this.repoFactsRootCache.set(dir, {
+      root,
+      expiresAt: Date.now() + GIT_INFO_CACHE_TTL_MS,
+    });
+    return root;
+  }
+
+  /** `worktreeRepoRoots` for the polled facts endpoint. Resolutions may be up
+   *  to one git-info TTL old, which only delays a new repo's first facts. */
+  private async repoFactsRoots(
+    filter: string | null,
+    cwd: string | null,
+  ): Promise<string[]> {
+    if (filter) {
+      const resolved = await this.cachedMainRepoRoot(filter);
+      return resolved ? [resolved] : [];
+    }
+    const roots = await this.cachedSessionRepoRoots();
+    if (cwd) {
+      const resolved = await this.cachedMainRepoRoot(cwd);
+      const seen = new Set(roots.map(normalizePath));
+      if (resolved && !seen.has(normalizePath(resolved))) roots.push(resolved);
+    }
+    return roots;
   }
 
   /**

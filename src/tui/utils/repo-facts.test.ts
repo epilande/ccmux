@@ -1,4 +1,4 @@
-import { createRoot } from "solid-js";
+import { createRoot, createSignal } from "solid-js";
 import { describe, expect, it, spyOn } from "bun:test";
 import {
   badgeColor,
@@ -156,6 +156,59 @@ it("never lets an older poll overwrite a newer applied refresh and ignores dispo
     pending[2]!(answer("disposed"));
     await late;
     expect(cache.data().repos[0]?.repoName).toBe("new");
+  } finally {
+    dispose();
+    fetchSpy.mockRestore();
+  }
+});
+
+it("keeps the applied value when a poll answers with identical facts", async () => {
+  const body = {
+    repos: [{ repoRoot: "/repo", repoName: "repo" }],
+    headerPR: true,
+  };
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+    Response.json(body)) as unknown as typeof fetch);
+  let dispose = () => {};
+  const cache = createRoot((d) => {
+    dispose = d;
+    return createRepoFacts({
+      connected: () => false,
+      sources: () => false,
+      cwd: () => "/repo",
+    });
+  });
+  try {
+    await cache.refresh();
+    const first = cache.data();
+    await cache.refresh();
+    expect(cache.data()).toBe(first);
+  } finally {
+    dispose();
+    fetchSpy.mockRestore();
+  }
+});
+
+it("stops polling while hidden and catches up when shown", async () => {
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () =>
+    Response.json({ repos: [], headerPR: true })) as unknown as typeof fetch);
+  const [visible, setVisible] = createSignal(false);
+  let dispose = () => {};
+  createRoot((d) => {
+    dispose = d;
+    return createRepoFacts({
+      connected: () => true,
+      sources: () => false,
+      cwd: () => "/repo",
+      visible,
+    });
+  });
+  try {
+    await new Promise((done) => setTimeout(done, 0));
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
+    setVisible(true);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   } finally {
     dispose();
     fetchSpy.mockRestore();

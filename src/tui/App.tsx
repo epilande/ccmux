@@ -1371,6 +1371,7 @@ export function App(props: AppProps) {
     connected: () => store.state.connectionState === "connected",
     sources: () => view() === "start",
     cwd: () => pickerCwd(),
+    visible: () => isVisible(),
   });
   function switchMainView(next: View) {
     if (
