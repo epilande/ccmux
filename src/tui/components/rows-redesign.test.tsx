@@ -223,6 +223,26 @@ describe("rows redesign", () => {
     expect(
       isAgeFaded({ ...session, status: "working" }, 1, start + 48 * 3_600_000),
     ).toBe(false);
+    expect(
+      isAgeFaded(
+        {
+          ...session,
+          status: "idle",
+          subagents: [
+            {
+              agentId: "sub",
+              status: "working",
+              attentionType: null,
+              pendingTool: null,
+              lastActivityAt: null,
+              startedAt: null,
+            },
+          ],
+        },
+        1,
+        start + 48 * 3_600_000,
+      ),
+    ).toBe(false);
   });
 
   it("fades task text while retaining identity and agent colors", async () => {

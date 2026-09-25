@@ -1405,6 +1405,8 @@ export function App(props: AppProps) {
    * known repo.
    */
   function selectedRepoRoot(): string | null {
+    const header = store.selectedGroupHeader();
+    if (header && isSyntheticGroupKey(header.groupKey)) return null;
     return (
       store.selectedSession()?.mainRepoRoot ??
       store.selectedGroupSessions().find((s) => s.mainRepoRoot)?.mainRepoRoot ??
@@ -1415,8 +1417,16 @@ export function App(props: AppProps) {
   function groupContextMenuWorktrees() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const repo = selectedRepoRoot();
+    const header = store
+      .flatItems()
+      .find((item) => item.type === "header" && item.groupKey === cm.groupKey);
     store.actions.hideGroupContextMenu();
+    if (!header || header.type !== "header" || isSyntheticGroupKey(header.groupKey))
+      return;
+    const repo =
+      header.members
+        .map((member) => member.session)
+        .find((session) => session.mainRepoRoot)?.mainRepoRoot ?? null;
     store.actions.showWorktrees(repo);
   }
 
@@ -2215,7 +2225,12 @@ export function App(props: AppProps) {
       },
     ];
     return cm && isSyntheticGroupKey(cm.groupKey)
-      ? items.filter((item) => item.id !== "kill-group")
+      ? items.filter(
+          (item) =>
+            item.id !== "kill-group" &&
+            item.id !== "new-session" &&
+            item.id !== "worktrees",
+        )
       : items;
   }
 
@@ -2364,6 +2379,7 @@ export function App(props: AppProps) {
     }
     if (
       item?.type === "header" &&
+      !isSyntheticGroupKey(item.groupKey) &&
       GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
     ) {
       const members = item.members.map((member) => member.session);
@@ -3758,7 +3774,12 @@ export function App(props: AppProps) {
           // as `"N"` or as `"n"` with `shift` set.
           store.actions.showSourcePicker(selectedRepoRoot());
         } else {
-          openNewSession(newSessionContext(store.selectedFlatItem()));
+          const item = store.selectedFlatItem();
+          if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
+            event.preventDefault();
+            break;
+          }
+          openNewSession(newSessionContext(item));
         }
         event.preventDefault();
         break;
@@ -3821,6 +3842,11 @@ export function App(props: AppProps) {
         // `shift` set rather than as `"W"`; gating on the modifier is what
         // keeps a bare `w` from opening a surface that can delete.
         if (key !== "W" && !event.shift) break;
+        const item = store.selectedFlatItem();
+        if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
+          event.preventDefault();
+          break;
+        }
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise. The
         // panel's own Tab widens from there.

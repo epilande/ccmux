@@ -101,9 +101,13 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         displayWidth(count) -
         activity.reduce((width, part) => width + displayWidth(part.text), 0),
     );
-    const segments = [
+    const segments: Array<{ text: string; color: string; label?: boolean }> = [
       { text: `${indicator()} `, color: theme.overlay },
-      { text: truncateText(props.label, labelWidth), color: theme.text },
+      {
+        text: truncateText(props.label, labelWidth),
+        color: theme.text,
+        label: true,
+      },
       { text: count, color: theme.overlay },
       ...activity,
       ...(props.facts
@@ -121,7 +125,9 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       if (left <= 0) return [];
       const text = truncateText(segment.text, left);
       left -= displayWidth(text);
-      return text.trim() ? [{ text, color: c(segment.color) }] : [];
+      return text.trim()
+        ? [{ text, color: c(segment.color), label: segment.label }]
+        : [];
     });
   });
 
@@ -144,7 +150,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         <For each={parts()}>
           {(part) => (
             <span style={{ fg: part.color }}>
-              <Show when={props.selected} fallback={part.text}>
+              <Show when={props.selected && part.label} fallback={part.text}>
                 <b>{part.text}</b>
               </Show>
             </span>
