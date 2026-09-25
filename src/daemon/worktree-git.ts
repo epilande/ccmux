@@ -50,6 +50,35 @@ export type GitRun = (cwd: string, args: string[]) => Promise<GitResult>;
  * deadline unset: killing git does not stop a hook that is still mutating.
  * Timeout results discard partial data.
  */
+/** Read a pipe to the end. Abort cancels the reader so a hung pipe cannot
+ *  outlive the deadline that killed git. */
+async function readPipe(
+  stream: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): Promise<string> {
+  const reader = stream.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
+  if (signal.aborted) cancel();
+  else signal.addEventListener("abort", cancel, { once: true });
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (!signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) text += decoder.decode(value, { stream: true });
+    }
+    if (!signal.aborted) text += decoder.decode();
+  } catch {
+    // The deadline cancelled this read.
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+  return signal.aborted ? "" : text;
+}
+
 export async function runGit(
   cwd: string,
   args: string[],
@@ -60,11 +89,12 @@ export async function runGit(
       stdout: "pipe",
       stderr: "pipe",
     });
-    const result = Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }));
+    const controller = new AbortController();
+    const stdout = readPipe(proc.stdout, controller.signal);
+    const stderr = readPipe(proc.stderr, controller.signal);
+    const result = Promise.all([stdout, stderr, proc.exited]).then(
+      ([out, err, exitCode]) => ({ exitCode, stdout: out, stderr: err }),
+    );
     if (timeoutMs === undefined) return await result;
 
     let timer: ReturnType<typeof setTimeout>;
@@ -75,6 +105,7 @@ export async function runGit(
         } catch {
           // The process can exit before inherited output pipes close.
         }
+        controller.abort();
         resolve({
           exitCode: 124,
           stdout: "",
@@ -83,7 +114,11 @@ export async function runGit(
       }, timeoutMs);
     });
     try {
-      return await Promise.race([result, timeout]);
+      const raced = await Promise.race([result, timeout]);
+      if (raced.exitCode === 124) {
+        await Promise.allSettled([stdout, stderr]);
+      }
+      return raced;
     } finally {
       clearTimeout(timer!);
     }

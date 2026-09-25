@@ -1437,8 +1437,16 @@ export function App(props: AppProps) {
   function groupContextMenuWorktrees() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const repo = selectedRepoRoot();
+    const header = store
+      .flatItems()
+      .find((item) => item.type === "header" && item.groupKey === cm.groupKey);
     store.actions.hideGroupContextMenu();
+    if (!header || header.type !== "header" || isSyntheticGroupKey(header.groupKey))
+      return;
+    const repo =
+      header.members
+        .map((member) => member.session)
+        .find((session) => session.mainRepoRoot)?.mainRepoRoot ?? null;
     store.actions.showWorktrees(repo);
   }
 
@@ -2237,7 +2245,12 @@ export function App(props: AppProps) {
       },
     ];
     return cm && isSyntheticGroupKey(cm.groupKey)
-      ? items.filter((item) => item.id !== "kill-group")
+      ? items.filter(
+          (item) =>
+            item.id !== "kill-group" &&
+            item.id !== "new-session" &&
+            item.id !== "worktrees",
+        )
       : items;
   }
 
@@ -2386,6 +2399,7 @@ export function App(props: AppProps) {
     }
     if (
       item?.type === "header" &&
+      !isSyntheticGroupKey(item.groupKey) &&
       GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
     ) {
       const members = item.members.map((member) => member.session);
@@ -4455,6 +4469,7 @@ export function App(props: AppProps) {
           <HelpOverlay
             sidebar={props.sidebar}
             reviewable={reviewEnabled}
+            sessions={view() === "sessions"}
             onScrollboxRef={(ref) => (helpScrollbox = ref)}
           />
         </Show>

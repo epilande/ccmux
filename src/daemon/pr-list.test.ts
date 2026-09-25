@@ -391,18 +391,33 @@ describe("branch PR identity", () => {
       ],
       async (_cwd, args) => {
         calls.push(args);
-        return {
-          exitCode: 0,
-          stderr: "",
-          stdout:
-            args[0] === "for-each-ref"
-              ? `refs/heads/patch-1\t${tip}\t${remote}\t${merge}\nrefs/heads/patch-1/child\tabc\t\t\n`
-              : url,
-        };
+        if (args[0] === "rev-parse") {
+          return {
+            exitCode: tip ? 0 : 1,
+            stderr: "",
+            stdout: tip ? `${tip}\n` : "",
+          };
+        }
+        if (args[0] === "config") {
+          const key = args[args.length - 1] ?? "";
+          const value = key.endsWith(".remote")
+            ? remote
+            : key.endsWith(".merge")
+              ? merge
+              : "";
+          return {
+            exitCode: value ? 0 : 1,
+            stderr: "",
+            stdout: value ? `${value}\n` : "",
+          };
+        }
+        return { exitCode: 0, stderr: "", stdout: url };
       },
     );
     expect(
-      calls.every((args) => ["for-each-ref", "remote"].includes(args[0]!)),
+      calls.every((args) =>
+        ["rev-parse", "config", "remote"].includes(args[0]!),
+      ),
     ).toBe(true);
     return result;
   }
@@ -430,6 +445,15 @@ describe("branch PR identity", () => {
         "https://github.com/o/r",
       ),
     ).toEqual({ ok: true, value: [] });
+  });
+  it("reads a URL stored in branch.<name>.remote without a named remote", async () => {
+    expect(
+      await select(
+        "local-ahead",
+        "git@github.com:fork-owner/r.git",
+        "refs/heads/patch-1",
+      ),
+    ).toEqual({ ok: true, value: [pr] });
   });
   it("uses exact SHA proof without a remote and never matches just the branch name", async () => {
     expect(await select("abc", "", "")).toEqual({ ok: true, value: [pr] });

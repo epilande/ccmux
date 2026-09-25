@@ -3,6 +3,24 @@ import { RepoFactsCache } from "./repo-facts";
 import type { WorktreeRepo } from "./worktree-list";
 import { associatedBranchPRs, type OpenPR } from "./pr-list";
 import type { SourceResult } from "./gh-spawn-source";
+import type { GitRun } from "./worktree-git";
+
+function identityGit(branch: string): GitRun {
+  return async (_cwd, args) => {
+    if (args[0] === "rev-parse") {
+      return { exitCode: 0, stderr: "", stdout: "local-ahead\n" };
+    }
+    if (args[0] === "config") {
+      const key = args[args.length - 1] ?? "";
+      const value = key.endsWith(".merge") ? `refs/heads/${branch}` : "origin";
+      return { exitCode: 0, stderr: "", stdout: `${value}\n` };
+    }
+    if (args[0] === "remote") {
+      return { exitCode: 0, stderr: "", stdout: "git@github.com:o/r.git\n" };
+    }
+    return { exitCode: 1, stderr: "unexpected", stdout: "" };
+  };
+}
 
 const repo: WorktreeRepo = {
   repoRoot: "/repo",
@@ -188,14 +206,7 @@ describe("branch facts", () => {
   it("keeps matching upstream PRs when local-ahead, excluding namesake forks", async () => {
     const cache = new RepoFactsCache({
       associate: (root, branch, prs) =>
-        associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
-          exitCode: 0,
-          stderr: "",
-          stdout:
-            args[0] === "for-each-ref"
-              ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
-              : "git@github.com:o/r.git\n",
-        })),
+        associatedBranchPRs(root, branch, prs, identityGit(branch)),
       roots: async () => ["/repo"],
       headerPR: async () => true,
       local: async () => localRepo,
@@ -227,14 +238,7 @@ describe("branch facts", () => {
     const cache = new RepoFactsCache({
       now: () => now,
       associate: (root, branch, prs) =>
-        associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
-          exitCode: 0,
-          stderr: "",
-          stdout:
-            args[0] === "for-each-ref"
-              ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
-              : "git@github.com:o/r.git\n",
-        })),
+        associatedBranchPRs(root, branch, prs, identityGit(branch)),
       roots: async () => ["/repo"],
       headerPR: async () => true,
       local: async () => localRepo,
@@ -288,14 +292,7 @@ describe("branch facts", () => {
       };
       const cache = new RepoFactsCache({
         associate: (root, branch, prs) =>
-          associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
-            exitCode: 0,
-            stderr: "",
-            stdout:
-              args[0] === "for-each-ref"
-                ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
-                : "git@github.com:o/r.git\n",
-          })),
+          associatedBranchPRs(root, branch, prs, identityGit(branch)),
         roots: async () => ["/repo"],
         headerPR: async () => true,
         local: async () => local,
@@ -316,14 +313,7 @@ describe("branch facts", () => {
   it("leaves branch facts absent when GitHub has never answered", async () => {
     const cache = new RepoFactsCache({
       associate: (root, branch, prs) =>
-        associatedBranchPRs(root, branch, prs, async (_cwd, args) => ({
-          exitCode: 0,
-          stderr: "",
-          stdout:
-            args[0] === "for-each-ref"
-              ? `refs/heads/${branch}\tlocal-ahead\torigin\trefs/heads/${branch}\n`
-              : "git@github.com:o/r.git\n",
-        })),
+        associatedBranchPRs(root, branch, prs, identityGit(branch)),
       roots: async () => ["/repo"],
       headerPR: async () => true,
       local: async () => localRepo,

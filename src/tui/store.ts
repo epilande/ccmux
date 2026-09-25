@@ -2583,10 +2583,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       });
     },
     markAllSessions(clear = false) {
-      setState(
-        "markedSessions",
-        new Set(clear ? [] : filteredSessions().map((s) => s.session.id)),
+      const visible = flatItems().flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session.id] : [],
       );
+      setState("markedSessions", new Set(clear ? [] : visible));
     },
     showWorktrees(
       repo: string | null,

@@ -113,9 +113,13 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         displayWidth(count) -
         activity.reduce((width, part) => width + displayWidth(part.text), 0),
     );
-    const segments = [
+    const segments: Array<{ text: string; color: string; label?: boolean }> = [
       { text: `${indicator()} `, color: theme.overlay },
-      { text: truncateText(props.label, labelWidth), color: theme.text },
+      {
+        text: truncateText(props.label, labelWidth),
+        color: theme.text,
+        label: true,
+      },
       { text: count, color: theme.overlay },
       ...activity,
       ...(props.sharedBranch && props.sharedBranch !== "main"
@@ -144,7 +148,9 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
       if (left <= 0) return [];
       const text = truncateText(segment.text, left);
       left -= displayWidth(text);
-      return text.trim() ? [{ text, color: c(segment.color) }] : [];
+      return text.trim()
+        ? [{ text, color: c(segment.color), label: segment.label }]
+        : [];
     });
     // The header IS the divider: a rule fills what the label leaves, so a
     // group boundary costs one line, not a rule line plus a label line. The
@@ -174,7 +180,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         <For each={parts()}>
           {(part) => (
             <span style={{ fg: part.color }}>
-              <Show when={props.selected} fallback={part.text}>
+              <Show when={props.selected && part.label} fallback={part.text}>
                 <b>{part.text}</b>
               </Show>
             </span>

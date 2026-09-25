@@ -388,7 +388,10 @@ export function buildFlatItems(
  * from this one answer, and the SAME function feeds the renderer, so a row
  * cannot be measured as one height and drawn at another.
  */
-type SessionLineCount = (session: EnrichedSession) => number;
+type SessionLineCount = (
+  session: EnrichedSession,
+  item: Extract<FlatItem, { type: "session" }>,
+) => number;
 
 /**
  * Compute the visual height of a flat item.
@@ -405,7 +408,7 @@ export function itemVisualHeight(
   if (item.type === "session") {
     if (!lineCount) return 2;
     // A row always draws its identity line, whatever the caller computes.
-    return Math.max(1, lineCount(item.filteredSession.session));
+    return Math.max(1, lineCount(item.filteredSession.session, item));
   }
   return 1;
 }

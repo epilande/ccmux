@@ -1,6 +1,11 @@
 import type { RepoSourceCounts } from "./repo-source-counts";
 import { basename } from "node:path";
-import { associatedBranchPRs, PR_LIST_LIMIT, type OpenPR } from "./pr-list";
+import {
+  associatedBranchPRs,
+  PR_LIST_LIMIT,
+  upstreamHeadName,
+  type OpenPR,
+} from "./pr-list";
 import type { BranchPR } from "../types/session";
 import type { OpenIssue } from "./issue-list";
 import type { SourceResult } from "./gh-spawn-source";
@@ -164,12 +169,10 @@ export class RepoFactsCache {
                 (facts.counts &&
                   !facts.counts.stale &&
                   facts.counts.value.prs <= all.value.length);
+              const query = await upstreamHeadName(root, branch);
               const result = complete
-                ? {
-                    ok: true as const,
-                    value: all.value.filter((pr) => pr.headRefName === branch),
-                  }
-                : await this.deps.branchPRs?.(root, branch);
+                ? { ok: true as const, value: all.value }
+                : await this.deps.branchPRs?.(root, query);
               if (!result?.ok) throw new Error("unavailable");
               const associated = await (
                 this.deps.associate ?? associatedBranchPRs

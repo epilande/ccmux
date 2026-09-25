@@ -245,11 +245,16 @@ export const SessionList: Component<SessionListProps> = (props) => {
     );
   });
 
-  const sessionLines = (session: EnrichedSession) =>
+  const sessionLines = (
+    session: EnrichedSession,
+    item: Extract<FlatItem, { type: "session" }>,
+  ) =>
     1 +
     (rowHasContent(session, rowLayout(session).row2) ? 1 : 0) +
     promptBlock(session).length +
-    (props.sidebar && session.status === "waiting" && session.tmuxTarget
+    (props.sidebar &&
+    item.groupKey === NEEDS_YOU_GROUP_KEY &&
+    session.tmuxTarget
       ? 1
       : 0);
 
