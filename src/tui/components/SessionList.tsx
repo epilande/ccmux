@@ -187,7 +187,18 @@ export const SessionList: Component<SessionListProps> = (props) => {
             request === latestRequest &&
             response
           )
-            setWorktreeRepos(response.repos);
+            setWorktreeRepos((prev) => {
+              const returned = new Set(
+                response.repos.map((repo) => repo.repoRoot),
+              );
+              return [
+                ...prev.filter(
+                  (repo) =>
+                    scope.has(repo.repoRoot) && !returned.has(repo.repoRoot),
+                ),
+                ...response.repos,
+              ];
+            });
         })
         .catch(() => {});
     };

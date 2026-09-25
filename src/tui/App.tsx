@@ -2229,7 +2229,10 @@ export function App(props: AppProps) {
           (item) =>
             item.id !== "kill-group" &&
             item.id !== "new-session" &&
-            item.id !== "worktrees",
+            item.id !== "worktrees" &&
+            item.id !== "collapse" &&
+            item.id !== "pin-top" &&
+            item.id !== "pin-bottom",
         )
       : items;
   }
@@ -3511,8 +3514,10 @@ export function App(props: AppProps) {
   /** Extract group context from the selected item for group move operations */
   const getGroupMoveContext = (item: FlatItem | null) => {
     if (!item?.groupKey) return null;
-    if (item.type === "header" && isSyntheticGroupKey(item.groupKey))
-      return null;
+    // A band row's groupKey is synthetic even when the row is a session.
+    // Moving would retarget that session's home group, which may have no
+    // header on screen.
+    if (isSyntheticGroupKey(item.groupKey)) return null;
     return {
       groupKey:
         item.type === "session"
