@@ -873,7 +873,11 @@ describe("App sidebar mode", () => {
     setup.mockInput.pressKey("j");
     setup.mockInput.pressKey("s");
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toMatch(/\(1\/2\) (alpha|beta)/);
+    // `j` selects the second session, so its repo is the scope.
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("(1/2) beta");
+    expect(frame).toMatch(/^ 1 /m);
+    expect(frame).not.toMatch(/^ 2 /m);
   });
 
   it("flashes pane on Enter selection in sidebar mode", async () => {
@@ -1351,7 +1355,7 @@ describe("App waiting-row group movement", () => {
         setup.mockInput.pressKey("x");
         await setup.renderOnce();
         expect(setup.captureCharFrame()).toContain("Kill Session?");
-        expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+        expect(setup.captureCharFrame()).not.toContain("Kill Sessions?");
       },
     );
   }
@@ -1584,7 +1588,7 @@ describe("App kill/restart dispatch routing", () => {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
-      expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+      expect(setup.captureCharFrame()).not.toContain("Kill Sessions?");
       expect(calls.some((c) => c.url.endsWith("/kill"))).toBe(false);
       setup.mockInput.pressKey("m");
       await setup.renderOnce();
@@ -1628,7 +1632,7 @@ describe("App kill/restart dispatch routing", () => {
         await setup.renderOnce();
       }
       let frame = setup.captureCharFrame();
-      expect(frame).not.toContain("Kill Group?");
+      expect(frame).not.toContain("Kill Sessions?");
       expect(frame).not.toContain("Kill Session?");
       expect(frame).not.toContain("Kill All");
       setup.mockInput.pressKey("m");
@@ -1714,7 +1718,7 @@ describe("App kill/restart dispatch routing", () => {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
-      expect(setup.captureCharFrame()).toContain("Kill Group?");
+      expect(setup.captureCharFrame()).toContain("Kill Sessions?");
       setup.mockInput.pressKey("y");
       await setup.renderOnce();
       expect(

@@ -68,6 +68,24 @@ describe("Header", () => {
     expect(frame).not.toContain("/code");
   });
 
+  it("lets a long scope give way before the degraded warning", async () => {
+    const props = {
+      sessionCount: 2,
+      totalCount: 7,
+      scope: "/code/a-repository-with-a-long-name",
+      daemonDegraded: true,
+    };
+    expect(await renderHeader({ ...props, width: 100 })).toContain(
+      "(2/7) ⚠ daemon degraded: scans failing a-repository-with-a-long-name",
+    );
+    setup.renderer.destroy();
+    const narrow = await renderHeader({ ...props, width: 60 });
+    expect(narrow).toContain(
+      "● Sessions (2/7) ⚠ daemon degraded: scans failing",
+    );
+    expect(narrow).not.toContain("a-repository-with-a-long-name");
+  });
+
   it("shows active indicator when hideIdle", async () => {
     const frame = await renderHeader({ hideIdle: true });
     expect(frame).toContain("[active]");

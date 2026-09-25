@@ -12,7 +12,7 @@ const MIN_WIDTH = 24;
 const HEIGHT = 7;
 
 interface ConfirmationDialogProps {
-  session: Session | null;
+  session: (Session & { tmuxTarget?: string | null }) | null;
   action: ConfirmAction | null;
   sessionCount?: number;
   groupLabel?: string;
@@ -28,7 +28,7 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
       case "kill-all":
         return "Kill All Sessions?";
       case "kill-group":
-        return "Kill Group?";
+        return "Kill Sessions?";
       case "restart":
         return "Restart Session?";
       case "send-review":
@@ -53,8 +53,17 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
       const n = props.sessionCount ?? 0;
       return `(${n} session${n !== 1 ? "s" : ""})`;
     }
-    if (!props.session) return "Unknown session";
-    return props.session.project || props.session.cwd || props.session.id;
+    const session = props.session;
+    if (!session) return "Unknown session";
+    // Agents sharing a worktree share a project, so agent and pane come first
+    // and survive truncation.
+    return [
+      session.agentType,
+      session.tmuxTarget ?? session.tmuxPane,
+      session.project || session.cwd || session.id,
+    ]
+      .filter(Boolean)
+      .join(" · ");
   });
 
   const dims = useSharedTerminalDimensions();
