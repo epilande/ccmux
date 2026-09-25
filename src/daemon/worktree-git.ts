@@ -71,8 +71,9 @@ async function readPipe(
       if (value) text += decoder.decode(value, { stream: true });
     }
     if (!signal.aborted) text += decoder.decode();
-  } catch {
-    // The deadline cancelled this read.
+  } catch (err) {
+    if (signal.aborted) return "";
+    throw err;
   } finally {
     signal.removeEventListener("abort", cancel);
   }

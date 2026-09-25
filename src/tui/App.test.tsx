@@ -1602,9 +1602,7 @@ describe("App kill/restart dispatch routing", () => {
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain("Kill group");
       expect(setup.captureCharFrame()).not.toContain("New session");
-      expect(setup.captureCharFrame()).not.toContain("Worktrees");
-      await deliverEscape(setup.renderer);
-      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("┌");
       for (const key of ["j", "x"]) {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
@@ -1649,9 +1647,7 @@ describe("App kill/restart dispatch routing", () => {
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain("Kill group");
       expect(setup.captureCharFrame()).not.toContain("New session");
-      expect(setup.captureCharFrame()).not.toContain("Worktrees");
-      await deliverEscape(setup.renderer);
-      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("┌");
       // Enter is the header's collapse verb (space marks its rows here).
       setup.mockInput.pressEnter();
       await setup.renderOnce();
