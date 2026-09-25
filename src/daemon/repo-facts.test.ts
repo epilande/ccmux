@@ -307,6 +307,42 @@ describe("branch facts", () => {
       stale: false,
     });
   });
+  it("finds a capped branch's PR under its own name when it tracks main", async () => {
+    const queried: string[] = [];
+    const trackingMain: GitRun = async (cwd, args) =>
+      args[0] === "config" && args[args.length - 1]?.endsWith(".merge")
+        ? { exitCode: 0, stderr: "", stdout: "refs/heads/main\n" }
+        : args[0] === "rev-parse"
+          ? { exitCode: 0, stderr: "", stdout: "abc\n" }
+          : identityGit("feature")(cwd, args);
+    const cache = new RepoFactsCache({
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, trackingMain),
+      upstream: async () => "main",
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => ({
+        ok: true,
+        value: Array.from({ length: 50 }, (_, i) => ({
+          ...pr,
+          number: i + 100,
+          headRefName: "other",
+          headRefOid: "other",
+        })),
+      }),
+      issues: async () => failed,
+      branchPRs: async (_root, branch) => {
+        queried.push(branch);
+        return { ok: true, value: branch === "feature" ? [pr] : [] };
+      },
+    });
+    await cache.refresh(["/repo"]);
+    expect(queried.sort()).toEqual(["feature", "main"]);
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value.map((p) => p.id),
+    ).toEqual(["2"]);
+  });
   for (const name of ["constructor", "toString", "__proto__"]) {
     it(`does not fabricate stale facts for an unanswered ${name} branch`, async () => {
       const local = {

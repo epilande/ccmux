@@ -348,7 +348,10 @@ export async function associatedBranchPRs(
   return {
     ok: true,
     value: prs.filter((pr) => {
-      if (!remoteRepo) return !!tip && pr.headRefOid === tip;
+      // An upstream can name an unrelated branch (one cut from origin/main
+      // tracks main), so it widens the SHA proof and never vetoes it.
+      if (pr.headRefOid === tip) return true;
+      if (!remoteRepo) return false;
       const base = parseRepoSlug(pr.url);
       if (merge === `refs/pull/${pr.number}/head`)
         return sameRepo(remoteRepo, base);

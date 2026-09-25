@@ -704,8 +704,8 @@ export class DaemonServer {
     ttlMs: SOURCE_LIST_TTL_MS,
     failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
   });
-  /** Capped-list branch queries (`gh pr list --head`), same TTLs as the
-   *  repo-wide list so a facts tick and the session resolver share one call. */
+  /** Repo facts' capped-list branch queries (`gh pr list --head`), on the
+   *  repo-wide list's TTLs. The session resolver keeps its own cache. */
   private branchPRCache = new RepoAnswerCache<OpenPR[]>({
     ttlMs: SOURCE_LIST_TTL_MS,
     failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,

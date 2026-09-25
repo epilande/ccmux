@@ -45,6 +45,7 @@ interface Dependencies {
     refresh?: boolean,
   ) => Promise<SourceResult<OpenPR[]>>;
   associate?: typeof associatedBranchPRs;
+  upstream?: (root: string, branch: string) => Promise<string>;
   headerPR: () => Promise<boolean>;
   now?: () => number;
 }
@@ -178,11 +179,7 @@ export class RepoFactsCache {
                   facts.counts.value.prs <= all.value.length);
               const result = complete
                 ? { ok: true as const, value: all.value }
-                : await this.deps.branchPRs?.(
-                    root,
-                    await upstreamHeadName(root, branch),
-                    force,
-                  );
+                : await this.branchQuery(root, branch, force);
               if (!result?.ok) throw new Error("unavailable");
               const associated = await (
                 this.deps.associate ?? associatedBranchPRs
@@ -209,6 +206,30 @@ export class RepoFactsCache {
         );
       }
     });
+  }
+  /** A branch cut from origin/main tracks `main`, so its PR is only found under
+   *  its own name; query both when the upstream head differs. */
+  private async branchQuery(
+    root: string,
+    branch: string,
+    force: boolean,
+  ): Promise<SourceResult<OpenPR[]> | undefined> {
+    const lookup = this.deps.branchPRs;
+    if (!lookup) return undefined;
+    const upstream = await (this.deps.upstream ?? upstreamHeadName)(
+      root,
+      branch,
+    );
+    const names = upstream === branch ? [branch] : [upstream, branch];
+    const results = await Promise.all(
+      names.map((name) => lookup(root, name, force)),
+    );
+    const byNumber = new Map<number, OpenPR>();
+    for (const result of results) {
+      if (!result.ok) return result;
+      for (const pr of result.value) byNumber.set(pr.number, pr);
+    }
+    return { ok: true, value: [...byNumber.values()] };
   }
   private run(
     key: string,

@@ -436,7 +436,7 @@ describe("branch PR identity", () => {
   it("does not confuse a different host or base repo with the source repo", async () => {
     expect(
       await select(
-        "abc",
+        "local-ahead",
         "origin",
         "refs/heads/patch-1",
         "https://elsewhere.test/fork-owner/r",
@@ -444,7 +444,7 @@ describe("branch PR identity", () => {
     ).toEqual({ ok: true, value: [] });
     expect(
       await select(
-        "abc",
+        "local-ahead",
         "origin",
         "refs/heads/patch-1",
         "https://github.com/o/r",
@@ -466,6 +466,24 @@ describe("branch PR identity", () => {
       ok: true,
       value: [],
     });
+  });
+  it("keeps exact SHA proof when the upstream names an unrelated branch", async () => {
+    expect(
+      await select(
+        "abc",
+        "origin",
+        "refs/heads/main",
+        "https://github.com/o/r",
+      ),
+    ).toEqual({ ok: true, value: [pr] });
+    expect(
+      await select(
+        "local-ahead",
+        "origin",
+        "refs/heads/main",
+        "https://github.com/o/r",
+      ),
+    ).toEqual({ ok: true, value: [] });
   });
   it("understands an explicit pull ref tracked from the base repository", async () => {
     expect(
@@ -574,8 +592,6 @@ describe("upstreamHeadName", () => {
   it("refuses a failed config read instead of querying the local alias", async () => {
     await expect(
       upstreamHeadName("/repo", "review-7", git(124)),
-    ).rejects.toThrow(
-      "git config failed (124)",
-    );
+    ).rejects.toThrow("git config failed (124)");
   });
 });
