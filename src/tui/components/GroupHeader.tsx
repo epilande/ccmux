@@ -157,7 +157,11 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
     // gap rides on the rule text because a segment of its own would be
     // trimmed away above.
     if (left >= 2)
-      drawn.push({ text: ` ${"─".repeat(left - 1)}`, color: theme.border });
+      drawn.push({
+        text: ` ${"─".repeat(left - 1)}`,
+        color: theme.border,
+        label: false,
+      });
     return drawn;
   });
 
