@@ -1074,11 +1074,14 @@ export function hasHeaderLabels(cells: HeaderCells): boolean {
  * Whether the picker draws the column-header line under this grouping.
  * `auto` follows the grouping: the flat list is a table and gets one; a
  * grouped list has a group line between the header and its rows and does
- * not. The width gate is the caller's (the list knows its own width).
+ * not. A flat list showing the `needs attention` band has group lines too,
+ * so `auto` yields while the band is up. The width gate is the caller's
+ * (the list knows its own width).
  */
 export function showColumnHeader(
   mode: ColumnHeaderMode | undefined,
   groupBy: GroupBy,
+  hasGroupHeaders = false,
 ): boolean {
   switch (mode ?? DEFAULT_COLUMN_HEADER) {
     case "always":
@@ -1086,7 +1089,7 @@ export function showColumnHeader(
     case "never":
       return false;
     default:
-      return groupBy === "none";
+      return groupBy === "none" && !hasGroupHeaders;
   }
 }
 

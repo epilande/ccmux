@@ -1916,6 +1916,11 @@ describe("showColumnHeader", () => {
     }
   });
 
+  it("auto yields to the needs-attention band in a flat list", () => {
+    expect(showColumnHeader("auto", "none", true)).toBe(false);
+    expect(showColumnHeader("always", "none", true)).toBe(true);
+  });
+
   it("always and never override the grouping", () => {
     expect(showColumnHeader("always", "project")).toBe(true);
     expect(showColumnHeader("never", "none")).toBe(false);

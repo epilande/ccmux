@@ -4192,6 +4192,7 @@ export function App(props: AppProps) {
             columnHeader={showColumnHeader(
               store.state.columnHeader,
               store.state.groupBy,
+              store.flatItems().some((item) => item.type === "header"),
             )}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are

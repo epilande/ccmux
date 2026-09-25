@@ -742,6 +742,35 @@ describe("App", () => {
     expect(forced[FIRST_CONTENT_ROW_Y]).toContain("version");
   });
 
+  it("drops the default column header while the flat list shows the needs-attention band", async () => {
+    const seed = async (props: Record<string, unknown>) => {
+      await renderApp(120, 20, { groupBy: "none", ...props });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            status: "waiting",
+          }),
+          mockEnrichedSession({ id: "s2", project: "other" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.renderOnce();
+      return setup.captureCharFrame().split("\n");
+    };
+
+    const auto = await seed({ columnHeader: undefined });
+    expect(auto[FIRST_CONTENT_ROW_Y]).toContain("needs attention");
+    expect(auto.join("\n")).not.toContain("pane");
+    setup.renderer.destroy();
+
+    const forced = await seed({ columnHeader: "always" });
+    expect(forced[FIRST_CONTENT_ROW_Y]).toContain("pane");
+    expect(forced[FIRST_CONTENT_ROW_Y + 1]).toContain("needs attention");
+  });
+
   it("flashes pane on click of session row in persistent picker mode", async () => {
     await setupPersistentPickerWithSession({
       groupBy: "none",

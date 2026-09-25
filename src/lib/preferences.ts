@@ -331,8 +331,10 @@ export interface Preferences {
   ageFade?: { after?: number };
   /**
    * Column-header line above the picker's session list (default "auto":
-   * flat grouping only). Labels come from the resolved `columns` layout, so
-   * they follow reorders and breakpoints; only fixed-width cells get one.
+   * flat grouping only, and not while the needs-attention band shows).
+   * Labels come from the resolved `columns` layout, so they follow reorders
+   * and breakpoints; only fixed-position cells get one (the fixed-width
+   * cells and the first flexible cell).
    */
   columnHeader?: ColumnHeaderMode;
   /** Show and refresh GitHub facts in session headers (default true). */
