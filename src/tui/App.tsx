@@ -1249,6 +1249,10 @@ export function App(props: AppProps) {
       if (session.trackingMode !== "background") {
         refreshMenuDirty(session, openGeneration);
       }
+    } else if (isSyntheticGroupKey(item.groupKey)) {
+      // Collapse, pin, kill, new-session, and worktrees are all no-ops or
+      // the wrong group on a synthetic header. Opening would draw an empty box.
+      return;
     } else {
       store.actions.showGroupContextMenu(item.groupKey, x, y);
     }

@@ -1511,8 +1511,6 @@ describe("App kill/restart dispatch routing", () => {
       expect(setup.captureCharFrame()).not.toContain("Kill group");
       expect(setup.captureCharFrame()).not.toContain("New session");
       expect(setup.captureCharFrame()).not.toContain("Worktrees");
-      await deliverEscape(setup.renderer);
-      await setup.renderOnce();
       for (const key of ["j", "x"]) {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
@@ -1558,8 +1556,6 @@ describe("App kill/restart dispatch routing", () => {
       expect(setup.captureCharFrame()).not.toContain("Kill group");
       expect(setup.captureCharFrame()).not.toContain("New session");
       expect(setup.captureCharFrame()).not.toContain("Worktrees");
-      await deliverEscape(setup.renderer);
-      await setup.renderOnce();
       setup.mockInput.pressEnter();
       setup.mockInput.pressKey(" ");
       await setup.renderOnce();
