@@ -173,10 +173,13 @@ export class RepoFactsCache {
                 (facts.counts &&
                   !facts.counts.stale &&
                   facts.counts.value.prs <= all.value.length);
-              const query = await upstreamHeadName(root, branch);
               const result = complete
                 ? { ok: true as const, value: all.value }
-                : await this.deps.branchPRs?.(root, query, force);
+                : await this.deps.branchPRs?.(
+                    root,
+                    await upstreamHeadName(root, branch),
+                    force,
+                  );
               if (!result?.ok) throw new Error("unavailable");
               const associated = await (
                 this.deps.associate ?? associatedBranchPRs
