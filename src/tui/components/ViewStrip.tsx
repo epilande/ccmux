@@ -33,7 +33,7 @@ export interface RightSegment {
 }
 
 /** Between two signals, and between the last signal and `scope:`. */
-export const SEP = " · ";
+const SEP = " · ";
 /** The scope's label, never truncated: only the name after it is. */
 const SCOPE_PREFIX = "scope: ";
 /** Columns the right end spends around its content: the space that ends the

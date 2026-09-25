@@ -17,6 +17,9 @@ import {
   rowHasContent,
   rowHasFlexText,
   isFlexTextField,
+  columnHeaderCells,
+  hasHeaderLabels,
+  showColumnHeader,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
   fitProjectCell,
@@ -1824,12 +1827,6 @@ describe("stripPrompt with the summary cell", () => {
     expect(stripped.row2).toEqual({ left: [], right: [] });
   });
 });
-
-import {
-  columnHeaderCells,
-  hasHeaderLabels,
-  showColumnHeader,
-} from "./session-columns";
 
 describe("columnHeaderCells", () => {
   const inline = (width: number, user?: Parameters<typeof resolveColumns>[1]) =>

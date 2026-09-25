@@ -520,6 +520,8 @@ describe("SessionList column header", () => {
     columnHeader: boolean;
     width?: number;
     sidebar?: boolean;
+    promptLines?: number;
+    summary?: string | null;
   }) {
     const [tick] = createSignal(0);
     const items = [
@@ -527,6 +529,8 @@ describe("SessionList column header", () => {
         tmuxTarget: "main:1.1",
         tmuxPane: "%1",
         agentType: "claude",
+        summary: opts.summary,
+        lastPrompt: "wrap this prompt under the row",
       }),
     ];
     setup = await testRender(
@@ -538,6 +542,7 @@ describe("SessionList column header", () => {
             previewWidth={30}
             columnHeader={opts.columnHeader}
             sidebar={opts.sidebar}
+            promptLines={opts.promptLines}
           />
         </TickContext.Provider>
       ),
@@ -574,6 +579,20 @@ describe("SessionList column header", () => {
     expect(paneEnd).toBe(targetEnd);
     // The status glyph and the label share a start column.
     expect(header.indexOf("status")).toBe(row.search(/[●○◐◯◌]/));
+  });
+
+  it("follows the block layout, which drops the prompt cell", async () => {
+    const lines = await renderHeaderCase({
+      columnHeader: true,
+      promptLines: 2,
+      summary: "wrote a summary",
+    });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    expect(header).not.toContain("prompt");
+    const paneEnd = header.indexOf("pane") + "pane".length;
+    const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
+    expect(paneEnd).toBe(targetEnd);
   });
 
   it("stays off when not asked, in the sidebar, and below md", async () => {

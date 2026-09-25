@@ -66,6 +66,33 @@ it("draws a titled rule, marks the active view with the accent stub, and fills c
   expect(setup.captureCharFrame().split("\n")[1]?.trim()).toBe("");
 });
 
+it("marks a stale worktree count with a tilde", async () => {
+  setup = await testRender(
+    () => (
+      <ViewStrip
+        view="worktrees"
+        scope={null}
+        sessions={1}
+        facts={[
+          {
+            repoRoot: "/repo",
+            repoName: "repo",
+            worktrees: {
+              value: { repoRoot: "/repo", repoName: "repo", worktrees: [] },
+              updatedAt: 1,
+              stale: true,
+            },
+          },
+        ]}
+        onView={() => {}}
+      />
+    ),
+    { width: 96, height: 2 },
+  );
+  await setup.renderOnce();
+  expect(setup.captureCharFrame()).toContain("Worktrees ·0~");
+});
+
 it("scopes totals to the repo and names it, colored, at the right edge", async () => {
   setup = await testRender(
     () => (

@@ -390,12 +390,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
    * Header cells for THIS layout, or null when no line should draw. Read off
    * the same `layout()` the rows use (post prompt-mode), so an inline
    * collapse that moves `pr` next to the project moves the labels with it.
+   * While the wrapped prompt block is on, rows drop the `prompt` cell
+   * (`withBlock`). The header follows that summary-row layout. A row with
+   * no summary also drops the flex cell, so its right edge can sit left of
+   * the labels; that case is the exception, not a second header.
    */
   const headerCells = createMemo(() => {
     if (!props.columnHeader || props.sidebar) return null;
     const md = props.breakpoints?.md ?? DEFAULT_BREAKPOINTS.md;
     if (effectiveWidth() < md) return null;
-    const cells = columnHeaderCells(layout().row1);
+    const row1 = blockActive() ? withBlock().row1 : layout().row1;
+    const cells = columnHeaderCells(row1);
     return hasHeaderLabels(cells) ? cells : null;
   });
 
