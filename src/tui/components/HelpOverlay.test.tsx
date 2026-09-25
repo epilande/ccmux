@@ -188,7 +188,38 @@ describe("HelpOverlay sidebar mode", () => {
   it("shows q without Esc for quit in sidebar mode", async () => {
     const frame = await renderSidebarHelp();
     expect(frame).toContain("Back, then quit");
+    expect(frame).not.toContain("q / Esc");
+    expect(frame).not.toContain("Previous / next view");
+  });
+
+  it("offers Esc and h/l inside the sidebar's overlays", async () => {
+    setup = await testRender(() => <HelpOverlay sidebar view="worktrees" />, {
+      width: 100,
+      height: 70,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
     expect(frame).toContain("q / Esc");
+    expect(frame).toContain("Previous / next view");
+  });
+
+  it("leaves out keys the Worktrees view does not handle", async () => {
+    setup = await testRender(() => <HelpOverlay view="worktrees" />, {
+      width: 100,
+      height: 40,
+    });
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    for (const desc of [
+      "Fork session",
+      "Cycle group-by",
+      "Row menu",
+      "Filter",
+      "Toggle preview",
+    ])
+      expect(frame).not.toContain(desc);
+    expect(frame).toContain("Collapse all groups");
+    expect(frame).toContain("Kill or remove");
   });
 
   it("shows scroll hint in close instruction", async () => {

@@ -484,6 +484,9 @@ interface TUIState {
   confirmAction: ConfirmAction | null;
   /** Snapshot of session IDs captured when the confirm dialog opens */
   confirmSessionIds: string[];
+  /** Names those IDs, captured with them: the Sessions list's selection may
+   *  be hidden, or unrelated to a marked set. */
+  confirmLabel: string | null;
   connectionState: ConnectionState;
   /** Daemon scan-health; drives the degraded warning in the header. */
   daemonHealth: DaemonHealth;
@@ -958,6 +961,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     confirmSessionId: null,
     confirmAction: null,
     confirmSessionIds: [],
+    confirmLabel: null,
     connectionState: "disconnected",
     daemonHealth: { degraded: false },
     tmuxSocketError: null,
@@ -2023,6 +2027,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         null,
         "kill-group",
         header.members.map((fs) => fs.session.id),
+        header.label,
       );
     },
 
@@ -2030,11 +2035,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       sessionId: string | null,
       action: ConfirmAction = "kill",
       sessionIds: string[] = [],
+      label: string | null = null,
     ) {
       setState("confirmMode", true);
       setState("confirmSessionId", sessionId);
       setState("confirmAction", action);
       setState("confirmSessionIds", sessionIds);
+      setState("confirmLabel", label);
     },
 
     hideConfirmDialog() {
@@ -2042,6 +2049,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("confirmSessionId", null);
       setState("confirmAction", null);
       setState("confirmSessionIds", []);
+      setState("confirmLabel", null);
     },
 
     /** `highlight` is the item the keyboard starts on; null for a

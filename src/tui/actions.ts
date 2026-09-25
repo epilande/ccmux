@@ -1,4 +1,8 @@
-/** Public action vocabulary shared by keyboard routing, help, and the future palette. */
+export type View = "sessions" | "worktrees" | "start";
+const SESSIONS: readonly View[] = ["sessions"];
+
+/** Public action vocabulary shared by help and view-level keyboard routing.
+ *  `views` lists the views that handle a key; absent means every view. */
 export const ACTIONS = [
   { id: "move", key: "j/k ↑/↓", desc: "Move cursor", section: "Navigation" },
   {
@@ -26,7 +30,13 @@ export const ACTIONS = [
     desc: "All repos / this repo",
     section: "Navigation",
   },
-  { id: "search", key: "/", desc: "Filter", section: "Navigation" },
+  {
+    id: "search",
+    key: "/",
+    desc: "Filter",
+    section: "Navigation",
+    views: ["sessions", "start"] as readonly View[],
+  },
   { id: "mark", key: "Space", desc: "Mark row / group", section: "Actions" },
   {
     id: "markAll",
@@ -63,22 +73,54 @@ export const ACTIONS = [
     desc: "Working tree / branch",
     section: "Actions",
   },
-  { id: "menu", key: "m", desc: "Row menu", section: "Sessions" },
-  { id: "fork", key: "F", desc: "Fork session", section: "Sessions" },
-  { id: "prompt", key: "p", desc: "Cycle prompt display", section: "Sessions" },
-  { id: "hideIdle", key: "f", desc: "Toggle hide idle", section: "Sessions" },
-  { id: "group", key: "b", desc: "Cycle group-by", section: "Groups" },
+  {
+    id: "menu",
+    key: "m",
+    desc: "Row menu",
+    section: "Sessions",
+    views: SESSIONS,
+  },
+  {
+    id: "fork",
+    key: "F",
+    desc: "Fork session",
+    section: "Sessions",
+    views: SESSIONS,
+  },
+  {
+    id: "prompt",
+    key: "p",
+    desc: "Cycle prompt display",
+    section: "Sessions",
+    views: SESSIONS,
+  },
+  {
+    id: "hideIdle",
+    key: "f",
+    desc: "Toggle hide idle",
+    section: "Sessions",
+    views: SESSIONS,
+  },
+  {
+    id: "group",
+    key: "b",
+    desc: "Cycle group-by",
+    section: "Groups",
+    views: SESSIONS,
+  },
   {
     id: "moveGroup",
     key: "J / K",
     desc: "Move group down / up",
     section: "Groups",
+    views: SESSIONS,
   },
   {
     id: "pinGroup",
     key: "< / >",
     desc: "Move to top / bottom",
     section: "Groups",
+    views: SESSIONS,
   },
   {
     id: "collapse",
@@ -87,24 +129,37 @@ export const ACTIONS = [
     section: "Groups",
   },
   { id: "expand", key: "= / zr", desc: "Expand all groups", section: "Groups" },
-  { id: "preview", key: "P", desc: "Toggle preview", section: "Preview" },
-  { id: "previewFocus", key: "Tab", desc: "Focus preview", section: "Preview" },
+  {
+    id: "preview",
+    key: "P",
+    desc: "Toggle preview",
+    section: "Preview",
+    views: SESSIONS,
+  },
+  {
+    id: "previewFocus",
+    key: "Tab",
+    desc: "Focus preview",
+    section: "Preview",
+    views: SESSIONS,
+  },
   {
     id: "previewScroll",
     key: "Ctrl+D/U",
     desc: "Scroll preview",
     section: "Preview",
+    views: SESSIONS,
   },
   {
     id: "previewResize",
     key: "Alt+H/L",
     desc: "Resize preview",
     section: "Preview",
+    views: SESSIONS,
   },
   { id: "help", key: "?", desc: "Help", section: "Other" },
   { id: "back", key: "q / Esc", desc: "Back, then quit", section: "Other" },
 ] as const;
-export type View = "sessions" | "worktrees" | "start";
 export const VIEWS: View[] = ["sessions", "worktrees", "start"];
 export function nextView(view: View, delta: number): View {
   return VIEWS[(VIEWS.indexOf(view) + delta + VIEWS.length) % VIEWS.length]!;
@@ -112,20 +167,27 @@ export function nextView(view: View, delta: number): View {
 export function helpGroups(
   sidebar = false,
   reviewable = true,
-  sessions = true,
+  view: View = "sessions",
 ) {
   const groups: { section: string; items: { key: string; desc: string }[] }[] =
     [];
   for (const action of ACTIONS) {
-    if (sidebar && action.id === "views") continue;
-    if ((sidebar || !sessions) && action.section === "Preview") continue;
+    if ("views" in action && !action.views.includes(view)) continue;
+    // The sidebar's overlays cycle with h/l; its session list does not.
+    if (sidebar && view === "sessions" && action.id === "views") continue;
+    if (sidebar && action.section === "Preview") continue;
     if (!reviewable && action.id === "review") continue;
     let group = groups.find((g) => g.section === action.section);
     if (!group) {
       group = { section: action.section, items: [] };
       groups.push(group);
     }
-    group.items.push(action);
+    // Esc is inert in the sidebar's session list, so only q is offered there.
+    group.items.push(
+      sidebar && view === "sessions" && action.id === "back"
+        ? { key: "q", desc: action.desc }
+        : action,
+    );
   }
   return groups;
 }

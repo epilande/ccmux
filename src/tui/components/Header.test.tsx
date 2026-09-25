@@ -14,6 +14,7 @@ async function renderHeader(props: {
   sessionCount?: number;
   totalCount?: number;
   hideIdle?: boolean;
+  scope?: string | null;
   connectionState?: ConnectionState;
   daemonDegraded?: boolean;
   dimmed?: boolean;
@@ -26,6 +27,7 @@ async function renderHeader(props: {
         sessionCount={props.sessionCount ?? 5}
         totalCount={props.totalCount}
         hideIdle={props.hideIdle}
+        scope={props.scope}
         connectionState={props.connectionState ?? "connected"}
         daemonDegraded={props.daemonDegraded}
         dimmed={props.dimmed}
@@ -54,6 +56,16 @@ describe("Header", () => {
     const frame = await renderHeader({ sessionCount: 5 });
     expect(frame).toContain("(5)");
     expect(frame).not.toContain("/");
+  });
+
+  it("names the repo the list is narrowed to", async () => {
+    const frame = await renderHeader({
+      sessionCount: 2,
+      totalCount: 7,
+      scope: "/code/ccmux",
+    });
+    expect(frame).toContain("(2/7) ccmux");
+    expect(frame).not.toContain("/code");
   });
 
   it("shows active indicator when hideIdle", async () => {

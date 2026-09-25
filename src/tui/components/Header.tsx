@@ -6,6 +6,8 @@ interface HeaderProps {
   sessionCount: number;
   totalCount?: number;
   hideIdle?: boolean;
+  /** Repo root the list is narrowed to; the sidebar has no strip to show it. */
+  scope?: string | null;
   connectionState: ConnectionState;
   /** Daemon scans have been failing long enough to serve stale state;
    *  surfaces a warning segment when true. */
@@ -42,6 +44,9 @@ export const Header: Component<HeaderProps> = (props) => {
           ({props.sessionCount}
           {props.totalCount != null ? `/${props.totalCount}` : ""})
         </text>
+        {props.scope ? (
+          <text fg={c(theme.blue)}> {props.scope.split("/").pop()}</text>
+        ) : null}
         {props.hideIdle && <text fg={c(theme.yellow)}> [active]</text>}
         {props.invokeInFlight ? (
           <text fg={c(theme.peach)}> · {props.invokeInFlight} invoking</text>

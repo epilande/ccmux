@@ -848,6 +848,34 @@ describe("App sidebar mode", () => {
     }
   });
 
+  it("shows the scope and hidden count when s narrows the sidebar", async () => {
+    await renderApp(40, 20, { sidebar: true, groupBy: "none" });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "a",
+          project: "one",
+          status: "working",
+          tmuxPane: "%1",
+          mainRepoRoot: "/code/alpha",
+        }),
+        mockEnrichedSession({
+          id: "b",
+          project: "two",
+          status: "working",
+          tmuxPane: "%2",
+          mainRepoRoot: "/code/beta",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    setup.mockInput.pressKey("j");
+    setup.mockInput.pressKey("s");
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toMatch(/\(1\/2\) (alpha|beta)/);
+  });
+
   it("flashes pane on Enter selection in sidebar mode", async () => {
     await renderApp(30, 20, { sidebar: true });
     sseCallbacks!.onInit(
@@ -1694,6 +1722,29 @@ describe("App kill/restart dispatch routing", () => {
           .filter((c) => c.url.endsWith("/kill"))
           .map((c) => c.url.split("/sessions/")[1]),
       ).toEqual(["b/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("names a marked kill by the marks, not the selected group header", async () => {
+    const { restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", status: "working" }),
+          mockEnrichedSession({ id: "b", project: "beta", status: "working" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      for (const key of ["j", " ", "j", "j", " ", "g", "g", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Marked sessions (2 sessions)");
     } finally {
       restore();
     }

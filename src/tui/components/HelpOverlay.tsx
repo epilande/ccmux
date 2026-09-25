@@ -1,4 +1,4 @@
-import { helpGroups } from "../actions";
+import { helpGroups, type View } from "../actions";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { Component, JSX, ParentComponent } from "solid-js";
 import { createMemo } from "solid-js";
@@ -138,8 +138,8 @@ const HelpLayout: ParentComponent<{
 interface HelpOverlayProps {
   sidebar?: boolean;
   reviewable?: boolean;
-  /** Preview shortcuts apply only while the Sessions view is showing. */
-  sessions?: boolean;
+  /** The view the help describes; keys other views do not handle are left out. */
+  view?: View;
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
 }
 
@@ -147,7 +147,7 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
   const dims = useSharedTerminalDimensions();
 
   const grouped = () =>
-    helpGroups(props.sidebar, props.reviewable === true, props.sessions !== false);
+    helpGroups(props.sidebar, props.reviewable === true, props.view);
 
   const groups = () => grouped().filter((g) => !RIGHT_SECTIONS.has(g.section));
 
@@ -169,14 +169,10 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
     Math.max(1, Math.min(dims().width, MAX_WIDTH) - BORDER - PAD_X),
   );
 
-  const twoColumns = createMemo(
-    () => innerWidth() >= COL_WIDTH * 2 + COL_GAP,
-  );
+  const twoColumns = createMemo(() => innerWidth() >= COL_WIDTH * 2 + COL_GAP);
 
   const columnWidth = createMemo(() =>
-    twoColumns()
-      ? Math.floor((innerWidth() - COL_GAP) / 2)
-      : innerWidth(),
+    twoColumns() ? Math.floor((innerWidth() - COL_GAP) / 2) : innerWidth(),
   );
 
   const compactWidth = createMemo(() =>
@@ -211,10 +207,7 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
         borderColor={theme.border}
         flexDirection="column"
       >
-        <HelpLayout
-          hint={sidebarHint()}
-          onScrollboxRef={props.onScrollboxRef}
-        >
+        <HelpLayout hint={sidebarHint()} onScrollboxRef={props.onScrollboxRef}>
           <box flexDirection="column" paddingLeft={1} paddingRight={1}>
             {renderCompactColumn(allGroups, compactWidth())}
           </box>
@@ -246,10 +239,7 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
         paddingTop={1}
         paddingBottom={1}
       >
-        <HelpLayout
-          hint={pickerHint()}
-          onScrollboxRef={props.onScrollboxRef}
-        >
+        <HelpLayout hint={pickerHint()} onScrollboxRef={props.onScrollboxRef}>
           <box height={1} />
           <box flexDirection="row">
             {pickerColumns().map((column, i) => (
