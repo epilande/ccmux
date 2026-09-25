@@ -280,6 +280,12 @@ export async function upstreamHeadName(
   git: GitRun = runMetadataGit,
 ): Promise<string> {
   const merge = await git(cwd, ["config", "--get", `branch.${branch}.merge`]);
+  // A timeout must not fall through to the local name: a tracking alias
+  // would then be queried as if it were the upstream head. Exit 1 (unset)
+  // and other config failures still use the local name.
+  if (merge.exitCode === 124) {
+    throw new Error(`git config failed (${merge.exitCode})`);
+  }
   if (merge.exitCode !== 0) return branch;
   const ref = merge.stdout.trim();
   return ref.startsWith("refs/heads/")

@@ -1,9 +1,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runGit } from "./worktree-git";
+import { runGit, type GitRun } from "./worktree-git";
 import { describe, it, expect } from "bun:test";
-import { associatedBranchPRs, listOpenPRs, type OpenPR } from "./pr-list";
+import {
+  associatedBranchPRs,
+  listOpenPRs,
+  upstreamHeadName,
+  type OpenPR,
+} from "./pr-list";
 import type { GhRun, GhRunResult } from "./gh-spawn-source";
 
 /** A runner that answers every call with one canned result. */
@@ -540,4 +545,37 @@ it("associates a real local-ahead branch using its configured fork remote", asyn
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+describe("upstreamHeadName", () => {
+  const git =
+    (exitCode: number, stdout = ""): GitRun =>
+    async () => ({ exitCode, stdout, stderr: "" });
+
+  it("uses the local name when no upstream is configured", async () => {
+    expect(await upstreamHeadName("/repo", "review-7", git(1))).toBe(
+      "review-7",
+    );
+    expect(await upstreamHeadName("/repo", "review-7", git(128))).toBe(
+      "review-7",
+    );
+  });
+
+  it("uses the upstream head when the branch tracks one", async () => {
+    expect(
+      await upstreamHeadName(
+        "/repo",
+        "review-7",
+        git(0, "refs/heads/feature\n"),
+      ),
+    ).toBe("feature");
+  });
+
+  it("refuses a failed config read instead of querying the local alias", async () => {
+    await expect(
+      upstreamHeadName("/repo", "review-7", git(124)),
+    ).rejects.toThrow(
+      "git config failed (124)",
+    );
+  });
 });

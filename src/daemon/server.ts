@@ -667,7 +667,10 @@ export class DaemonServer {
     local: (root) => listRepoWorktreeInventory(root),
     counts: (root) => readRepoSourceCounts(root),
     prs: (root, refresh) => this.openPRsFor(root, refresh),
-    branchPRs: (root, branch) => listOpenPRs(root, undefined, branch),
+    branchPRs: (root, branch, refresh) =>
+      this.branchPRCache.answer(`${root}\0${branch}`, refresh === true, () =>
+        listOpenPRs(root, undefined, branch),
+      ),
     issues: (root, refresh) => this.openIssuesFor(root, refresh),
     headerPR: async () => {
       this.headerPR = (await getPreferences()).headerFacts?.pr !== false;
@@ -696,6 +699,12 @@ export class DaemonServer {
    * on {@link RepoAnswerCache}.
    */
   private prListCache = new RepoAnswerCache<OpenPR[]>({
+    ttlMs: SOURCE_LIST_TTL_MS,
+    failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
+  });
+  /** Capped-list branch queries (`gh pr list --head`), same TTLs as the
+   *  repo-wide list so a facts tick and the session resolver share one call. */
+  private branchPRCache = new RepoAnswerCache<OpenPR[]>({
     ttlMs: SOURCE_LIST_TTL_MS,
     failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
   });

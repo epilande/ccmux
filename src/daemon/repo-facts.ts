@@ -39,7 +39,11 @@ interface Dependencies {
     refresh: boolean,
   ) => Promise<SourceResult<OpenIssue[]>>;
   counts?: (root: string) => Promise<SourceResult<RepoSourceCounts>>;
-  branchPRs?: (root: string, branch: string) => Promise<SourceResult<OpenPR[]>>;
+  branchPRs?: (
+    root: string,
+    branch: string,
+    refresh?: boolean,
+  ) => Promise<SourceResult<OpenPR[]>>;
   associate?: typeof associatedBranchPRs;
   headerPR: () => Promise<boolean>;
   now?: () => number;
@@ -172,7 +176,7 @@ export class RepoFactsCache {
               const query = await upstreamHeadName(root, branch);
               const result = complete
                 ? { ok: true as const, value: all.value }
-                : await this.deps.branchPRs?.(root, query);
+                : await this.deps.branchPRs?.(root, query, force);
               if (!result?.ok) throw new Error("unavailable");
               const associated = await (
                 this.deps.associate ?? associatedBranchPRs
