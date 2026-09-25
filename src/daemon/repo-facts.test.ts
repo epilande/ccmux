@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { RepoFactsCache } from "./repo-facts";
+import { RepoFactsCache, wireRepoFacts } from "./repo-facts";
 import type { WorktreeRepo } from "./worktree-list";
 import { associatedBranchPRs, type OpenPR } from "./pr-list";
 import type { SourceResult } from "./gh-spawn-source";
@@ -86,6 +86,17 @@ describe("repo facts", () => {
     await h.cache.refresh(["/repo"]);
     expect(h.cache.snapshot(["/repo"])[0]?.prs).toBeUndefined();
     expect(h.cache.snapshot(["/repo"])[0]?.worktrees?.value).toEqual(repo);
+  });
+  it("keeps the source lists off the wire and everything else on it", async () => {
+    const h = harness();
+    await h.cache.refresh(["/repo"]);
+    const snapshot = h.cache.snapshot(["/repo"]);
+    expect(snapshot[0]?.prs?.value).toEqual([pr]);
+    const [wire] = wireRepoFacts(snapshot);
+    expect(wire).not.toHaveProperty("prs");
+    expect(wire).not.toHaveProperty("issues");
+    expect(wire?.worktrees?.value).toEqual(repo);
+    expect(h.cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([pr]);
   });
   it("retains a successful value as stale after a failure, and recovers to zero", async () => {
     const h = harness();

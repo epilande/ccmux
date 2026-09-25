@@ -118,25 +118,27 @@ export const ViewStrip: Component<
       return props.total == null
         ? props.sessions
         : `${props.sessions}/${props.total}`;
-    const values = repos();
+    // A repo that never answered (no GitHub remote, say) must not blank the
+    // total for every other repo; it only makes the sum partial, see `stale`.
+    const values = view === "worktrees" ? worktreeFacts() : countFacts();
     if (!values.length) return undefined;
-    if (view === "worktrees")
-      return values.every((r) => r.worktrees)
-        ? values.reduce((n, r) => n + r.worktrees!.value.worktrees.length, 0)
-        : undefined;
-    return values.every((r) => r.counts)
-      ? values.reduce(
-          (n, r) => n + r.counts!.value.prs + r.counts!.value.issues,
-          0,
-        )
-      : undefined;
+    return values.reduce((n, value) => n + value, 0);
   };
+  const worktreeFacts = () =>
+    repos().flatMap((r) =>
+      r.worktrees ? [r.worktrees.value.worktrees.length] : [],
+    );
+  const countFacts = () =>
+    repos().flatMap((r) =>
+      r.counts ? [r.counts.value.prs + r.counts.value.issues] : [],
+    );
   const stale = (view: View) =>
     view === "sessions"
       ? false
-      : repos().some((r) =>
-          view === "worktrees" ? r.worktrees?.stale : r.counts?.stale,
-        );
+      : repos().some((r) => {
+          const fact = view === "worktrees" ? r.worktrees : r.counts;
+          return !fact || fact.stale;
+        });
   const label = (view: View) =>
     `${view === "sessions" ? "Sessions" : view === "worktrees" ? "Worktrees" : "Start"}${count(view) === undefined ? "" : ` ${count(view)}${stale(view) ? " ~" : ""}`}`;
   const right = () => {

@@ -136,7 +136,7 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
-import { RepoFactsCache } from "./repo-facts";
+import { RepoFactsCache, wireRepoFacts } from "./repo-facts";
 import {
   countRepoWorktrees,
   listRepoWorktreeInventory,
@@ -1444,7 +1444,7 @@ export class DaemonServer {
         .catch(() => {});
       return Response.json(
         {
-          repos: this.repoFacts.snapshot(roots),
+          repos: wireRepoFacts(this.repoFacts.snapshot(roots)),
           headerPR: (await getPreferences()).headerFacts?.pr !== false,
         },
         { headers: corsHeaders },

@@ -26,9 +26,15 @@ export interface RepoFacts {
   counts?: RepoFact<RepoSourceCounts>;
   branchPRs?: Record<string, RepoFact<BranchPR[]>>;
 }
+/** What `/repo-facts` sends. The source lists stay daemon-side for branch
+ *  association; Start reads its own through `/prs` and `/issues`. */
+export type WireRepoFacts = Omit<RepoFacts, "prs" | "issues">;
 export interface RepoFactsResponse {
-  repos: RepoFacts[];
+  repos: WireRepoFacts[];
   headerPR: boolean;
+}
+export function wireRepoFacts(repos: RepoFacts[]): WireRepoFacts[] {
+  return repos.map(({ prs: _prs, issues: _issues, ...rest }) => rest);
 }
 interface Dependencies {
   roots: () => Promise<string[]>;

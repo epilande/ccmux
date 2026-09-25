@@ -93,6 +93,37 @@ it("scopes totals to the repo and shows its name at the right edge", async () =>
   expect(setup.captureCharFrame().trimEnd().endsWith("repo")).toBe(true);
 });
 
+it("sums the repos that answered and marks the total partial when one never did", async () => {
+  const facts: RepoFacts[] = [
+    {
+      repoRoot: "/github",
+      repoName: "github",
+      counts: { value: { prs: 4, issues: 7 }, updatedAt: 1, stale: false },
+      worktrees: {
+        value: { repoRoot: "/github", repoName: "github", worktrees: [] },
+        updatedAt: 1,
+        stale: false,
+      },
+    },
+    // No GitHub remote: counts never succeed, so the fact stays absent.
+    { repoRoot: "/local", repoName: "local" },
+  ];
+  setup = await testRender(
+    () => (
+      <ViewStrip
+        view="start"
+        scope={null}
+        sessions={2}
+        facts={facts}
+        onView={() => {}}
+      />
+    ),
+    { width: 96, height: 1 },
+  );
+  await setup.renderOnce();
+  expect(setup.captureCharFrame()).toContain("Worktrees 0 ~   Start 11 ~");
+});
+
 for (const width of [35, 36, 37]) {
   it(`fits the scope into a ${width - 36}-column budget`, async () => {
     setup = await testRender(
