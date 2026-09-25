@@ -615,7 +615,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display for the `summary`/`prompt` cell: inline → own row → off                                                 |
 | Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
 | Help                  | <kbd>?</kbd>                                                                       | Scroll the action registry's keyboard reference                                                                        |
-| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                                        |
+| Back / quit           | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Worktrees and Start go back to Sessions; Sessions exits the picker                                                     |
 
 <details>
 <summary><strong>New session dialog keys</strong></summary>
