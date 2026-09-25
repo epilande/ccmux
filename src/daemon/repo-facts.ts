@@ -53,7 +53,10 @@ interface Dependencies {
  * a failure preserves only an answer that really succeeded, marked stale. */
 export class RepoFactsCache {
   private facts = new Map<string, RepoFacts>();
-  private inFlight = new Map<string, Promise<void>>();
+  private inFlight = new Map<
+    string,
+    { promise: Promise<void>; force: boolean }
+  >();
   private attempted = new Map<string, number>();
   private requestedSources = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -213,18 +216,25 @@ export class RepoFactsCache {
     read: () => Promise<void>,
   ): Promise<void> {
     const pending = this.inFlight.get(key);
-    if (pending) return pending;
+    if (pending && (pending.force || !force)) return pending.promise;
     const last = this.attempted.get(key);
     if (
+      !pending &&
       last !== undefined &&
       this.now() - last < (force ? 2_000 : this.intervalMs)
     )
       return Promise.resolve();
     this.attempted.set(key, this.now());
-    const promise = Promise.resolve()
+    // A forced read queues behind a timer read rather than racing it, so the
+    // older answer can never land last.
+    const promise: Promise<void> = (pending?.promise ?? Promise.resolve())
+      .catch(() => {})
       .then(read)
-      .finally(() => this.inFlight.delete(key));
-    this.inFlight.set(key, promise);
+      .finally(() => {
+        if (this.inFlight.get(key)?.promise === promise)
+          this.inFlight.delete(key);
+      });
+    this.inFlight.set(key, { promise, force });
     return promise;
   }
 }

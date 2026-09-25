@@ -117,6 +117,32 @@ describe("repo facts", () => {
     await h.cache.refresh(["/repo"], true);
     expect(h.calls.prs).toBe(2);
   });
+  it("runs a forced refresh after an in-flight timer read instead of joining it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    const refreshes: boolean[] = [];
+    const cache = new RepoFactsCache({
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => repo,
+      prs: async (_root, refresh) => {
+        refreshes.push(refresh);
+        if (!refresh) await gate;
+        return { ok: true, value: refresh ? [pr] : [] };
+      },
+      issues: async () => ({ ok: true, value: [] }),
+    });
+    const timer = cache.refresh(["/repo"]);
+    await new Promise((done) => setTimeout(done, 0));
+    const forced = cache.refresh(["/repo"], true);
+    const joined = cache.refresh(["/repo"], true);
+    release();
+    await Promise.all([timer, forced, joined]);
+    expect(refreshes).toEqual([false, true]);
+    expect(cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([pr]);
+  });
   it("keeps ordinary reads fresh until the timer interval", async () => {
     const h = harness();
     await h.cache.refresh(["/repo"]);
