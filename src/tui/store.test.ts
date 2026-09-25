@@ -2328,6 +2328,18 @@ describe("store", () => {
       expect(store.flatItems()).toHaveLength(5);
     });
 
+    it("marks only visible rows, not children of a collapsed group", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "alpha" }),
+        createMockSession({ id: "c", project: "beta" }),
+      ]);
+      store.actions.toggleGroupCollapse("alpha");
+      store.actions.markAllSessions();
+      expect([...store.state.markedSessions].sort()).toEqual(["c"]);
+    });
+
     it("should move selection to header when collapsing group with selected child", () => {
       const store = createTUIStore({ groupBy: "project" });
       store.actions.setSessions([

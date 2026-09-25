@@ -138,6 +138,8 @@ const HelpLayout: ParentComponent<{
 interface HelpOverlayProps {
   sidebar?: boolean;
   reviewable?: boolean;
+  /** Preview shortcuts apply only while the Sessions view is showing. */
+  sessions?: boolean;
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
 }
 
@@ -145,7 +147,7 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
   const dims = useSharedTerminalDimensions();
 
   const grouped = () =>
-    helpGroups(props.sidebar, props.reviewable === true);
+    helpGroups(props.sidebar, props.reviewable === true, props.sessions !== false);
 
   const groups = () => grouped().filter((g) => !RIGHT_SECTIONS.has(g.section));
 

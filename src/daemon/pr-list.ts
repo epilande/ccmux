@@ -272,9 +272,43 @@ export function normalizePRList(data: PRListBody): PRListResponse {
   return { repos: data.repos ?? [], errors: data.errors ?? [] };
 }
 
+/** The head name a capped `gh` query should use. A local alias such as
+ *  `review-7` tracking `refs/heads/feature` must ask for `feature`. */
+export async function upstreamHeadName(
+  cwd: string,
+  branch: string,
+  git: GitRun = runMetadataGit,
+): Promise<string> {
+  const merge = await git(cwd, ["config", "--get", `branch.${branch}.merge`]);
+  if (merge.exitCode !== 0) return branch;
+  const ref = merge.stdout.trim();
+  return ref.startsWith("refs/heads/")
+    ? ref.slice("refs/heads/".length)
+    : branch;
+}
+
+function looksLikeRemoteUrl(value: string): boolean {
+  return value.includes("://") || value.startsWith("git@");
+}
+
+/** `git config --get` exits 1 when the key is unset. Any other failure is
+ *  unreadable identity, which must not be reported as "no association". */
+async function configGet(
+  git: GitRun,
+  cwd: string,
+  key: string,
+): Promise<{ ok: true; value: string } | { ok: false }> {
+  const result = await git(cwd, ["config", "--get", key]);
+  if (result.exitCode === 1) return { ok: true, value: "" };
+  if (result.exitCode !== 0) return { ok: false };
+  return { ok: true, value: result.stdout.trim() };
+}
+
 /** Badges allow local-ahead commits when the upstream identifies the PR.
  * Without that identity, only an exact local tip is evidence of association.
- * These are local ref/config reads; never fetch or inspect dirty files. */
+ * These are local ref/config reads; never fetch or inspect dirty files.
+ * Fork checkouts store a URL in `branch.<name>.remote` with no named remote,
+ * so the upstream atoms on `for-each-ref` are empty even when that config is set. */
 export async function associatedBranchPRs(
   cwd: string,
   branch: string,
@@ -283,26 +317,27 @@ export async function associatedBranchPRs(
 ): Promise<SourceResult<OpenPR[]>> {
   if (!prs.length) return { ok: true, value: [] };
   const ref = `refs/heads/${branch}`;
-  const refs = await git(cwd, [
-    "for-each-ref",
-    "--format=%(refname)%09%(objectname)%09%(upstream:remotename)%09%(upstream:remoteref)",
-    ref,
-  ]);
-  if (refs.exitCode !== 0)
+  const tipResult = await git(cwd, ["rev-parse", "--verify", "--quiet", ref]);
+  if (tipResult.exitCode !== 0 && tipResult.exitCode !== 1)
     return { ok: false, error: "Cannot read branch identity" };
-  // for-each-ref also lists descendants of the supplied ref prefix.
-  const row = refs.stdout
-    .split("\n")
-    .map((line) => line.split("\t"))
-    .find(([name]) => name === ref);
-  if (!row) return { ok: true, value: [] };
-  const [, tip, remote, merge] = row;
+  const tip = tipResult.exitCode === 0 ? tipResult.stdout.trim() : "";
+  if (!tip) return { ok: true, value: [] };
+  const remoteConfig = await configGet(git, cwd, `branch.${branch}.remote`);
+  const mergeConfig = await configGet(git, cwd, `branch.${branch}.merge`);
+  if (!remoteConfig.ok || !mergeConfig.ok)
+    return { ok: false, error: "Cannot read branch identity" };
+  const remote = remoteConfig.value;
+  const merge = mergeConfig.value;
   let remoteRepo = null;
   if (remote && remote !== "." && merge) {
-    const url = await git(cwd, ["remote", "get-url", "--", remote]);
-    if (url.exitCode !== 0)
-      return { ok: false, error: "Cannot read branch remote" };
-    remoteRepo = parseRepoSlug(url.stdout);
+    if (looksLikeRemoteUrl(remote)) {
+      remoteRepo = parseRepoSlug(remote);
+    } else {
+      const url = await git(cwd, ["remote", "get-url", "--", remote]);
+      if (url.exitCode !== 0)
+        return { ok: false, error: "Cannot read branch remote" };
+      remoteRepo = parseRepoSlug(url.stdout);
+    }
   }
   return {
     ok: true,

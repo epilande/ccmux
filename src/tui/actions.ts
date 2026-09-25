@@ -109,12 +109,16 @@ export const VIEWS: View[] = ["sessions", "worktrees", "start"];
 export function nextView(view: View, delta: number): View {
   return VIEWS[(VIEWS.indexOf(view) + delta + VIEWS.length) % VIEWS.length]!;
 }
-export function helpGroups(sidebar = false, reviewable = true) {
+export function helpGroups(
+  sidebar = false,
+  reviewable = true,
+  sessions = true,
+) {
   const groups: { section: string; items: { key: string; desc: string }[] }[] =
     [];
   for (const action of ACTIONS) {
-    if (sidebar && (action.section === "Preview" || action.id === "views"))
-      continue;
+    if (sidebar && action.id === "views") continue;
+    if ((sidebar || !sessions) && action.section === "Preview") continue;
     if (!reviewable && action.id === "review") continue;
     let group = groups.find((g) => g.section === action.section);
     if (!group) {
