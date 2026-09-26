@@ -147,6 +147,7 @@ interface AppProps {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   searchTranscript?: boolean;
@@ -279,6 +280,7 @@ export function App(props: AppProps) {
     promptLines: props.promptLines,
     breakpoints: props.breakpoints,
     ageFadeAfter: props.ageFadeAfter,
+    attentionBand: props.attentionBand,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
     searchTranscript: props.searchTranscript,

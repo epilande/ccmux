@@ -28,6 +28,7 @@ interface TUIOptions {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   searchTranscript?: boolean;
@@ -144,6 +145,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         promptLines={options.promptLines}
         breakpoints={options.breakpoints}
         ageFadeAfter={options.ageFadeAfter}
+        attentionBand={options.attentionBand}
         searchPaneContent={options.searchPaneContent}
         searchPaneLines={options.searchPaneLines}
         searchTranscript={options.searchTranscript}

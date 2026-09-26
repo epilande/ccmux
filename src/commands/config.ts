@@ -106,6 +106,13 @@ export const KNOWN_KEYS: Record<
       "Additional Claude config dirs to watch, as a JSON array of absolute or ~/-prefixed paths (e.g. '[\"~/.claude-personal\"]')",
     note: "Run `ccmux setup --agent claude` to install hooks into the new dirs, then restart the daemon (ccmux daemon restart)",
   },
+  attentionBand: {
+    validate: (v) => v === "true" || v === "false",
+    parse: (v) => v === "true",
+    description:
+      "Pin waiting sessions in a `needs attention` band at the top of the list (true, false; default true)",
+    choices: BOOLEAN_CHOICES,
+  },
   searchPaneContent: {
     validate: (v) => v === "true" || v === "false",
     parse: (v) => v === "true",

@@ -5007,3 +5007,57 @@ it("clears marks for sessions removed by an authoritative reconnect snapshot", (
   store.actions.setSessions([createMockSession({ id: "b" })]);
   expect([...store.state.markedSessions]).toEqual(["b"]);
 });
+describe("attention band off", () => {
+  const sessions = () => [
+    createMockSession({ id: "a", project: "alpha", status: "idle" }),
+    createMockSession({ id: "w", project: "alpha", status: "waiting" }),
+    createMockSession({ id: "b", project: "beta", status: "idle" }),
+  ];
+
+  it("keeps a waiting row in its group and out of the band", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    const keys = store
+      .flatItems()
+      .map((i) =>
+        i.type === "header" ? i.groupKey : i.filteredSession.session.id,
+      );
+    // Status order within the group, as without the band: waiting first.
+    expect(keys).toEqual(["alpha", "w", "a", "beta", "b"]);
+    expect(keys).not.toContain(NEEDS_YOU_GROUP_KEY);
+  });
+
+  it("toggleGroupCollapse moves a waiting selection to its header", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.setSelectedSessionId("w");
+    store.actions.toggleGroupCollapse("alpha");
+    expect(store.state.selectedSessionId).toBeNull();
+    expect(store.selectedHeaderKey()).toBe("alpha");
+  });
+
+  it("collapseAll moves a waiting selection to a header", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.setSelectedSessionId("w");
+    store.actions.collapseAll();
+    expect(store.state.selectedSessionId).toBeNull();
+    expect(store.flatItems()[store.selectedIndex()]?.type).toBe("header");
+  });
+
+  it("collapseParent collapses a waiting row's group", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.setSelectedSessionId("w");
+    store.actions.collapseParent();
+    expect(store.collapsedGroups().has("alpha")).toBe(true);
+    expect(store.selectedHeaderKey()).toBe("alpha");
+  });
+
+  it("kills a group's waiting members with the group", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.showGroupKillDialog("alpha");
+    expect([...store.state.confirmSessionIds].sort()).toEqual(["a", "w"]);
+  });
+});
