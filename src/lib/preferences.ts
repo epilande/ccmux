@@ -312,9 +312,31 @@ export type ThemeConfig =
       ansi?: Partial<Ansi16>;
     };
 
+/**
+ * When the picker draws a column-header line above the session list.
+ * `auto` (the default) shows it only for the flat `none` grouping, where the
+ * list reads as a table; the grouped modes put a group line between the
+ * header and the rows it labels, so they go without unless forced.
+ */
+export type ColumnHeaderMode = "auto" | "always" | "never";
+export const VALID_COLUMN_HEADER_MODES: readonly ColumnHeaderMode[] = [
+  "auto",
+  "always",
+  "never",
+];
+export const DEFAULT_COLUMN_HEADER: ColumnHeaderMode = "auto";
+
 export interface Preferences {
   /** Idle hours before rows fade; 0 disables. Default 24. */
   ageFade?: { after?: number };
+  /**
+   * Column-header line above the picker's session list (default "auto":
+   * flat grouping only, and not while the needs-attention band shows).
+   * Labels come from the resolved `columns` layout, so they follow reorders
+   * and breakpoints; only fixed-position cells get one (the fixed-width
+   * cells and the first flexible cell).
+   */
+  columnHeader?: ColumnHeaderMode;
   /** Show and refresh GitHub facts in session headers (default true). */
   headerFacts?: { pr?: boolean };
   showPreview?: boolean;

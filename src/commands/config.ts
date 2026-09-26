@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import {
   getPreferences,
   setPreferences,
+  VALID_COLUMN_HEADER_MODES,
   VALID_GROUP_BY,
   VALID_PROMPT_DISPLAYS,
   VALID_REVIEW_HANDBACK,
@@ -72,6 +73,12 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v,
     description: `Prompt display mode (${VALID_PROMPT_DISPLAYS.join(", ")}; default inline)`,
     choices: VALID_PROMPT_DISPLAYS,
+  },
+  columnHeader: {
+    validate: (v) => (VALID_COLUMN_HEADER_MODES as readonly string[]).includes(v),
+    parse: (v) => v,
+    description: `Column-header line above the picker list (${VALID_COLUMN_HEADER_MODES.join(", ")}; default auto = flat grouping only)`,
+    choices: VALID_COLUMN_HEADER_MODES,
   },
   promptLines: {
     validate: (v) => isPromptLines(v),

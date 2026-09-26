@@ -17,6 +17,8 @@ import {
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
+import type { ColumnHeaderMode, GroupBy } from "../../lib/preferences";
+import { DEFAULT_COLUMN_HEADER } from "../../lib/preferences";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { stripTerminalNoise } from "../../lib/strip-ansi";
 import { HANDOFF_PREFIX } from "../../daemon/handoff";
@@ -984,6 +986,112 @@ export function entryRightWidth(entry: ResolvedEntry): number {
 }
 
 export type { StatusMode };
+
+/**
+ * What each column is called on the header line. A label says what the DATA
+ * is, not what the config key is: the `time` cell shows how long since the
+ * session last did anything, so it is headed `age`.
+ */
+export const COLUMN_LABELS: Record<ColumnField, string> = {
+  index: "",
+  status: "status",
+  project: "project",
+  agent: "agent",
+  version: "version",
+  pane: "pane",
+  time: "age",
+  prompt: "prompt",
+  cwd: "cwd",
+  branch: "branch",
+  pr: "pr",
+  summary: "summary",
+};
+
+/** One cell on the column-header line. */
+export interface HeaderCell {
+  field: ColumnField;
+  /** Label fitted to the cell: blank when it would not fit, never cut. */
+  text: string;
+  /** Fixed column width, or 0 for the one flexible cell. */
+  width: number;
+}
+
+export interface HeaderCells {
+  left: HeaderCell[];
+  right: HeaderCell[];
+}
+
+function labelFor(entry: ResolvedEntry, width: number): string {
+  const label = COLUMN_LABELS[entry.field];
+  // A cut label ("ag", "vers") explains nothing; a blank at least does not
+  // mislead, and the cell below still holds the data.
+  return displayWidth(label) <= width ? label : "";
+}
+
+/**
+ * Project row 1 of a resolved layout onto header cells.
+ *
+ * A header is only honest over a cell whose position does not move from row
+ * to row, so this labels exactly the cells that are ANCHORED:
+ *
+ * - On the left, every fixed-width entry up to the first intrinsic-width one
+ *   (project, a flexible text cell, `pr`, ...). That entry still gets a label
+ *   because its START is fixed even though its end drifts; everything after
+ *   it floats and is left unlabeled.
+ * - On the right, the fixed-width suffix, measured from the row's right edge:
+ *   walk the entries backwards and stop at the first intrinsic-width one.
+ *
+ * Widths are the same {@link entryRightWidth} the cells render with, so a
+ * label and its column cannot disagree.
+ */
+export function columnHeaderCells(row1: ResolvedRow): HeaderCells {
+  const left: HeaderCell[] = [];
+  for (const entry of row1.left) {
+    const width = entryRightWidth(entry);
+    if (width > 0) {
+      left.push({ field: entry.field, text: labelFor(entry, width), width });
+      continue;
+    }
+    left.push({ field: entry.field, text: COLUMN_LABELS[entry.field], width: 0 });
+    break;
+  }
+  const right: HeaderCell[] = [];
+  for (let i = row1.right.length - 1; i >= 0; i--) {
+    const entry = row1.right[i]!;
+    const width = entryRightWidth(entry);
+    if (width === 0) break;
+    right.unshift({ field: entry.field, text: labelFor(entry, width), width });
+  }
+  return { left, right };
+}
+
+/** Whether a header line would carry any label at all at this layout. */
+export function hasHeaderLabels(cells: HeaderCells): boolean {
+  return [...cells.left, ...cells.right].some((c) => c.text !== "");
+}
+
+/**
+ * Whether the picker draws the column-header line under this grouping.
+ * `auto` follows the grouping: the flat list is a table and gets one; a
+ * grouped list has a group line between the header and its rows and does
+ * not. A flat list showing the `needs attention` band has group lines too,
+ * so `auto` yields while the band is up. The width gate is the caller's
+ * (the list knows its own width).
+ */
+export function showColumnHeader(
+  mode: ColumnHeaderMode | undefined,
+  groupBy: GroupBy,
+  hasGroupHeaders = false,
+): boolean {
+  switch (mode ?? DEFAULT_COLUMN_HEADER) {
+    case "always":
+      return true;
+    case "never":
+      return false;
+    default:
+      return groupBy === "none" && !hasGroupHeaders;
+  }
+}
 
 /** Repository facts belong to project headers, never to cwd or tmux groups. */
 export function groupWorktreeFacts(

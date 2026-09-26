@@ -13,6 +13,7 @@ import type {
   PromptDisplay,
   ThemeConfig,
   Preferences,
+  ColumnHeaderMode,
 } from "../lib/preferences";
 import { applyTheme } from "./theme";
 import type { GroupBy } from "./utils/grouping";
@@ -28,6 +29,7 @@ interface TUIOptions {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -145,6 +147,7 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         promptLines={options.promptLines}
         breakpoints={options.breakpoints}
         ageFadeAfter={options.ageFadeAfter}
+        columnHeader={options.columnHeader}
         attentionBand={options.attentionBand}
         searchPaneContent={options.searchPaneContent}
         searchPaneLines={options.searchPaneLines}

@@ -467,7 +467,7 @@ describe("SessionList", () => {
     ]);
   });
 
-  it("renders separator between groups but not before first", async () => {
+  it("draws every group header as a one-line rule, with no divider row", async () => {
     const items: FlatItem[] = [
       makeHeader("group1", 1),
       makeSessionItem("s1", "group1"),
@@ -475,21 +475,27 @@ describe("SessionList", () => {
       makeSessionItem("s2", "group2"),
     ];
     const frame = await renderList(items);
-    // Both groups render
-    expect(frame).toContain("group1");
-    expect(frame).toContain("group2");
-    // Separator exists between groups (the ─ character)
-    expect(frame).toContain("─");
-    // Verify separator is between groups by checking line order
     const lines = frame.split("\n");
     const group1Line = lines.findIndex((l) => l.includes("group1"));
-    const separatorLine = lines.findIndex(
-      (l, i) => i > group1Line && l.includes("─"),
-    );
     const group2Line = lines.findIndex((l) => l.includes("group2"));
     expect(group1Line).toBeGreaterThanOrEqual(0);
-    expect(separatorLine).toBeGreaterThan(group1Line);
-    expect(group2Line).toBeGreaterThan(separatorLine);
+    expect(group2Line).toBeGreaterThan(group1Line);
+    // The header line carries the rule itself...
+    expect(lines[group1Line]).toMatch(/group1 \(1\) ─+/);
+    expect(lines[group2Line]).toMatch(/group2 \(1\) ─+/);
+    // ...so no line between the groups is a bare rule.
+    for (let i = group1Line + 1; i < group2Line; i++) {
+      expect(lines[i].trim()).not.toMatch(/^─+$/);
+    }
+    // The rule ends on the column the rows' last cell does: the header is
+    // sized from the scrollbox viewport, not a guess at the scrollbar. The
+    // viewport inset lands the frame after the first layout, as in the app.
+    await setup.renderOnce();
+    const settled = setup.captureCharFrame().split("\n");
+    const header = settled[group1Line].replace(/█\s*$/, "").trimEnd();
+    const row = settled[group1Line + 1].replace(/█\s*$/, "").trimEnd();
+    expect(header).toMatch(/─$/);
+    expect(header.length).toBe(row.length);
   });
 });
 
@@ -506,5 +512,95 @@ describe("isActivePaneRow", () => {
     expect(isActivePaneRow({ tmuxPane: "%1" }, "%1")).toBe(true);
     expect(isActivePaneRow({ tmuxPane: "%1" }, "%2")).toBe(false);
     expect(isActivePaneRow({ tmuxPane: "%1" }, null)).toBe(false);
+  });
+});
+
+describe("SessionList column header", () => {
+  async function renderHeaderCase(opts: {
+    columnHeader: boolean;
+    width?: number;
+    sidebar?: boolean;
+    promptLines?: number;
+    summary?: string | null;
+  }) {
+    const [tick] = createSignal(0);
+    const items = [
+      makeSessionItem("s1", "g", {
+        tmuxTarget: "main:1.1",
+        tmuxPane: "%1",
+        agentType: "claude",
+        summary: opts.summary,
+        lastPrompt: "wrap this prompt under the row",
+      }),
+    ];
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={0}
+            previewWidth={30}
+            columnHeader={opts.columnHeader}
+            sidebar={opts.sidebar}
+            promptLines={opts.promptLines}
+          />
+        </TickContext.Provider>
+      ),
+      { width: opts.width ?? 100, height: 8 },
+    );
+    await setup.renderOnce();
+    // The header pads its right edge by the scrollbox's measured inset, which
+    // the scrollbox reports from its first layout; the frame that reads it
+    // is the next one, exactly as in the live picker.
+    await setup.renderOnce();
+    return setup.captureCharFrame().split("\n");
+  }
+
+  it("draws the labels above the rows when asked, at md and up", async () => {
+    const lines = await renderHeaderCase({ columnHeader: true });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"));
+    expect(header).toBeDefined();
+    expect(header).toContain("status");
+    expect(header).toContain("project");
+    expect(header).toContain("agent");
+    expect(header).toContain("version");
+  });
+
+  it("ends each right-side label on the column its cell ends on", async () => {
+    const lines = await renderHeaderCase({ columnHeader: true });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    // `age` is the last cell on both lines, right-aligned to the same edge.
+    expect(header.trimEnd().length).toBe(row.trimEnd().length);
+    // The pane target is right-aligned in its 12-column cell, so its last
+    // character sits under the last character of `pane`.
+    const paneEnd = header.indexOf("pane") + "pane".length;
+    const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
+    expect(paneEnd).toBe(targetEnd);
+    // The status glyph and the label share a start column.
+    expect(header.indexOf("status")).toBe(row.search(/[●○◐◯◌]/));
+  });
+
+  it("follows the block layout, which drops the prompt cell", async () => {
+    const lines = await renderHeaderCase({
+      columnHeader: true,
+      promptLines: 2,
+      summary: "wrote a summary",
+    });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    expect(header).not.toContain("prompt");
+    const paneEnd = header.indexOf("pane") + "pane".length;
+    const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
+    expect(paneEnd).toBe(targetEnd);
+  });
+
+  it("stays off when not asked, in the sidebar, and below md", async () => {
+    const off = await renderHeaderCase({ columnHeader: false });
+    expect(off.some((l) => l.includes("version"))).toBe(false);
+    const sidebar = await renderHeaderCase({ columnHeader: true, sidebar: true });
+    expect(sidebar.some((l) => l.includes("version"))).toBe(false);
+    const narrow = await renderHeaderCase({ columnHeader: true, width: 79 });
+    expect(narrow.some((l) => l.includes("version"))).toBe(false);
   });
 });

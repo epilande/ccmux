@@ -178,11 +178,14 @@ describe("rows redesign", () => {
       const rest = lines.findIndex((line) => line.includes("sessions (2)"));
       expect(band).toBeGreaterThanOrEqual(0);
       expect(rest).toBeGreaterThan(band);
-      // Same header shape as the band, with the divider every later header gets.
+      // Same one-line header shape as the band: its own rule, and no divider
+      // row above it (the line before is the band's last row).
       expect(lines[rest]!.indexOf("sessions")).toBe(
         lines[band]!.indexOf("needs attention"),
       );
-      expect(lines[rest - 1]).toContain("───");
+      expect(lines[rest]).toContain("sessions (2) ───");
+      expect(lines[band]).toContain("needs attention (1) ───");
+      expect(lines[rest - 1]).not.toMatch(/^[\s─█]*$/);
     });
   }
 

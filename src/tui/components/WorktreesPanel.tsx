@@ -622,6 +622,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     props.onModalChange?.(false);
   });
   const width = () => Math.max(4, dims().width - (props.embedded ? 2 : 4));
+  // The header's label budget, from the scrollbox viewport the rows are laid
+  // out inside (the row budgets above are a separate, deliberately
+  // conservative, estimate). The header is drawn flush right because the
+  // rows here have no right padding of their own. A viewport not yet laid
+  // out reports 0, not undefined, hence `||`. `measured` bumps on every
+  // viewport resize, which is what makes this reactive.
+  const headerWidth = () => {
+    void measured();
+    return listBox?.viewport.width || width();
+  };
   const groups = createMemo(() => {
     const candidates = new Map(
       scan()?.candidates.map((c) => [c.path, c]) ?? [],
@@ -1298,7 +1308,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                   <GroupHeader
                     label={item.repoName}
                     count={item.rows.length}
-                    width={width()}
+                    width={headerWidth()}
+                    flushRight
                     sharedBranch={groupBranch(item.repoRoot)}
                     facts={factsText(facts(item.repoRoot))}
                     prBadgeColor={

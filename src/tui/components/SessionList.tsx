@@ -11,7 +11,10 @@ import type {
   BreakpointConfig,
   PromptDisplay,
 } from "../../lib/preferences";
-import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
+import {
+  DEFAULT_BREAKPOINTS,
+  DEFAULT_PROMPT_DISPLAY,
+} from "../../lib/preferences";
 import {
   type FlatItem,
   NEEDS_YOU_GROUP_KEY,
@@ -21,10 +24,12 @@ import {
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
 import { GroupHeader } from "./GroupHeader";
-import type { ResolvedColumns } from "./session-columns";
+import type { HeaderCells, ResolvedColumns } from "./session-columns";
 import {
   resolveLayout,
   applyPromptDisplay,
+  columnHeaderCells,
+  hasHeaderLabels,
   rowHasContent,
   normalizePrompt,
   promptBlockWidth,
@@ -36,6 +41,7 @@ import {
 import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { socketErrorMessage } from "../../lib/tmux-socket";
+import { padStartWidth } from "../utils/format";
 
 interface SessionListProps {
   items: FlatItem[];
@@ -52,6 +58,12 @@ interface SessionListProps {
   dimmed?: boolean;
   ageFadeAfter?: number;
   sidebar?: boolean;
+  /**
+   * Draw the column-header line above the rows. The list still withholds it
+   * below the `md` breakpoint, where the cells it would label are gone, and
+   * when the resolved layout leaves nothing to label.
+   */
+  columnHeader?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
   /** Height of the wrapped prompt block, in lines. 0 (the default) is off. */
@@ -109,6 +121,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
   const promptBlockCache = createPromptBlockCache(normalizePrompt);
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
+  // Columns the scrollbox's viewport is narrower than the list: the
+  // scrollbar and content inset the rows are laid out inside. The header
+  // line renders OUTSIDE the scrollbox and pads by this much on the right so
+  // its cells end on the same column the rows' do.
+  const [viewportInset, setViewportInset] = createSignal(0);
   const dims = useSharedTerminalDimensions();
   const effectiveWidth = () =>
     props.showPreview
@@ -271,21 +288,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
    * scroll offset and plus the viewport's own origin — so the answer is in
    * the absolute screen coordinates a mouse event would have carried, which
    * is what `ContextMenu` clamps against.
-   *
-   * A non-first header draws a divider line above itself and `toVisualLine`
-   * counts it, so the header's own row is one line further down; anchoring on
-   * the divider would open the menu a row above the thing it belongs to.
    */
   const rowAnchor: RowAnchor = (index) => {
     const scrollbox = scrollboxRef;
     if (!scrollbox || index < 0 || index >= props.items.length) return null;
-    const item = props.items[index];
-    if (!item) return null;
-    const divider = item.type === "header" && index > 0 ? 1 : 0;
     const line =
-      toVisualLine(props.items, index, sessionLines) -
-      scrollbox.scrollTop +
-      divider;
+      toVisualLine(props.items, index, sessionLines) - scrollbox.scrollTop;
     return {
       // Indented off the list's left edge: the menu covers the row it belongs
       // to either way, and leaving the selection marker and status glyph
@@ -317,17 +325,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (item.type === "header") {
       return (
         <>
-          {index > 0 && (
-            <box height={1} paddingLeft={1} paddingRight={1}>
-              <text fg={theme.border}>
-                {"─".repeat(Math.max(0, effectiveWidth() - 5))}
-              </text>
-            </box>
-          )}
           <GroupHeader
             label={item.label}
             count={item.count}
-            width={effectiveWidth() - 3}
+            // The viewport's width, scrollbar or not, as the label budget.
+            // The rule itself is sized by layout.
+            width={effectiveWidth() - viewportInset()}
             facts={factsText(headerFacts(item))}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
@@ -376,12 +379,78 @@ export const SessionList: Component<SessionListProps> = (props) => {
     );
   };
 
+  // The head is the quietest line on screen on purpose: the strip above it
+  // owns weight and accent, rows own semantic color, and the head is told
+  // apart by being dimmer than both (the overlay color, lowercase). Caps,
+  // bold, underline and a rule beneath were all tried; each either fought
+  // the strip for its cue or cost a row.
+  const headerFg = () => (props.dimmed ? theme.border : theme.overlay);
+
+  /**
+   * Header cells for THIS layout, or null when no line should draw. Read off
+   * the same `layout()` the rows use (post prompt-mode), so an inline
+   * collapse that moves `pr` next to the project moves the labels with it.
+   * While the wrapped prompt block is on, rows drop the `prompt` cell
+   * (`withBlock`). The header follows that summary-row layout. A row with
+   * no summary also drops the flex cell, so its right edge can sit left of
+   * the labels; that case is the exception, not a second header.
+   */
+  const headerCells = createMemo(() => {
+    if (!props.columnHeader || props.sidebar) return null;
+    const md = props.breakpoints?.md ?? DEFAULT_BREAKPOINTS.md;
+    if (effectiveWidth() < md) return null;
+    const row1 = blockActive() ? withBlock().row1 : layout().row1;
+    const cells = columnHeaderCells(row1);
+    return hasHeaderLabels(cells) ? cells : null;
+  });
+
   return (
     <box
       flexDirection="column"
       width={props.showPreview ? `${100 - props.previewWidth}%` : "100%"}
       flexShrink={1}
     >
+      <Show when={props.items.length > 0 && headerCells()}>
+        {(cells: () => HeaderCells) => (
+          // Same geometry as a row: the item's 1-column padding either side
+          // (the left one is where the active `▎` draws), cells one gap
+          // apart, right-side labels right-aligned in their fixed boxes.
+          <box
+            flexDirection="row"
+            gap={1}
+            width="100%"
+            height={1}
+            paddingLeft={1}
+            paddingRight={1 + viewportInset()}
+          >
+            <For each={cells().left}>
+              {(cell) =>
+                cell.width > 0 ? (
+                  <box width={cell.width} flexShrink={0}>
+                    <text fg={headerFg()}>{cell.text}</text>
+                  </box>
+                ) : (
+                  <box flexGrow={1} flexShrink={1}>
+                    <text fg={headerFg()}>{cell.text}</text>
+                  </box>
+                )
+              }
+            </For>
+            <Show when={!cells().left.some((c) => c.width === 0)}>
+              <box flexGrow={1} flexShrink={1} />
+            </Show>
+            <For each={cells().right}>
+              {(cell) => (
+                <box width={cell.width} flexShrink={0}>
+                  <text fg={headerFg()}>
+                    {padStartWidth(cell.text, cell.width)}
+                  </text>
+                </box>
+              )}
+            </For>
+          </box>
+        )}
+      </Show>
       <Show
         when={props.items.length > 0}
         fallback={
@@ -411,7 +480,10 @@ export const SessionList: Component<SessionListProps> = (props) => {
             props.onRowAnchor?.(rowAnchor);
             // The root's resize fires before its children are measured, so
             // listen on the two nodes whose sizes the scroll effect reads.
-            const bump = () => setScrollboxLayout((v) => v + 1);
+            const bump = () => {
+              setScrollboxLayout((v) => v + 1);
+              setViewportInset(Math.max(0, r.width - r.viewport.width));
+            };
             r.viewport.on("resize", bump);
             r.content.on("resize", bump);
           }}

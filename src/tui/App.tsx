@@ -100,7 +100,10 @@ import {
   type MoveReport,
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { HANDOFF_BADGE } from "./components/session-columns";
+import {
+  HANDOFF_BADGE,
+  showColumnHeader,
+} from "./components/session-columns";
 import {
   WorktreesPanel,
   liveEffects,
@@ -117,6 +120,7 @@ import type {
   BreakpointConfig,
   PromptDisplay,
   Preferences,
+  ColumnHeaderMode,
 } from "../lib/preferences";
 import {
   getGroupKey,
@@ -147,6 +151,7 @@ interface AppProps {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -280,6 +285,7 @@ export function App(props: AppProps) {
     promptLines: props.promptLines,
     breakpoints: props.breakpoints,
     ageFadeAfter: props.ageFadeAfter,
+    columnHeader: props.columnHeader,
     attentionBand: props.attentionBand,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
@@ -4197,6 +4203,11 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             ageFadeAfter={store.state.ageFadeAfter}
+            columnHeader={showColumnHeader(
+              store.state.columnHeader,
+              store.state.groupBy,
+              store.flatItems().some((item) => item.type === "header"),
+            )}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry
