@@ -14,6 +14,7 @@ async function renderHeader(props: {
   sessionCount?: number;
   totalCount?: number;
   hideIdle?: boolean;
+  scope?: string | null;
   connectionState?: ConnectionState;
   daemonDegraded?: boolean;
   dimmed?: boolean;
@@ -26,6 +27,7 @@ async function renderHeader(props: {
         sessionCount={props.sessionCount ?? 5}
         totalCount={props.totalCount}
         hideIdle={props.hideIdle}
+        scope={props.scope}
         connectionState={props.connectionState ?? "connected"}
         daemonDegraded={props.daemonDegraded}
         dimmed={props.dimmed}
@@ -54,6 +56,34 @@ describe("Header", () => {
     const frame = await renderHeader({ sessionCount: 5 });
     expect(frame).toContain("(5)");
     expect(frame).not.toContain("/");
+  });
+
+  it("names the repo the list is narrowed to", async () => {
+    const frame = await renderHeader({
+      sessionCount: 2,
+      totalCount: 7,
+      scope: "/code/ccmux",
+    });
+    expect(frame).toContain("(2/7) ccmux");
+    expect(frame).not.toContain("/code");
+  });
+
+  it("lets a long scope give way before the degraded warning", async () => {
+    const props = {
+      sessionCount: 2,
+      totalCount: 7,
+      scope: "/code/a-repository-with-a-long-name",
+      daemonDegraded: true,
+    };
+    expect(await renderHeader({ ...props, width: 100 })).toContain(
+      "(2/7) ⚠ daemon degraded: scans failing a-repository-with-a-long-name",
+    );
+    setup.renderer.destroy();
+    const narrow = await renderHeader({ ...props, width: 60 });
+    expect(narrow).toContain(
+      "● Sessions (2/7) ⚠ daemon degraded: scans failing",
+    );
+    expect(narrow).not.toContain("a-repository-with-a-long-name");
   });
 
   it("shows active indicator when hideIdle", async () => {

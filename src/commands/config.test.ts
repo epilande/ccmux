@@ -487,6 +487,8 @@ describe("completableConfigKeys() parity with config set", () => {
       case "promptLines":
       case "sidebar.promptLines":
         return "3"; // integer 0-MAX_PROMPT_LINES
+      case "headerFacts.pr":
+        return "false";
       case "notifications.delayMs":
         return "500"; // non-negative integer
       case "notifications.command":

@@ -39,13 +39,19 @@ import {
 const ISSUE_LIST_LIMIT = 50;
 
 /** The `--json` fields a row renders, in the order gh takes them. */
-const ISSUE_LIST_FIELDS = ["number", "title", "url", "author", "labels"].join(
-  ",",
-);
+const ISSUE_LIST_FIELDS = [
+  "number",
+  "title",
+  "url",
+  "author",
+  "labels",
+  "createdAt",
+].join(",");
 
 /** One open issue, flattened to what a row shows. */
 export interface OpenIssue {
   number: number;
+  createdAt?: string | null;
   /** Control characters already stripped; see {@link stripControlChars}. */
   title: string;
   url: string;
@@ -124,7 +130,7 @@ function readIssue(raw: unknown): OpenIssue | null {
   }
   return {
     number,
-    // Sanitized HERE, at the boundary GitHub's text enters through, for the
+    createdAt: readString(row, "createdAt"), // Sanitized HERE, at the boundary GitHub's text enters through, for the
     // reason `pr-list.ts` gives: a title reaches a TUI row, the new-session
     // dialog's note and (through `seedPrompt`) an agent's opening message,
     // and only one of those would have thought to strip it.

@@ -47,6 +47,7 @@ import {
   invocationEventToSSE,
 } from "./server";
 import type { InvocationRecord } from "./invocation-manager";
+import { RepoFactsCache } from "./repo-facts";
 import type { PRListResponse } from "./pr-list";
 import type { IssueListResponse } from "./issue-list";
 import { SessionManager } from "./sessions";
@@ -9170,6 +9171,77 @@ describe("GET /prs", () => {
 
   afterEach(() => {
     if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("serves repo-fact snapshots without waiting on GitHub and accepts on-demand refresh", async () => {
+    const repo = makeRepo();
+    const { server, internals } = createServer();
+    let now = 0;
+    const calls: string[] = [];
+    const cache = new RepoFactsCache({
+      roots: async () => [repo],
+      headerPR: async () => true,
+      now: () => now,
+      local: async (root) => {
+        calls.push(root);
+        return { repoRoot: root, repoName: "repo", worktrees: [] };
+      },
+      prs: async () => ({ ok: false, error: "no login" }),
+      issues: async () => ({ ok: false, error: "no login" }),
+    });
+    (server as unknown as { repoFacts: RepoFactsCache }).repoFacts = cache;
+    const url = `http://127.0.0.1:2269/repo-facts?cwd=${encodeURIComponent(repo)}`;
+    const response = await internals.handleRequest(new Request(url));
+    expect(response.status).toBe(200);
+    const first = (await response.json()) as { repos: { repoRoot: string }[] };
+    expect(first.repos[0]?.repoRoot).toBe(repo);
+    await cache.refresh([repo]);
+    const settled = await internals.handleRequest(new Request(url));
+    expect(
+      ((await settled.json()) as { repos: unknown[] }).repos[0],
+    ).toMatchObject({ worktrees: { value: { worktrees: [] } } });
+    now = 3_000;
+    await internals.handleRequest(
+      new Request(url.replace("/repo-facts?", "/repo-facts/refresh?"), {
+        method: "POST",
+      }),
+    );
+    await cache.refresh([repo]);
+    expect(calls).toEqual([repo, repo]);
+    expect(cache.snapshot([repo])[0]?.prs).toBeUndefined();
+  });
+
+  it("resolves a polling caller's cwd once per git-info TTL", async () => {
+    const repo = makeRepo();
+    const { server, internals } = createServer();
+    const target = server as unknown as {
+      repoFacts: RepoFactsCache;
+      resolveMainRepoRoot: (dir: string) => Promise<string | null>;
+    };
+    target.repoFacts = new RepoFactsCache({
+      roots: async () => [],
+      headerPR: async () => false,
+      local: async (root) => ({
+        repoRoot: root,
+        repoName: "repo",
+        worktrees: [],
+      }),
+      prs: async () => ({ ok: false, error: "no login" }),
+      issues: async () => ({ ok: false, error: "no login" }),
+    });
+    const resolve = target.resolveMainRepoRoot.bind(server);
+    let resolutions = 0;
+    target.resolveMainRepoRoot = (dir) => {
+      resolutions++;
+      return resolve(dir);
+    };
+    const url = `http://127.0.0.1:2269/repo-facts?cwd=${encodeURIComponent(repo)}`;
+    for (let i = 0; i < 3; i++) {
+      const response = await internals.handleRequest(new Request(url));
+      const body = (await response.json()) as { repos: { repoRoot: string }[] };
+      expect(body.repos.map((r) => r.repoRoot)).toEqual([repo]);
+    }
+    expect(resolutions).toBe(1);
   });
 
   it("answers with the repo's open PRs, flattened", async () => {

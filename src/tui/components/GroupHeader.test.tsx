@@ -40,14 +40,14 @@ async function renderHeader(props: {
 describe("GroupHeader", () => {
   it("renders collapse indicator when collapsed", async () => {
     const frame = await renderHeader({ collapsed: true });
-    expect(frame).toContain("▶");
-    expect(frame).not.toContain("▼");
+    expect(frame).toContain("▸");
+    expect(frame).not.toContain("▾");
   });
 
   it("renders expand indicator when expanded", async () => {
     const frame = await renderHeader({ collapsed: false });
-    expect(frame).toContain("▼");
-    expect(frame).not.toContain("▶");
+    expect(frame).toContain("▾");
+    expect(frame).not.toContain("▸");
   });
 
   it("renders group label and count", async () => {

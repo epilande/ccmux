@@ -658,61 +658,6 @@ describe("store", () => {
     });
   });
 
-  describe("unfilteredSessions", () => {
-    it("keeps its identity across search and hide-idle changes", () => {
-      const store = createTUIStore({ groupBy: "project" });
-      store.actions.setSessions([
-        createMockSession({
-          id: "alpha",
-          project: "alpha",
-          status: "idle",
-          mainRepoRoot: "/code/alpha",
-        }),
-        createMockSession({
-          id: "beta",
-          project: "beta",
-          status: "waiting",
-          mainRepoRoot: "/code/beta",
-        }),
-      ]);
-
-      const before = store.unfilteredSessions();
-      expect(before.map((fs) => fs.session.id).sort()).toEqual([
-        "alpha",
-        "beta",
-      ]);
-
-      store.actions.setSearchQuery("alpha");
-      expect(store.filteredSessions().length).toBe(1);
-      expect(store.unfilteredSessions()).toBe(before);
-
-      store.actions.setSearchQuery("");
-      store.actions.toggleHideIdle();
-      expect(store.filteredSessions().length).toBe(1);
-      expect(store.unfilteredSessions()).toBe(before);
-    });
-
-    it("rebuilds when session membership changes", () => {
-      const store = createTUIStore({ groupBy: "project" });
-      store.actions.setSessions([
-        createMockSession({ id: "alpha", mainRepoRoot: "/code/alpha" }),
-      ]);
-      const before = store.unfilteredSessions();
-
-      store.actions.setSessions([
-        createMockSession({ id: "alpha", mainRepoRoot: "/code/alpha" }),
-        createMockSession({ id: "gamma", mainRepoRoot: "/code/gamma" }),
-      ]);
-      const after = store.unfilteredSessions();
-
-      expect(after).not.toBe(before);
-      expect(after.map((fs) => fs.session.mainRepoRoot).sort()).toEqual([
-        "/code/alpha",
-        "/code/gamma",
-      ]);
-    });
-  });
-
   describe("hideIdle", () => {
     it("should default to false", () => {
       const store = createTUIStore();
@@ -2381,6 +2326,18 @@ describe("store", () => {
 
       store.actions.toggleGroupCollapse("alpha");
       expect(store.flatItems()).toHaveLength(5);
+    });
+
+    it("marks only visible rows, not children of a collapsed group", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "alpha" }),
+        createMockSession({ id: "c", project: "beta" }),
+      ]);
+      store.actions.toggleGroupCollapse("alpha");
+      store.actions.markAllSessions();
+      expect([...store.state.markedSessions].sort()).toEqual(["c"]);
     });
 
     it("should move selection to header when collapsing group with selected child", () => {
@@ -4997,6 +4954,59 @@ describe("search over the agent's summary", () => {
   });
 });
 
+describe("scope selection and mark lifetime", () => {
+  for (const via of ["scope", "worktrees", "start"] as const) {
+    it(`reconciles hidden selection when ${via} changes repository`, () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", mainRepoRoot: "/a" }),
+        createMockSession({ id: "b", mainRepoRoot: "/b" }),
+      ]);
+      store.actions.setSelectedSessionId("a");
+      if (via === "scope") store.actions.setScope("/b");
+      else if (via === "worktrees") store.actions.showWorktrees("/b");
+      else store.actions.showSourcePicker("/b");
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedFlatItem()?.type).toBe("session");
+      expect(store.state.selectedSessionId).toBeNull();
+      store.actions.setSelectedSessionId("b");
+      store.actions.setScope(null);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+  }
+  it("drops a hidden header and does not revive it when widening", () => {
+    const store = createTUIStore({ groupBy: "project" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "a", mainRepoRoot: "/a" }),
+      createMockSession({ id: "b", project: "b", mainRepoRoot: "/b" }),
+    ]);
+    store.actions.setSelectedIndex(0);
+    expect(store.selectedHeaderKey()).not.toBeNull();
+    store.actions.setScope("/b");
+    expect(store.selectedHeaderKey()).toBeNull();
+    expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["b"]);
+  });
+  it("removal clears only that row's mark before its ID can be reused", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    const a = createMockSession({ id: "a" });
+    store.actions.setSessions([a, createMockSession({ id: "b" })]);
+    store.actions.markSessions(["a", "b"]);
+    store.actions.removeSession("a");
+    store.actions.addSession(a);
+    expect([...store.state.markedSessions]).toEqual(["b"]);
+  });
+});
+
+it("clears marks for sessions removed by an authoritative reconnect snapshot", () => {
+  const store = createTUIStore();
+  store.actions.setSessions([
+    createMockSession({ id: "a" }),
+    createMockSession({ id: "b" }),
+  ]);
+  store.actions.markSessions(["a", "b"]);
+  store.actions.setSessions([createMockSession({ id: "b" })]);
+  expect([...store.state.markedSessions]).toEqual(["b"]);
+});
 describe("attention band off", () => {
   const sessions = () => [
     createMockSession({ id: "a", project: "alpha", status: "idle" }),

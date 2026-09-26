@@ -1,3 +1,4 @@
+import { readRepoSourceCounts } from "./repo-source-counts";
 import { statSync } from "node:fs";
 import { basename, relative, isAbsolute, resolve } from "node:path";
 import {
@@ -135,10 +136,13 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
+import { RepoFactsCache, wireRepoFacts } from "./repo-facts";
 import {
   countRepoWorktrees,
+  listRepoWorktreeInventory,
   listAllWorktrees,
   type WorktreeCount,
+  type WorktreeCountsResponse,
 } from "./worktree-list";
 import { listOpenPRs, type OpenPR, type PRListResponse } from "./pr-list";
 import {
@@ -627,6 +631,11 @@ export class DaemonServer {
   private warnedAboutGitFlags = false;
   /** Coalesces concurrent lookups for one cwd onto a single git spawn. */
   private gitInfoInflight = new Map<string, Promise<GitInfo>>();
+  /** `/repo-facts` caller directories resolved to a main checkout root. */
+  private repoFactsRootCache = new Map<
+    string,
+    { root: string | null; expiresAt: number }
+  >();
   private prResolver: PRResolver;
   private lastActivePaneId: string | null = null;
   /**
@@ -654,7 +663,27 @@ export class DaemonServer {
   /** Reads the daemon's live scan-health snapshot. Follows the getPaneCache /
    *  getAgentByType accessor pattern so the server never imports daemon state. */
   private getScanHealth: () => DaemonHealth;
-  /** When each repo last had `git fetch --prune` run for a prune scan. */
+  private headerPR = true;
+  private repoFacts = new RepoFactsCache({
+    roots: () => this.cachedSessionRepoRoots(),
+    local: (root) => listRepoWorktreeInventory(root),
+    counts: (root) => readRepoSourceCounts(root),
+    prs: (root, refresh) => this.openPRsFor(root, refresh),
+    branchPRs: (root, branch, refresh) =>
+      this.branchPRCache.answer(`${root}\0${branch}`, refresh === true, () =>
+        listOpenPRs(root, undefined, branch),
+      ),
+    issues: (root, refresh) => this.openIssuesFor(root, refresh),
+    headerPR: async () => {
+      this.headerPR = (await getPreferences()).headerFacts?.pr !== false;
+      return this.headerPR;
+    },
+  });
+
+  startRepoFacts(): void {
+    this.repoFacts.start();
+  }
+
   private worktreeFetchedAt = new Map<string, number>();
   /** Share overlapping header reads; completed counts are not cached. */
   private worktreeCountsInflight = new Map<
@@ -672,6 +701,12 @@ export class DaemonServer {
    * on {@link RepoAnswerCache}.
    */
   private prListCache = new RepoAnswerCache<OpenPR[]>({
+    ttlMs: SOURCE_LIST_TTL_MS,
+    failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
+  });
+  /** Repo facts' capped-list branch queries (`gh pr list --head`), on the
+   *  repo-wide list's TTLs. The session resolver keeps its own cache. */
+  private branchPRCache = new RepoAnswerCache<OpenPR[]>({
     ttlMs: SOURCE_LIST_TTL_MS,
     failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
   });
@@ -815,6 +850,7 @@ export class DaemonServer {
    * clears a cold cache much faster than that.
    */
   private sweepBranchPRs(): void {
+    if (!this.headerPR) return;
     const paneCache = this.getPaneCache();
     const sessions = this.sessionManager
       .getSessions()
@@ -1045,9 +1081,10 @@ export class DaemonServer {
     const gitBranch = gitInfo.branch ?? session.gitBranch;
     // Synchronous cache read; the resolver refreshes in the background and
     // onBranchPRsChanged re-broadcasts when a lookup lands a new value.
-    const branchPRs = localOnly
-      ? null
-      : this.prResolver.get(effectiveCwd, gitBranch);
+    const branchPRs =
+      localOnly || !this.headerPR
+        ? null
+        : this.prResolver.get(effectiveCwd, gitBranch);
     // Derived exactly like tmuxTarget, off the same paneInfo: a Claude
     // invoke runs inside a `ccmux-invoke-<id>` detached session, so the
     // pane's sessionName carries the invocation id. No cold-cache
@@ -1253,6 +1290,7 @@ export class DaemonServer {
   }
 
   stop(): void {
+    this.repoFacts.stop();
     this.removePaneFocusHook();
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
@@ -1387,6 +1425,30 @@ export class DaemonServer {
 
     if (path === "/issues" && req.method === "GET") {
       return await this.handleIssueList(url, corsHeaders);
+    }
+
+    if (
+      (path === "/repo-facts" && req.method === "GET") ||
+      (path === "/repo-facts/refresh" && req.method === "POST")
+    ) {
+      const roots = await this.repoFactsRoots(
+        url.searchParams.get("repo"),
+        url.searchParams.get("cwd"),
+      );
+      void this.repoFacts
+        .refresh(
+          roots,
+          req.method === "POST",
+          url.searchParams.get("sources") === "1",
+        )
+        .catch(() => {});
+      return Response.json(
+        {
+          repos: wireRepoFacts(this.repoFacts.snapshot(roots)),
+          headerPR: (await getPreferences()).headerFacts?.pr !== false,
+        },
+        { headers: corsHeaders },
+      );
     }
 
     if (path === "/worktrees" && req.method === "GET") {
@@ -1717,6 +1779,50 @@ export class DaemonServer {
     return [...roots];
   }
 
+  /** The same roots as `sessionRepoRoots(enrichSessions(...))`, read from the
+   *  git-info cache alone: every open TUI polls `/repo-facts` every 2s. */
+  private async cachedSessionRepoRoots(): Promise<string[]> {
+    const paneCache = this.getPaneCache();
+    const infos = await Promise.all(
+      this.sessionManager
+        .getSessions()
+        .map((session) =>
+          this.getGitInfo(this.effectiveCwd(session, paneCache)),
+        ),
+    );
+    return [...new Set(infos.flatMap((info) => info.mainRepoRoot ?? []))];
+  }
+
+  private async cachedMainRepoRoot(dir: string): Promise<string | null> {
+    const cached = this.repoFactsRootCache.get(dir);
+    if (cached && cached.expiresAt > Date.now()) return cached.root;
+    const root = await this.resolveMainRepoRoot(dir);
+    this.repoFactsRootCache.set(dir, {
+      root,
+      expiresAt: Date.now() + GIT_INFO_CACHE_TTL_MS,
+    });
+    return root;
+  }
+
+  /** `worktreeRepoRoots` for the polled facts endpoint. Resolutions may be up
+   *  to one git-info TTL old, which only delays a new repo's first facts. */
+  private async repoFactsRoots(
+    filter: string | null,
+    cwd: string | null,
+  ): Promise<string[]> {
+    if (filter) {
+      const resolved = await this.cachedMainRepoRoot(filter);
+      return resolved ? [resolved] : [];
+    }
+    const roots = await this.cachedSessionRepoRoots();
+    if (cwd) {
+      const resolved = await this.cachedMainRepoRoot(cwd);
+      const seen = new Set(roots.map(normalizePath));
+      if (resolved && !seen.has(normalizePath(resolved))) roots.push(resolved);
+    }
+    return roots;
+  }
+
   /**
    * The repos every worktree surface works over: listing, prune
    * classification and the prune run itself, which MUST agree — the run
@@ -1830,7 +1936,8 @@ export class DaemonServer {
           count !== null &&
           normalizePath(count.repoRoot) !== normalizePath(this.homeDir),
       );
-      return Response.json({ repos }, { headers });
+      const response: WorktreeCountsResponse = { repos };
+      return Response.json(response, { headers });
     } catch (err) {
       return Response.json(
         { error: `Failed to count worktrees: ${errorMessage(err)}` },

@@ -179,14 +179,3 @@ export function prDetailPhrases(
 export function prRowLabel(pr: OpenPR): string {
   return `#${pr.number} ${pr.title}`;
 }
-
-/**
- * Whether a PR's label is drawn dimmer than the rest of its list.
- *
- * A draft is on GitHub but is not asking for anything yet, and a list of open
- * PRs exists to point at what is. Callers apply their own cursor colour on
- * top of this, so it answers about the PR alone.
- */
-export function prRowDim(pr: OpenPR): boolean {
-  return pr.isDraft;
-}

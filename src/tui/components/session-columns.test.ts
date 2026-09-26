@@ -280,7 +280,11 @@ describe("resolveColumns defaults", () => {
 describe("resolveSidebarColumns", () => {
   it("uses sidebar defaults when no user override", () => {
     const cols = resolveSidebarColumns(40);
-    expect(cols.row1.left.map((e) => e.field)).toEqual(["status", "project"]);
+    expect(cols.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+    ]);
     expect(cols.row1.right.map((e) => e.field)).toEqual(["pr", "agent"]);
     expect(cols.row1.right[0]?.mode).toBe("short");
     expect(cols.row1.right[1]?.mode).toBe("short");
@@ -874,7 +878,11 @@ describe("rowHasFlexText", () => {
 
 describe("SIDEBAR_DEFAULT_COLUMNS", () => {
   it("has status/project on row1 left and pr/agent shorts on right", () => {
-    expect(SIDEBAR_DEFAULT_COLUMNS.row1?.left).toEqual(["status", "project"]);
+    expect(SIDEBAR_DEFAULT_COLUMNS.row1?.left).toEqual([
+      "index",
+      "status",
+      "project",
+    ]);
     expect(SIDEBAR_DEFAULT_COLUMNS.row1?.right).toEqual([
       "pr:short",
       "agent:short",

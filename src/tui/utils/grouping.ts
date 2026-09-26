@@ -205,22 +205,6 @@ export function groupSessions(
   return [...groups.entries()].map(([key, members]) => ({ key, members }));
 }
 
-/** Repository facts belong only to an unambiguous project group. */
-export function groupRepoRoot(
-  members: FilteredSession[],
-  groupBy: GroupBy,
-): string | undefined {
-  const root =
-    members[0]?.session.mainRepoRoot ?? members[0]?.session.worktreeRoot;
-  return groupBy === "project" &&
-    root &&
-    members.every(
-      ({ session }) => (session.mainRepoRoot ?? session.worktreeRoot) === root,
-    )
-    ? root
-    : undefined;
-}
-
 export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
 export const NEEDS_YOU_GROUP_LABEL = "needs attention";
 
@@ -356,7 +340,17 @@ export function buildFlatItems(
   );
   for (const { key, members } of sorted) {
     const isCollapsed = !isSearching && collapsed.has(key);
-    const repoRoot = groupRepoRoot(members, groupBy);
+    const root =
+      members[0]?.session.mainRepoRoot ?? members[0]?.session.worktreeRoot;
+    const repoRoot =
+      groupBy === "project" &&
+      root &&
+      members.every(
+        ({ session }) =>
+          (session.mainRepoRoot ?? session.worktreeRoot) === root,
+      )
+        ? root
+        : undefined;
     const tmuxName = (fs: FilteredSession) =>
       fs.session.tmuxTarget?.split(":")[0];
     const firstTmux = tmuxName(members[0]!);

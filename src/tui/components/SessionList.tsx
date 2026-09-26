@@ -1,18 +1,7 @@
-import { getDaemonUrl } from "../../lib/config";
-import type {
-  WorktreeCount,
-  WorktreeCountsResponse,
-} from "../../daemon/worktree-list";
-import { groupWorktreeFacts } from "./session-columns";
+import type { RepoFactsResponse } from "../../daemon/repo-facts";
+import { branchPRs, factsText } from "../utils/repo-facts";
 import type { Component } from "solid-js";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Show,
-  onCleanup,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
@@ -25,10 +14,6 @@ import type {
 import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
 import {
   type FlatItem,
-  type FilteredSession,
-  type GroupBy,
-  groupSessions,
-  groupRepoRoot,
   NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
   scrollTarget,
@@ -54,17 +39,8 @@ import { socketErrorMessage } from "../../lib/tmux-socket";
 
 interface SessionListProps {
   items: FlatItem[];
-  /**
-   * Full session membership: before the search and status filters that shape
-   * `items`, and before waiting rows are moved out of their home groups.
-   *
-   * Only the worktree-counts scope below reads it. That scope costs a
-   * `git worktree list` per repo on the daemon, so it must change when
-   * sessions come and go and stay put while the user is only narrowing what
-   * is displayed.
-   */
-  sessions?: FilteredSession[];
-  groupBy?: GroupBy;
+  repoFacts?: RepoFactsResponse;
+  marks?: Set<string>;
   selectedIndex: number;
   iconStyle?: IconStyle;
   showPreview?: boolean;
@@ -75,7 +51,6 @@ interface SessionListProps {
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
   ageFadeAfter?: number;
-  connectionState?: string;
   sidebar?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
@@ -129,7 +104,6 @@ export function isActivePaneRow(
 /** Columns a keyboard-opened row menu is inset from the list's left edge, so
  *  the row it belongs to is still identifiable underneath it. */
 const ROW_MENU_INDENT = 2;
-const WORKTREE_REFRESH_MS = 30_000;
 
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
@@ -140,77 +114,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
     props.showPreview
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
-
-  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeCount[]>([]);
-  const repoScope = createMemo(() =>
-    JSON.stringify(
-      [
-        ...new Set(
-          groupSessions(props.sessions ?? [], props.groupBy ?? "none").flatMap(
-            ({ members }) => {
-              const root = groupRepoRoot(members, props.groupBy ?? "none");
-              return root ? [root] : [];
-            },
-          ),
-        ),
-      ].sort(),
-    ),
-  );
-  createEffect(() => {
-    const roots: string[] = JSON.parse(repoScope());
-    const connected = props.connectionState;
-    const scope = new Set(roots);
-    setWorktreeRepos((repos) =>
-      repos.filter((repo) => scope.has(repo.repoRoot)),
-    );
-    if (roots.length === 0 || connected !== "connected") return;
-    const query = new URLSearchParams();
-    for (const root of roots) query.append("repo", root);
-    const controller = new AbortController();
-    let latestRequest = 0;
-    const refresh = () => {
-      const request = ++latestRequest;
-      return fetch(`${getDaemonUrl()}/worktrees/counts?${query}`, {
-        signal: AbortSignal.any([
-          controller.signal,
-          AbortSignal.timeout(15_000),
-        ]),
-      })
-        .then((response) =>
-          response.ok
-            ? (response.json() as Promise<WorktreeCountsResponse>)
-            : null,
-        )
-        .then((response) => {
-          if (
-            !controller.signal.aborted &&
-            request === latestRequest &&
-            response
-          )
-            setWorktreeRepos((prev) => {
-              const returned = new Set(
-                response.repos.map((repo) => repo.repoRoot),
-              );
-              return [
-                ...prev.filter(
-                  (repo) =>
-                    scope.has(repo.repoRoot) && !returned.has(repo.repoRoot),
-                ),
-                ...response.repos,
-              ];
-            });
-        })
-        .catch(() => {});
-    };
-    void refresh();
-    // Worktrees can change through another picker or the CLI without any
-    // session membership changing. Keep the last answer until a refresh lands.
-    const timer = setInterval(() => void refresh(), WORKTREE_REFRESH_MS);
-    onCleanup(() => {
-      clearInterval(timer);
-      controller.abort();
-    });
-  });
 
   /**
    * Whether rows draw the wrapped block at all, decided ONCE for the list.
@@ -247,6 +150,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
       !!props.sidebar,
     );
   });
+
+  function enriched(item: Extract<FlatItem, { type: "session" }>) {
+    const session = item.filteredSession.session;
+    if (!props.repoFacts) return session;
+    return {
+      ...session,
+      branchPRs: props.repoFacts.headerPR
+        ? branchPRs(session, props.repoFacts.repos)
+        : [],
+    };
+  }
 
   /**
    * The layout for a row whose block is drawn and whose agent DID write a
@@ -381,6 +295,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
     };
   };
 
+  const headerFacts = (item: Extract<FlatItem, { type: "header" }>) => {
+    const root = item.repoRoot;
+    if (
+      !root ||
+      !item.members.every(
+        (m) => (m.session.mainRepoRoot ?? m.session.worktreeRoot) === root,
+      )
+    )
+      return undefined;
+    return props.repoFacts?.repos.find((r) => r.repoRoot === root);
+  };
   const renderItem = (item: FlatItem, index: number) => {
     const onActivate = props.onActivate
       ? () => props.onActivate!(item, index)
@@ -403,7 +328,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             label={item.label}
             count={item.count}
             width={effectiveWidth() - 3}
-            facts={groupWorktreeFacts(item, worktreeRepos())}
+            facts={factsText(headerFacts(item))}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}
@@ -417,7 +342,8 @@ export const SessionList: Component<SessionListProps> = (props) => {
     }
     return (
       <SessionItem
-        session={item.filteredSession.session}
+        session={enriched(item)}
+        marked={props.marks?.has(item.filteredSession.session.id)}
         selected={index === props.selectedIndex}
         index={getSessionIndex(props.items, index)}
         highlights={item.filteredSession.highlights}
