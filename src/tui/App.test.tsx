@@ -917,6 +917,38 @@ describe("App sidebar mode", () => {
     }
   });
 
+  it("shows the scope and hidden count when s narrows the sidebar", async () => {
+    await renderApp(40, 20, { sidebar: true, groupBy: "none" });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "a",
+          project: "one",
+          status: "working",
+          tmuxPane: "%1",
+          mainRepoRoot: "/code/alpha",
+        }),
+        mockEnrichedSession({
+          id: "b",
+          project: "two",
+          status: "working",
+          tmuxPane: "%2",
+          mainRepoRoot: "/code/beta",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    setup.mockInput.pressKey("j");
+    setup.mockInput.pressKey("s");
+    await setup.renderOnce();
+    // `j` selects the second session, so its repo is the scope.
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("(1/2) beta");
+    expect(frame).toMatch(/^ 1 /m);
+    expect(frame).not.toMatch(/^ 2 /m);
+  });
+
   it("flashes pane on Enter selection in sidebar mode", async () => {
     await renderApp(30, 20, { sidebar: true });
     sseCallbacks!.onInit(
@@ -1392,7 +1424,7 @@ describe("App waiting-row group movement", () => {
         setup.mockInput.pressKey("x");
         await setup.renderOnce();
         expect(setup.captureCharFrame()).toContain("Kill Session?");
-        expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+        expect(setup.captureCharFrame()).not.toContain("Kill Sessions?");
       },
     );
   }
@@ -1625,7 +1657,7 @@ describe("App kill/restart dispatch routing", () => {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
-      expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+      expect(setup.captureCharFrame()).not.toContain("Kill Sessions?");
       expect(calls.some((c) => c.url.endsWith("/kill"))).toBe(false);
       setup.mockInput.pressKey("m");
       await setup.renderOnce();
@@ -1669,7 +1701,7 @@ describe("App kill/restart dispatch routing", () => {
         await setup.renderOnce();
       }
       let frame = setup.captureCharFrame();
-      expect(frame).not.toContain("Kill Group?");
+      expect(frame).not.toContain("Kill Sessions?");
       expect(frame).not.toContain("Kill Session?");
       expect(frame).not.toContain("Kill All");
       setup.mockInput.pressKey("m");
@@ -1755,7 +1787,7 @@ describe("App kill/restart dispatch routing", () => {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
-      expect(setup.captureCharFrame()).toContain("Kill Group?");
+      expect(setup.captureCharFrame()).toContain("Kill Sessions?");
       setup.mockInput.pressKey("y");
       await setup.renderOnce();
       expect(
@@ -1763,6 +1795,29 @@ describe("App kill/restart dispatch routing", () => {
           .filter((c) => c.url.endsWith("/kill"))
           .map((c) => c.url.split("/sessions/")[1]),
       ).toEqual(["b/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("names a marked kill by the marks, not the selected group header", async () => {
+    const { restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", status: "working" }),
+          mockEnrichedSession({ id: "b", project: "beta", status: "working" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      for (const key of ["j", " ", "j", "j", " ", "g", "g", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Marked sessions (2 sessions)");
     } finally {
       restore();
     }

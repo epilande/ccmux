@@ -26,9 +26,15 @@ export interface RepoFacts {
   counts?: RepoFact<RepoSourceCounts>;
   branchPRs?: Record<string, RepoFact<BranchPR[]>>;
 }
+/** What `/repo-facts` sends. The source lists stay daemon-side for branch
+ *  association; Start reads its own through `/prs` and `/issues`. */
+export type WireRepoFacts = Omit<RepoFacts, "prs" | "issues">;
 export interface RepoFactsResponse {
-  repos: RepoFacts[];
+  repos: WireRepoFacts[];
   headerPR: boolean;
+}
+export function wireRepoFacts(repos: RepoFacts[]): WireRepoFacts[] {
+  return repos.map(({ prs: _prs, issues: _issues, ...rest }) => rest);
 }
 interface Dependencies {
   roots: () => Promise<string[]>;
@@ -45,18 +51,25 @@ interface Dependencies {
     refresh?: boolean,
   ) => Promise<SourceResult<OpenPR[]>>;
   associate?: typeof associatedBranchPRs;
+  upstream?: (root: string, branch: string) => Promise<string>;
   headerPR: () => Promise<boolean>;
   now?: () => number;
 }
 
 /** Read-through snapshots never await GitHub. Each source publishes independently;
- * a failure preserves only an answer that really succeeded, marked stale. */
+ * a failure preserves only an answer that really succeeded, marked stale.
+ * The timer runs only while snapshots are being read: with no client
+ * watching, it would spend the user's GitHub quota for nobody. */
 export class RepoFactsCache {
   private facts = new Map<string, RepoFacts>();
-  private inFlight = new Map<string, Promise<void>>();
+  private inFlight = new Map<
+    string,
+    { promise: Promise<void>; force: boolean }
+  >();
   private attempted = new Map<string, number>();
   private requestedSources = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | undefined;
+  private readAt: number | undefined;
   private now: () => number;
   constructor(
     private deps: Dependencies,
@@ -65,6 +78,7 @@ export class RepoFactsCache {
     this.now = deps.now ?? Date.now;
   }
   snapshot(roots: string[]): RepoFacts[] {
+    this.readAt = this.now();
     return roots.map(
       (root) =>
         this.facts.get(root) ?? {
@@ -76,6 +90,11 @@ export class RepoFactsCache {
   start(): void {
     if (this.timer) return;
     const tick = async () => {
+      if (
+        this.readAt === undefined ||
+        this.now() - this.readAt > 2 * this.intervalMs
+      )
+        return;
       const roots = await this.deps.roots();
       await this.refresh(roots);
     };
@@ -175,11 +194,7 @@ export class RepoFactsCache {
                   facts.counts.value.prs <= all.value.length);
               const result = complete
                 ? { ok: true as const, value: all.value }
-                : await this.deps.branchPRs?.(
-                    root,
-                    await upstreamHeadName(root, branch),
-                    force,
-                  );
+                : await this.branchQuery(root, branch, force);
               if (!result?.ok) throw new Error("unavailable");
               const associated = await (
                 this.deps.associate ?? associatedBranchPRs
@@ -207,24 +222,55 @@ export class RepoFactsCache {
       }
     });
   }
+  /** A branch cut from origin/main tracks `main`, so its PR is only found under
+   *  its own name; query both when the upstream head differs. */
+  private async branchQuery(
+    root: string,
+    branch: string,
+    force: boolean,
+  ): Promise<SourceResult<OpenPR[]> | undefined> {
+    const lookup = this.deps.branchPRs;
+    if (!lookup) return undefined;
+    const upstream = await (this.deps.upstream ?? upstreamHeadName)(
+      root,
+      branch,
+    );
+    const names = upstream === branch ? [branch] : [upstream, branch];
+    const results = await Promise.all(
+      names.map((name) => lookup(root, name, force)),
+    );
+    const byNumber = new Map<number, OpenPR>();
+    for (const result of results) {
+      if (!result.ok) return result;
+      for (const pr of result.value) byNumber.set(pr.number, pr);
+    }
+    return { ok: true, value: [...byNumber.values()] };
+  }
   private run(
     key: string,
     force: boolean,
     read: () => Promise<void>,
   ): Promise<void> {
     const pending = this.inFlight.get(key);
-    if (pending) return pending;
+    if (pending && (pending.force || !force)) return pending.promise;
     const last = this.attempted.get(key);
     if (
+      !pending &&
       last !== undefined &&
       this.now() - last < (force ? 2_000 : this.intervalMs)
     )
       return Promise.resolve();
     this.attempted.set(key, this.now());
-    const promise = Promise.resolve()
+    // A forced read queues behind a timer read rather than racing it, so the
+    // older answer can never land last.
+    const promise: Promise<void> = (pending?.promise ?? Promise.resolve())
+      .catch(() => {})
       .then(read)
-      .finally(() => this.inFlight.delete(key));
-    this.inFlight.set(key, promise);
+      .finally(() => {
+        if (this.inFlight.get(key)?.promise === promise)
+          this.inFlight.delete(key);
+      });
+    this.inFlight.set(key, { promise, force });
     return promise;
   }
 }

@@ -9211,6 +9211,39 @@ describe("GET /prs", () => {
     expect(cache.snapshot([repo])[0]?.prs).toBeUndefined();
   });
 
+  it("resolves a polling caller's cwd once per git-info TTL", async () => {
+    const repo = makeRepo();
+    const { server, internals } = createServer();
+    const target = server as unknown as {
+      repoFacts: RepoFactsCache;
+      resolveMainRepoRoot: (dir: string) => Promise<string | null>;
+    };
+    target.repoFacts = new RepoFactsCache({
+      roots: async () => [],
+      headerPR: async () => false,
+      local: async (root) => ({
+        repoRoot: root,
+        repoName: "repo",
+        worktrees: [],
+      }),
+      prs: async () => ({ ok: false, error: "no login" }),
+      issues: async () => ({ ok: false, error: "no login" }),
+    });
+    const resolve = target.resolveMainRepoRoot.bind(server);
+    let resolutions = 0;
+    target.resolveMainRepoRoot = (dir) => {
+      resolutions++;
+      return resolve(dir);
+    };
+    const url = `http://127.0.0.1:2269/repo-facts?cwd=${encodeURIComponent(repo)}`;
+    for (let i = 0; i < 3; i++) {
+      const response = await internals.handleRequest(new Request(url));
+      const body = (await response.json()) as { repos: { repoRoot: string }[] };
+      expect(body.repos.map((r) => r.repoRoot)).toEqual([repo]);
+    }
+    expect(resolutions).toBe(1);
+  });
+
   it("answers with the repo's open PRs, flattened", async () => {
     const repo = makeRepo();
     const { internals } = createServer();

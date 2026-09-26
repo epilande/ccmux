@@ -6,6 +6,8 @@ interface HeaderProps {
   sessionCount: number;
   totalCount?: number;
   hideIdle?: boolean;
+  /** Repo root the list is narrowed to; the sidebar has no strip to show it. */
+  scope?: string | null;
   connectionState: ConnectionState;
   /** Daemon scans have been failing long enough to serve stale state;
    *  surfaces a warning segment when true. */
@@ -33,21 +35,39 @@ export const Header: Component<HeaderProps> = (props) => {
   return (
     <box width="100%" height={1} paddingLeft={1} paddingRight={1}>
       <box flexDirection="row" width="100%">
-        <text fg={c(dotColor(props.connectionState))}>● </text>
-        <text fg={c(theme.text)}>
+        <text flexShrink={0} fg={c(dotColor(props.connectionState))}>
+          ●{" "}
+        </text>
+        <text flexShrink={0} fg={c(theme.text)}>
           <b>Sessions</b>
         </text>
-        <text fg={c(theme.overlay)}>
+        <text flexShrink={0} fg={c(theme.overlay)}>
           {" "}
           ({props.sessionCount}
           {props.totalCount != null ? `/${props.totalCount}` : ""})
         </text>
-        {props.hideIdle && <text fg={c(theme.yellow)}> [active]</text>}
+        {props.hideIdle && (
+          <text flexShrink={0} fg={c(theme.yellow)}>
+            {" "}
+            [active]
+          </text>
+        )}
         {props.invokeInFlight ? (
-          <text fg={c(theme.peach)}> · {props.invokeInFlight} invoking</text>
+          <text flexShrink={0} fg={c(theme.peach)}>
+            {" "}
+            · {props.invokeInFlight} invoking
+          </text>
         ) : null}
         {props.daemonDegraded ? (
-          <text fg={c(theme.yellow)}> ⚠ daemon degraded: scans failing</text>
+          <text flexShrink={0} fg={c(theme.yellow)}>
+            {" "}
+            ⚠ daemon degraded: scans failing
+          </text>
+        ) : null}
+        {/* The only segment allowed to shrink: a long repo name gives way
+            before any signal does. */}
+        {props.scope ? (
+          <text fg={c(theme.blue)}> {props.scope.split("/").pop()}</text>
         ) : null}
       </box>
     </box>

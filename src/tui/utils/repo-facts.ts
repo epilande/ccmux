@@ -9,6 +9,8 @@ export function createRepoFacts(options: {
   connected: () => boolean;
   sources: () => boolean;
   cwd: () => string;
+  /** A hidden sidebar stops polling and catches up when shown again. */
+  visible?: () => boolean;
 }) {
   const [data, setData] = createSignal<RepoFactsResponse>({
     repos: [],
@@ -17,6 +19,7 @@ export function createRepoFacts(options: {
   let generation = 0;
   let requestId = 0;
   let appliedRequest = 0;
+  let appliedBody = "";
   async function refresh(force = false) {
     const current = generation;
     const request = ++requestId;
@@ -31,13 +34,18 @@ export function createRepoFacts(options: {
         signal: AbortSignal.timeout(10_000),
       });
       if (!response.ok) return;
-      const next = (await response.json()) as RepoFactsResponse;
+      const body = await response.text();
+      const next = JSON.parse(body) as RepoFactsResponse;
       if (
         current === generation &&
         request > appliedRequest &&
         Array.isArray(next.repos)
       ) {
         appliedRequest = request;
+        // Most polls repeat the last answer; an identical one must not hand
+        // every row a new object to reconcile.
+        if (body === appliedBody) return;
+        appliedBody = body;
         setData(next);
       }
     } catch {
@@ -46,12 +54,13 @@ export function createRepoFacts(options: {
   }
   createEffect(() => {
     const connected = options.connected();
+    const visible = options.visible?.() ?? true;
     void options.sources();
     generation++;
     onCleanup(() => {
       generation++;
     });
-    if (!connected) return;
+    if (!connected || !visible) return;
     void refresh();
     const timer = setInterval(() => void refresh(), 2_000);
     onCleanup(() => clearInterval(timer));

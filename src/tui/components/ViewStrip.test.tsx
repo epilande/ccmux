@@ -135,6 +135,39 @@ it("scopes totals to the repo and names it, colored, at the right edge", async (
   expect(scope?.fg.toInts()).toEqual(hex(theme.blue));
 });
 
+it("sums the repos that answered and marks the total partial when one never did", async () => {
+  const facts: RepoFacts[] = [
+    {
+      repoRoot: "/github",
+      repoName: "github",
+      counts: { value: { prs: 4, issues: 7 }, updatedAt: 1, stale: false },
+      worktrees: {
+        value: { repoRoot: "/github", repoName: "github", worktrees: [] },
+        updatedAt: 1,
+        stale: false,
+      },
+    },
+    // No GitHub remote: counts never succeed, so the fact stays absent.
+    { repoRoot: "/local", repoName: "local" },
+  ];
+  setup = await testRender(
+    () => (
+      <ViewStrip
+        view="start"
+        scope={null}
+        sessions={2}
+        facts={facts}
+        onView={() => {}}
+      />
+    ),
+    { width: 96, height: 1 },
+  );
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Worktrees ·0~");
+  expect(frame).toContain("Start ·11~");
+});
+
 // Tabs cost 37 columns here (`── Sessions ·2 ── Worktrees ── Start `), the
 // padding 2 and the scope dressing 11: the scope's name gets `width - 50`.
 // Below the tabs' own width the strip CLIPS (line 2 must stay blank: OpenTUI

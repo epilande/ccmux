@@ -1377,6 +1377,7 @@ export function App(props: AppProps) {
     connected: () => store.state.connectionState === "connected",
     sources: () => view() === "start",
     cwd: () => pickerCwd(),
+    visible: () => isVisible(),
   });
   function switchMainView(next: View) {
     if (
@@ -1445,7 +1446,11 @@ export function App(props: AppProps) {
       .flatItems()
       .find((item) => item.type === "header" && item.groupKey === cm.groupKey);
     store.actions.hideGroupContextMenu();
-    if (!header || header.type !== "header" || isSyntheticGroupKey(header.groupKey))
+    if (
+      !header ||
+      header.type !== "header" ||
+      isSyntheticGroupKey(header.groupKey)
+    )
       return;
     const repo =
       header.members
@@ -3876,7 +3881,12 @@ export function App(props: AppProps) {
             .map((s) => s.session.id);
           const sessionToKill = store.selectedSession();
           if (marked.length) {
-            store.actions.showConfirmDialog(null, "kill-group", marked);
+            store.actions.showConfirmDialog(
+              null,
+              "kill-group",
+              marked,
+              "Marked sessions",
+            );
             break;
           }
           if (sessionToKill) {
@@ -4125,11 +4135,13 @@ export function App(props: AppProps) {
           <Header
             sessionCount={store.filteredSessions().length}
             totalCount={
+              store.state.scope ||
               store.state.hideIdle ||
               (store.state.searchMode && store.state.searchQuery)
                 ? store.sortedSessions().length
                 : undefined
             }
+            scope={store.state.scope}
             hideIdle={store.state.hideIdle}
             connectionState={store.state.connectionState}
             daemonDegraded={store.state.daemonHealth.degraded}
@@ -4295,7 +4307,12 @@ export function App(props: AppProps) {
               onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
               onKillAll={(ids) => {
                 if (ids.length)
-                  store.actions.showConfirmDialog(null, "kill-group", ids);
+                  store.actions.showConfirmDialog(
+                    null,
+                    "kill-group",
+                    ids,
+                    "Sessions in these worktrees",
+                  );
               }}
               repo={panel().repo}
               cwd={pickerCwd()}
@@ -4351,7 +4368,12 @@ export function App(props: AppProps) {
               }}
               onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
               onKill={(ids) =>
-                store.actions.showConfirmDialog(null, "kill-group", ids)
+                store.actions.showConfirmDialog(
+                  null,
+                  "kill-group",
+                  ids,
+                  "Sessions on these checkouts",
+                )
               }
               onReview={
                 props.sidebar
@@ -4400,7 +4422,7 @@ export function App(props: AppProps) {
                   ? store.state.confirmSessionIds.length
                   : store.filteredSessions().length
             }
-            groupLabel={store.selectedGroupHeader()?.label}
+            groupLabel={store.state.confirmLabel ?? undefined}
             onConfirm={confirmDialogAction}
             onCancel={cancelConfirmDialog}
           />
@@ -4480,7 +4502,7 @@ export function App(props: AppProps) {
           <HelpOverlay
             sidebar={props.sidebar}
             reviewable={reviewEnabled}
-            sessions={view() === "sessions"}
+            view={view()}
             onScrollboxRef={(ref) => (helpScrollbox = ref)}
           />
         </Show>

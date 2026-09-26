@@ -501,7 +501,7 @@ Worktrees shows one line per checkout: its name and branch, PR or removal reason
 
 Start combines open PRs and issues in one list grouped by repo. Rows stay one line, with compact checks, review, draft, labels and branch metadata; author and age appear where space permits. <kbd>/</kbd> filters both kinds. <kbd>Enter</kbd> starts work from the source or goes to its existing checkout, shown as `→ name`. <kbd>n</kbd> creates a new session here; <kbd>N</kbd> opens Start from any view.
 
-Strip counts and group-header facts come from a daemon cache refreshed on a timer and with <kbd>R</kbd>. Missing `gh`, login or remote produces no badge or marker; a previously successful lookup that later fails keeps its value with `~`. `ccmux config set headerFacts.pr false` disables header/session PR badges and background GitHub polling. Start can still load sources when opened.
+Strip counts and group-header facts come from a daemon cache refreshed on a timer and with <kbd>R</kbd>. Missing `gh`, login or remote produces no badge or marker; a previously successful lookup that later fails keeps its value with `~`. Across all repos, a strip total sums the repos that answered and is marked `~` while any repo has not. `ccmux config set headerFacts.pr false` disables header/session PR badges and background GitHub polling. Start can still load sources when opened.
 
 The local worktree list paints first; removal classification arrives independently without moving rows. <kbd>Space</kbd> marks a row (or a header's group), <kbd>a</kbd> marks all, and <kbd>A</kbd> clears marks. A mark replaces the row number with `✓`. <kbd>x</kbd> removes marked worktrees or the cursor's worktree, after checking eligibility and confirming the consequences. A selection containing a non-removable row is refused. Dirty files get a separate Y/N question during confirmation; the list stays one line. See the [key migration note](docs/tui-views-migration.md).
 
@@ -615,7 +615,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display for the `summary`/`prompt` cell: inline → own row → off                                                 |
 | Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
 | Help                  | <kbd>?</kbd>                                                                       | Scroll the action registry's keyboard reference                                                                        |
-| Quit                  | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Exit the picker                                                                                                        |
+| Back / quit           | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Worktrees and Start go back to Sessions; Sessions exits the picker                                                     |
 
 <details>
 <summary><strong>New session dialog keys</strong></summary>
