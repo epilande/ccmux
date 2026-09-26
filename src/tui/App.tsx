@@ -2183,7 +2183,7 @@ export function App(props: AppProps) {
   function groupMenuItems(): ContextMenuItem[] {
     const cm = store.state.groupContextMenu;
     const isCollapsed = cm ? store.collapsedGroups().has(cm.groupKey) : false;
-    const items: ContextMenuItem[] = [
+    return [
       {
         // One id for both labels: it is one action whose name reflects the
         // group's current state, and a highlight must not drop off it because
@@ -2230,17 +2230,6 @@ export function App(props: AppProps) {
         action: groupContextMenuKill,
       },
     ];
-    return cm && isSyntheticGroupKey(cm.groupKey)
-      ? items.filter(
-          (item) =>
-            item.id !== "kill-group" &&
-            item.id !== "new-session" &&
-            item.id !== "worktrees" &&
-            item.id !== "collapse" &&
-            item.id !== "pin-top" &&
-            item.id !== "pin-bottom",
-        )
-      : items;
   }
 
   /** Kill a normal session, but cancel an invoke-driven row cleanly
