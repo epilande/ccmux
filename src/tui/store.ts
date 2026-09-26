@@ -663,6 +663,8 @@ interface TUIStoreOptions {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  /** Pin waiting sessions in the `needs attention` band (default true). */
+  attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   /** TTL (ms) for the search pane-content cache (issue #55). Defaults to
@@ -811,6 +813,7 @@ const PROMPT_DISPLAY_LABEL: Record<PromptDisplay, string> = {
 
 export function createTUIStore(options: TUIStoreOptions = {}) {
   const [tick, setTick] = createSignal(0);
+  const attentionBand = options.attentionBand ?? true;
   const searchPaneContentEnabled = options.searchPaneContent ?? true;
   const searchPaneLines = options.searchPaneLines ?? 100;
   const searchTranscriptEnabled = options.searchTranscript ?? true;
@@ -1402,6 +1405,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       collapsedGroups(),
       isSearching,
       pinnedGroups(),
+      attentionBand,
     );
   });
 
@@ -1527,6 +1531,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       return i;
     }
     return null;
+  }
+
+  /** A waiting row sits in the band, outside its home group, only while the band is on. */
+  function inBand(session: EnrichedSession): boolean {
+    return attentionBand && session.status === "waiting";
   }
 
   function activeGroupKeys(): Set<string> {
@@ -2673,7 +2682,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             );
             if (
               session &&
-              session.status !== "waiting" &&
+              !inBand(session) &&
               getGroupKey(session, state.groupBy) === groupKey
             ) {
               setState("selectedSessionId", null);
@@ -2691,8 +2700,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const keys = activeGroupKeys();
       setCollapsedGroups(keys);
       persistCollapsedGroups(keys);
-      // Waiting rows remain visible outside the collapsed groups.
-      if (state.selectedSessionId && selectedSession()?.status !== "waiting") {
+      // Band rows remain visible outside the collapsed groups.
+      const selected = selectedSession();
+      if (state.selectedSessionId && !(selected && inBand(selected))) {
         setState("selectedSessionId", null);
         const firstHeader = items.find(
           (i) => i.type === "header" && !isSyntheticGroupKey(i.groupKey),
@@ -2714,7 +2724,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         (s) => s.id === state.selectedSessionId,
       );
       if (!session) return;
-      if (session.status === "waiting") return;
+      if (inBand(session)) return;
       const groupKey = getGroupKey(session, state.groupBy);
       if (state.groupBy === "none" || !groupKey) return;
       setState("selectedSessionId", null);

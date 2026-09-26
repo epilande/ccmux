@@ -288,6 +288,7 @@ export function sortGroups(
  * Build the flat item list from filtered sessions, applying grouping,
  * sorting, and collapse state.
  * During search, all groups are forced expanded.
+ * With `attentionBand` off, waiting sessions stay in their own groups.
  */
 export function buildFlatItems(
   filtered: FilteredSession[],
@@ -295,6 +296,7 @@ export function buildFlatItems(
   collapsed: Set<string>,
   isSearching: boolean,
   pinnedGroups: string[] = [],
+  attentionBand = true,
 ): FlatItem[] {
   const waitingStartedAt = (fs: FilteredSession): number => {
     const parsed = Date.parse(
@@ -302,10 +304,12 @@ export function buildFlatItems(
     );
     return Number.isNaN(parsed) ? 0 : parsed;
   };
+  const inBand = (fs: FilteredSession) =>
+    attentionBand && fs.session.status === "waiting";
   const waiting = filtered
-    .filter((fs) => fs.session.status === "waiting")
+    .filter(inBand)
     .sort((a, b) => waitingStartedAt(a) - waitingStartedAt(b));
-  const rest = filtered.filter((fs) => fs.session.status !== "waiting");
+  const rest = filtered.filter((fs) => !inBand(fs));
   const items: FlatItem[] = [];
   if (waiting.length) {
     items.push({
