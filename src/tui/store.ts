@@ -1562,7 +1562,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     persistUIState({ collapsedGroups: pruned });
   }
 
-  /** Keep the action target aligned with the row returning from the band. */
+  /**
+   * Keep the action target aligned with a selected row whose wait ended.
+   * A row the filters now remove is deselected either way. Only a row
+   * returning from the band expands its group: with the band off it never
+   * left, so a collapsed group stays collapsed.
+   */
   function reconcileWaitingSelection(wasWaiting: boolean) {
     if (!wasWaiting || !state.selectedSessionId) return;
     const selected = state.sessions.find(
@@ -1575,6 +1580,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("previewFocused", false);
       return;
     }
+    if (!attentionBand) return;
     const key = getGroupKey(selected, state.groupBy);
     if (state.groupBy === "none" || !collapsedGroups().has(key)) return;
     const expanded = new Set(collapsedGroups());

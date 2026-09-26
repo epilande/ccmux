@@ -5050,4 +5050,26 @@ describe("attention band off", () => {
     store.actions.showGroupKillDialog("alpha");
     expect([...store.state.confirmSessionIds].sort()).toEqual(["a", "w"]);
   });
+
+  it("leaves a collapsed group collapsed when its selected wait ends", async () => {
+    // Launch selection picks the active pane's session even inside a
+    // collapsed group. The row never left that group, so nothing expands.
+    const persisted: Record<string, unknown>[] = [];
+    const store = createTUIStore({
+      groupBy: "project",
+      attentionBand: false,
+      collapsedGroups: ["alpha"],
+      onPersistState: (updates) => {
+        persisted.push(updates);
+      },
+    });
+    const initial = sessions();
+    store.actions.setSessions(initial);
+    store.actions.setSelectedSessionId("w");
+    store.actions.updateSession({ ...initial[1]!, status: "idle" });
+    await waitForDebounce();
+    expect(store.collapsedGroups().has("alpha")).toBe(true);
+    expect(store.state.selectedSessionId).toBe("w");
+    expect(persisted.some((u) => "collapsedGroups" in u)).toBe(false);
+  });
 });
