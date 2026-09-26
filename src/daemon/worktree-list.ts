@@ -28,6 +28,7 @@ import {
   readSymlinkDirectories,
   readUpstreamStates,
   runGit,
+  runMetadataGit,
   type GitRun,
   type UpstreamState,
 } from "./worktree-git";
@@ -90,6 +91,35 @@ export interface WorktreeRepo {
 /** Body of `GET /worktrees`. */
 export interface WorktreeListResponse {
   repos: WorktreeRepo[];
+}
+
+export interface WorktreeCount {
+  repoRoot: string;
+  hasMain: boolean;
+  linked: number;
+}
+
+/** Body of `GET /worktrees/counts?repo=...` (repeat repo for multiple roots). */
+export interface WorktreeCountsResponse {
+  repos: WorktreeCount[];
+}
+
+/** Header facts need only metadata, never dirty state or upstream scans. */
+export async function countRepoWorktrees(
+  repoRoot: string,
+  git: GitRun = runMetadataGit,
+): Promise<WorktreeCount | null> {
+  const entries = await listWorktrees(repoRoot, git);
+  const main = entries.find((entry) => entry.isMain);
+  if (!main) return null;
+  const present = entries.filter(
+    (entry) => !entry.bare && existsSync(entry.path),
+  );
+  return {
+    repoRoot: main.path,
+    hasMain: present.some((entry) => entry.isMain),
+    linked: present.filter((entry) => !entry.isMain).length,
+  };
 }
 
 export interface ListDeps {

@@ -10,7 +10,6 @@ import {
   scrollTarget,
   sortGroups,
   groupSessions,
-  headerGroupKeys,
   type FilteredSession,
   type GroupEntry,
 } from "./grouping";
@@ -182,47 +181,6 @@ describe("groupSessions", () => {
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === "dev")?.members).toHaveLength(2);
     expect(groups.find((g) => g.key === "work")?.members).toHaveLength(1);
-  });
-});
-
-describe("headerGroupKeys", () => {
-  it("extracts group keys from header items", () => {
-    const items = buildFlatItems(
-      [
-        toFiltered(mockSession({ id: "a", project: "alpha" })),
-        toFiltered(mockSession({ id: "b", project: "beta" })),
-      ],
-      "project",
-      new Set(),
-      false,
-    );
-    expect(headerGroupKeys(items)).toEqual(["alpha", "beta"]);
-  });
-
-  it("returns empty array when no headers (groupBy none)", () => {
-    const items = buildFlatItems(
-      [toFiltered(mockSession({ id: "a" }))],
-      "none",
-      new Set(),
-      false,
-    );
-    expect(headerGroupKeys(items)).toEqual([]);
-  });
-
-  it("skips session items", () => {
-    const items = buildFlatItems(
-      [
-        toFiltered(mockSession({ id: "a", project: "alpha" })),
-        toFiltered(mockSession({ id: "b", project: "alpha" })),
-        toFiltered(mockSession({ id: "c", project: "alpha" })),
-      ],
-      "project",
-      new Set(),
-      false,
-    );
-    // 1 header + 3 sessions = 4 items, but only 1 group key
-    expect(items).toHaveLength(4);
-    expect(headerGroupKeys(items)).toEqual(["alpha"]);
   });
 });
 
@@ -951,9 +909,100 @@ describe("buildFlatItems with pinnedGroups", () => {
       headers[2].type === "header"
     ) {
       // alphabetical regardless of status
-      expect(headers[0].label).toBe("alpha");
-      expect(headers[1].label).toBe("beta");
+      expect(headers[0].label).toBe("needs attention");
+      expect(headers[1].label).toBe("alpha");
       expect(headers[2].label).toBe("charlie");
     }
+  });
+
+  it("sorts a waiting session with no timestamps as oldest", () => {
+    const sessions = [
+      toFiltered(
+        mockSession({
+          id: "dated-late",
+          status: "waiting",
+          statusChangedAt: "2024-01-15T13:00:00Z",
+        }),
+      ),
+      toFiltered(
+        mockSession({
+          id: "undated",
+          status: "waiting",
+          statusChangedAt: null,
+          lastActivityAt: null,
+        }),
+      ),
+      toFiltered(
+        mockSession({
+          id: "dated-early",
+          status: "waiting",
+          statusChangedAt: "2024-01-15T12:00:00Z",
+        }),
+      ),
+    ];
+    const items = buildFlatItems(sessions, "none", new Set(), false);
+    const ids = items
+      .filter((item) => item.type === "session")
+      .map((item) => item.filteredSession.session.id);
+    expect(ids).toEqual(["undated", "dated-early", "dated-late"]);
+  });
+});
+
+describe("buildFlatItems with the attention band off", () => {
+  const sessions = () => [
+    toFiltered(mockSession({ id: "a", project: "alpha", status: "idle" })),
+    toFiltered(mockSession({ id: "b", project: "alpha", status: "waiting" })),
+    toFiltered(mockSession({ id: "c", project: "beta", status: "waiting" })),
+  ];
+
+  it("keeps waiting rows in their own groups", () => {
+    const items = buildFlatItems(
+      sessions(),
+      "project",
+      new Set(),
+      false,
+      [],
+      false,
+    );
+    expect(
+      items.map((i) =>
+        i.type === "header" ? `# ${i.label}` : i.filteredSession.session.id,
+      ),
+    ).toEqual(["# alpha", "a", "b", "# beta", "c"]);
+    const alpha = items[0];
+    if (alpha?.type === "header") expect(alpha.count).toBe(2);
+  });
+
+  it("leaves the flat list without synthetic headers", () => {
+    const items = buildFlatItems(
+      sessions(),
+      "none",
+      new Set(),
+      false,
+      [],
+      false,
+    );
+    expect(items.every((i) => i.type === "session")).toBe(true);
+    expect(
+      items.map((i) =>
+        i.type === "session" ? i.filteredSession.session.id : "",
+      ),
+    ).toEqual(["a", "b", "c"]);
+  });
+
+  it("hides a waiting row inside its collapsed group", () => {
+    const items = buildFlatItems(
+      sessions(),
+      "project",
+      new Set(["alpha"]),
+      false,
+      [],
+      false,
+    );
+    expect(
+      items.map((i) =>
+        i.type === "header" ? `# ${i.label}` : i.filteredSession.session.id,
+      ),
+    ).toEqual(["# alpha", "# beta", "c"]);
   });
 });

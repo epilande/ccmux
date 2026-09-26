@@ -73,6 +73,7 @@ import {
   rmSync,
 } from "fs";
 import { createWorktree } from "./worktree-create";
+import * as worktreeList from "./worktree-list";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { resolvedHomeDir } from "../lib/config";
@@ -7473,6 +7474,67 @@ describe("worktree list endpoint", () => {
     expect(res.status).toBe(200);
     return (await res.json()) as ListBody;
   }
+
+  it("counts only explicitly requested repos without reading sessions or PRs", async () => {
+    const { repo } = makeListFixture();
+    const ctx = createServer();
+    const sessionRead = spyOn(ctx.manager, "getSessions");
+    const prRead = spyOn(ctx.internals.prResolver, "get");
+    try {
+      const query = new URLSearchParams();
+      query.append("repo", repo);
+      query.append("repo", repo);
+      const res = await ctx.internals.handleRequest(
+        new Request(`http://127.0.0.1:2269/worktrees/counts?${query}`),
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        repos: [{ repoRoot: realpathSync(repo), hasMain: true, linked: 1 }],
+      });
+      expect(sessionRead).not.toHaveBeenCalled();
+      expect(prRead).not.toHaveBeenCalled();
+      const unscoped = await ctx.internals.handleRequest(
+        new Request("http://127.0.0.1:2269/worktrees/counts"),
+      );
+      expect(unscoped.status).toBe(400);
+    } finally {
+      sessionRead.mockRestore();
+      prRead.mockRestore();
+    }
+  });
+
+  it("shares concurrent count reads and refreshes after completion", async () => {
+    const { repo } = makeListFixture();
+    const ctx = createServer();
+    const count = { repoRoot: realpathSync(repo), hasMain: true, linked: 1 };
+    const pending = Promise.withResolvers<worktreeList.WorktreeCount | null>();
+    const read = spyOn(worktreeList, "countRepoWorktrees").mockReturnValue(
+      pending.promise,
+    );
+    const request = () =>
+      ctx.internals.handleRequest(
+        new Request(
+          `http://127.0.0.1:2269/worktrees/counts?repo=${encodeURIComponent(repo)}`,
+        ),
+      );
+    try {
+      const first = request();
+      const second = request();
+      expect(read).toHaveBeenCalledTimes(1);
+      pending.resolve(count);
+      for (const response of await Promise.all([first, second])) {
+        expect(await response.json()).toEqual({ repos: [count] });
+      }
+      read.mockResolvedValue({ ...count, linked: 2 });
+      expect(await (await request()).json()).toEqual({
+        repos: [{ ...count, linked: 2 }],
+      });
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      pending.resolve(count);
+      read.mockRestore();
+    }
+  });
 
   it("lists the main checkout and an in-flight worktree of a session's repo", async () => {
     const { repo, worktree } = makeListFixture();

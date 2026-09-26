@@ -1,5 +1,10 @@
 import { describe, it, expect, mock } from "bun:test";
-import type { FlatItem } from "./utils/grouping";
+import {
+  getGroupKey,
+  NEEDS_YOU_GROUP_KEY,
+  SESSIONS_GROUP_KEY,
+  type FlatItem,
+} from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
 import { MAX_TURNS } from "../daemon/transcript-read";
 
@@ -653,6 +658,61 @@ describe("store", () => {
     });
   });
 
+  describe("unfilteredSessions", () => {
+    it("keeps its identity across search and hide-idle changes", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "alpha",
+          project: "alpha",
+          status: "idle",
+          mainRepoRoot: "/code/alpha",
+        }),
+        createMockSession({
+          id: "beta",
+          project: "beta",
+          status: "waiting",
+          mainRepoRoot: "/code/beta",
+        }),
+      ]);
+
+      const before = store.unfilteredSessions();
+      expect(before.map((fs) => fs.session.id).sort()).toEqual([
+        "alpha",
+        "beta",
+      ]);
+
+      store.actions.setSearchQuery("alpha");
+      expect(store.filteredSessions().length).toBe(1);
+      expect(store.unfilteredSessions()).toBe(before);
+
+      store.actions.setSearchQuery("");
+      store.actions.toggleHideIdle();
+      expect(store.filteredSessions().length).toBe(1);
+      expect(store.unfilteredSessions()).toBe(before);
+    });
+
+    it("rebuilds when session membership changes", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "alpha", mainRepoRoot: "/code/alpha" }),
+      ]);
+      const before = store.unfilteredSessions();
+
+      store.actions.setSessions([
+        createMockSession({ id: "alpha", mainRepoRoot: "/code/alpha" }),
+        createMockSession({ id: "gamma", mainRepoRoot: "/code/gamma" }),
+      ]);
+      const after = store.unfilteredSessions();
+
+      expect(after).not.toBe(before);
+      expect(after.map((fs) => fs.session.mainRepoRoot).sort()).toEqual([
+        "/code/alpha",
+        "/code/gamma",
+      ]);
+    });
+  });
+
   describe("hideIdle", () => {
     it("should default to false", () => {
       const store = createTUIStore();
@@ -1000,7 +1060,74 @@ describe("store", () => {
         attentionType: "permission",
       });
       expect(store.selectedSession()?.id).toBe("s2");
-      expect(store.selectedIndex()).toBe(0);
+      expect(store.selectedIndex()).toBe(1);
+    });
+
+    for (const groupBy of ["project", "cwd", "session", "window"] as const) {
+      for (const delivery of ["update", "snapshot"] as const) {
+        for (const status of ["working", "idle"] as const) {
+          it(`keeps a selected wait visible when returning to collapsed ${groupBy} via ${delivery} as ${status}`, () => {
+            const waiting = createMockSession({
+              id: "selected-wait",
+              status: "waiting",
+              project: "alpha",
+              cwd: "/code/alpha",
+              tmuxTarget: "dev:1.0",
+            });
+            const groupKey = getGroupKey(waiting, groupBy);
+            const store = createTUIStore({
+              groupBy,
+              collapsedGroups: [groupKey, "untouched"],
+            });
+            store.actions.setSessions([waiting]);
+            store.actions.setSelectedIndex(1);
+            const returned = { ...waiting, status };
+            if (delivery === "update") store.actions.updateSession(returned);
+            else store.actions.setSessions([returned]);
+
+            expect(store.collapsedGroups().has(groupKey)).toBe(false);
+            expect(store.collapsedGroups().has("untouched")).toBe(true);
+            expect(store.selectedFlatItem()).toMatchObject({
+              type: "session",
+              groupKey,
+              filteredSession: { session: { id: waiting.id, status } },
+            });
+            expect(store.selectedSession()?.id).toBe(waiting.id);
+          });
+        }
+      }
+    }
+
+    it("leaves an unselected wait's destination collapsed", () => {
+      const waiting = createMockSession({
+        id: "wait",
+        status: "waiting",
+        project: "alpha",
+      });
+      const store = createTUIStore({
+        groupBy: "project",
+        collapsedGroups: ["alpha"],
+      });
+      store.actions.setSessions([waiting]);
+      store.actions.setSelectedIndex(0);
+      store.actions.updateSession({ ...waiting, status: "working" });
+      expect(store.collapsedGroups().has("alpha")).toBe(true);
+      expect(store.selectedSession()).toBeNull();
+    });
+
+    it("clears the hidden action target when hide-idle filters a returning wait", () => {
+      const waiting = createMockSession({
+        id: "wait",
+        status: "waiting",
+        attentionState: null,
+      });
+      const store = createTUIStore({ groupBy: "project", hideIdle: true });
+      store.actions.setSessions([waiting]);
+      store.actions.setSelectedIndex(1);
+      store.actions.updateSession({ ...waiting, status: "idle" });
+      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedFlatItem()).toBeNull();
     });
 
     it("moveSelection should navigate correctly", () => {
@@ -1280,8 +1407,8 @@ describe("store", () => {
       });
       store.actions.setSessions([s1, s2]);
 
-      // Explicitly select s1 (waiting, at index 0)
-      store.actions.setSelectedIndex(0);
+      // The waiting row follows the band header.
+      store.actions.setSelectedIndex(1);
       expect(store.selectedSession()?.id).toBe("s1");
 
       // s1 transitions waiting → working (sort priority changes from 0 to 1)
@@ -1314,8 +1441,8 @@ describe("store", () => {
       });
       store.actions.setSessions([s1, s2]);
 
-      // Select s1 and enter preview focus (simulating user tabbing into preview)
-      store.actions.setSelectedIndex(0);
+      // Select the waiting row after the band header, then focus preview.
+      store.actions.setSelectedIndex(1);
       store.actions.enterPreviewFocus();
       expect(store.state.previewFocused).toBe(true);
       expect(store.selectedSession()?.id).toBe("s1");
@@ -2291,6 +2418,39 @@ describe("store", () => {
       expect(store.flatItems()).toHaveLength(4);
     });
 
+    it.each(["waiting", "working", "idle"] as const)(
+      "collapseAll preserves only a waiting selection: %s",
+      (status) => {
+        const store = createTUIStore({ groupBy: "project" });
+        store.actions.setSessions([
+          createMockSession({ id: "selected", project: "alpha", status }),
+          createMockSession({
+            id: "sibling",
+            project: "alpha",
+            status: "idle",
+          }),
+          createMockSession({ id: "other", project: "beta", status: "idle" }),
+        ]);
+        store.actions.setSelectedSessionId("selected");
+
+        store.actions.collapseAll();
+
+        expect([...store.collapsedGroups()].sort()).toEqual(["alpha", "beta"]);
+        const selectedItem = store.flatItems()[store.selectedIndex()];
+        if (status === "waiting") {
+          expect(store.selectedSession()?.id).toBe("selected");
+          expect(store.selectedHeaderKey()).toBeNull();
+          expect(selectedItem?.type).toBe("session");
+          if (selectedItem?.type === "session") {
+            expect(selectedItem.filteredSession.session.id).toBe("selected");
+          }
+        } else {
+          expect(store.state.selectedSessionId).toBeNull();
+          expect(selectedItem?.type).toBe("header");
+        }
+      },
+    );
+
     it("should collapse parent group from session", () => {
       const store = createTUIStore({ groupBy: "project" });
       store.actions.setSessions([
@@ -2370,6 +2530,77 @@ describe("store", () => {
       expect(persisted).toContainEqual({ collapsedGroups: [] });
     });
 
+    for (const groupBy of ["project", "cwd", "session", "window"] as const) {
+      const alpha = createMockSession({
+        id: "a",
+        project: "alpha",
+        cwd: "/alpha",
+        tmuxTarget: "alpha:0.0",
+        status: "waiting",
+      });
+      const beta = createMockSession({
+        id: "b",
+        project: "beta",
+        cwd: "/beta",
+        tmuxTarget: "beta:0.0",
+        status: "waiting",
+      });
+      const alphaKey = getGroupKey(alpha, groupBy);
+      const betaKey = getGroupKey(beta, groupBy);
+
+      it(`preserves an all-waiting ${groupBy} group across persistence and reload`, async () => {
+        let saved: string[] | undefined;
+        const store = createTUIStore({
+          groupBy,
+          collapsedGroups: [alphaKey, betaKey, "stale"],
+          onPersistState: (updates) => {
+            saved = updates.collapsedGroups;
+          },
+        });
+        store.actions.setSessions([{ ...alpha }, { ...beta }]);
+        store.actions.setSelectedSessionId("b");
+        store.actions.updateSession({ ...beta, status: "working" });
+        await waitForDebounce();
+
+        expect(saved).toEqual([alphaKey]);
+        store.actions.reloadUIState({ collapsedGroups: saved });
+        store.actions.updateSession({ ...alpha, status: "working" });
+        expect(store.collapsedGroups().has(alphaKey)).toBe(true);
+        expect(
+          store
+            .flatItems()
+            .some(
+              (item) =>
+                item.type === "session" &&
+                item.filteredSession.session.id === "a",
+            ),
+        ).toBe(false);
+      });
+
+      it(`collapseAll includes an all-waiting ${groupBy} group`, () => {
+        const store = createTUIStore({ groupBy });
+        store.actions.setSessions([{ ...alpha }, { ...beta, status: "idle" }]);
+        expect(
+          store.state.sessions.find((session) => session.id === "a")?.status,
+        ).toBe("waiting");
+        store.actions.setSelectedSessionId("b");
+        store.actions.collapseAll();
+        expect([...store.collapsedGroups()].sort()).toEqual(
+          [alphaKey, betaKey].sort(),
+        );
+        store.actions.updateSession({ ...alpha, status: "working" });
+        expect(
+          store
+            .flatItems()
+            .some(
+              (item) =>
+                item.type === "session" &&
+                item.filteredSession.session.id === "a",
+            ),
+        ).toBe(false);
+      });
+    }
+
     it("should persist collapsed groups on collapseParent", async () => {
       const persisted: Record<string, unknown>[] = [];
       const store = createTUIStore({
@@ -2427,6 +2658,107 @@ describe("store", () => {
       await waitForDebounce();
       expect(persisted).toContainEqual({ collapsedGroups: ["alpha"] });
     });
+
+    it("keeps band preview members but refuses a band bulk-kill", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha", status: "waiting" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+      store.actions.moveSelection(-999);
+      expect(store.selectedGroupHeader()?.groupKey).toBe(NEEDS_YOU_GROUP_KEY);
+      expect(store.selectedGroupSessions()).toHaveLength(2);
+      store.actions.showGroupKillDialog(NEEDS_YOU_GROUP_KEY);
+      expect(store.state.confirmMode).toBe(false);
+      // Explicit selections in other views are independent of this header.
+      store.actions.showConfirmDialog(null, "kill-group", ["a"]);
+      expect(store.state.confirmMode).toBe(true);
+      expect(store.state.confirmSessionIds).toEqual(["a"]);
+    });
+
+    it("makes the flat list's band-ending header inert to group actions", async () => {
+      const persisted: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "none",
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "a", status: "waiting" }),
+        createMockSession({ id: "b", status: "working" }),
+        createMockSession({ id: "c", status: "idle" }),
+      ]);
+      // band header, a, sessions header, b, c
+      store.actions.setSelectedIndex(2);
+      expect(store.selectedGroupHeader()?.groupKey).toBe(SESSIONS_GROUP_KEY);
+      expect(store.selectedGroupSessions().map((s) => s.id)).toEqual([
+        "b",
+        "c",
+      ]);
+      store.actions.showGroupKillDialog(SESSIONS_GROUP_KEY);
+      expect(store.state.confirmMode).toBe(false);
+      store.actions.toggleGroupCollapse(SESSIONS_GROUP_KEY);
+      expect(store.collapsedGroups().size).toBe(0);
+      expect(store.flatItems()).toHaveLength(5);
+      await waitForDebounce();
+      expect(persisted.some((u) => "collapsedGroups" in u)).toBe(false);
+    });
+
+    it("collapse-all skips the band when leaving a non-waiting row", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha", status: "waiting" }),
+        createMockSession({ id: "b", project: "beta", status: "working" }),
+      ]);
+      store.actions.setSelectedSessionId("b");
+      store.actions.collapseAll();
+      expect(store.selectedGroupHeader()?.groupKey).toBe("beta");
+      expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["b"]);
+    });
+
+    it.each(["project", "cwd", "session", "window"] as const)(
+      "moves a hidden waiting home group and persists its %s order",
+      async (groupBy) => {
+        const persisted: unknown[] = [];
+        const store = createTUIStore({
+          groupBy,
+          onPersistState: (s) => {
+            persisted.push(s);
+          },
+        });
+        const sessions = ["alpha", "beta", "charlie"].map((project) =>
+          createMockSession({
+            id: project,
+            project,
+            cwd: `/code/${project}`,
+            tmuxTarget: `${project}:0.0`,
+            status: "waiting",
+          }),
+        );
+        store.actions.setSessions(sessions.map((s) => ({ ...s })));
+        store.actions.setSelectedSessionId("beta");
+        const keys = sessions.map((s) => getGroupKey(s, groupBy));
+        store.actions.moveGroupDown(keys[1]!, "beta");
+        expect(store.pinnedGroups()).toEqual([keys[0], keys[2], keys[1]]);
+        expect(store.selectedSession()?.id).toBe("beta");
+        expect(headerLabels(store.flatItems())).toEqual(["needs attention"]);
+        await waitForDebounce();
+        expect(persisted).toContainEqual({
+          pinnedGroups: [keys[0], keys[2], keys[1]],
+        });
+        store.actions.setSessions(
+          sessions.map((s) => ({ ...s, status: "working" })),
+        );
+        expect(
+          store
+            .flatItems()
+            .filter((i) => i.type === "header")
+            .map((i) => i.groupKey),
+        ).toEqual([keys[0], keys[2], keys[1]]);
+        expect(store.selectedSession()?.id).toBe("beta");
+      },
+    );
 
     it("should move group up by swapping with group above", () => {
       const store = createTUIStore({ groupBy: "project" });
@@ -2531,9 +2863,11 @@ describe("store", () => {
       ]);
 
       const headers = store.flatItems().filter((i) => i.type === "header");
-      // alphabetical: alpha before beta, regardless of status
-      expect(headers[0].type === "header" && headers[0].groupKey).toBe("alpha");
-      expect(headers[1].type === "header" && headers[1].groupKey).toBe("beta");
+      // The band precedes alphabetical groups; beta has no rows left.
+      expect(headers.map((header) => header.label)).toEqual([
+        "needs attention",
+        "alpha",
+      ]);
     });
 
     it("should move a group multiple positions with repeated moves", () => {
@@ -4389,10 +4723,7 @@ describe("new session dialog origin marker", () => {
     // here would pass even if App dropped the field.
     const marker = store.state.newSession!.returnToSources!;
     store.actions.closeNewSessionDialog();
-    store.actions.showSourcePicker(
-      marker.repo,
-      sourcesReopenOptions(marker),
-    );
+    store.actions.showSourcePicker(marker.repo, sourcesReopenOptions(marker));
 
     expect(store.state.sourcePicker?.origin).toEqual(origin);
     expect(store.state.sourcePicker?.initialFilter).toBe("notif");
@@ -4663,5 +4994,82 @@ describe("search over the agent's summary", () => {
 
     expect(row.matchSources).toEqual(["prompt"]);
     expect(row.primarySource).toBe("prompt");
+  });
+});
+
+describe("attention band off", () => {
+  const sessions = () => [
+    createMockSession({ id: "a", project: "alpha", status: "idle" }),
+    createMockSession({ id: "w", project: "alpha", status: "waiting" }),
+    createMockSession({ id: "b", project: "beta", status: "idle" }),
+  ];
+
+  it("keeps a waiting row in its group and out of the band", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    const keys = store
+      .flatItems()
+      .map((i) =>
+        i.type === "header" ? i.groupKey : i.filteredSession.session.id,
+      );
+    // Status order within the group, as without the band: waiting first.
+    expect(keys).toEqual(["alpha", "w", "a", "beta", "b"]);
+    expect(keys).not.toContain(NEEDS_YOU_GROUP_KEY);
+  });
+
+  it("toggleGroupCollapse moves a waiting selection to its header", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.setSelectedSessionId("w");
+    store.actions.toggleGroupCollapse("alpha");
+    expect(store.state.selectedSessionId).toBeNull();
+    expect(store.selectedHeaderKey()).toBe("alpha");
+  });
+
+  it("collapseAll moves a waiting selection to a header", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.setSelectedSessionId("w");
+    store.actions.collapseAll();
+    expect(store.state.selectedSessionId).toBeNull();
+    expect(store.flatItems()[store.selectedIndex()]?.type).toBe("header");
+  });
+
+  it("collapseParent collapses a waiting row's group", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.setSelectedSessionId("w");
+    store.actions.collapseParent();
+    expect(store.collapsedGroups().has("alpha")).toBe(true);
+    expect(store.selectedHeaderKey()).toBe("alpha");
+  });
+
+  it("kills a group's waiting members with the group", () => {
+    const store = createTUIStore({ groupBy: "project", attentionBand: false });
+    store.actions.setSessions(sessions());
+    store.actions.showGroupKillDialog("alpha");
+    expect([...store.state.confirmSessionIds].sort()).toEqual(["a", "w"]);
+  });
+
+  it("leaves a collapsed group collapsed when its selected wait ends", async () => {
+    // Launch selection picks the active pane's session even inside a
+    // collapsed group. The row never left that group, so nothing expands.
+    const persisted: Record<string, unknown>[] = [];
+    const store = createTUIStore({
+      groupBy: "project",
+      attentionBand: false,
+      collapsedGroups: ["alpha"],
+      onPersistState: (updates) => {
+        persisted.push(updates);
+      },
+    });
+    const initial = sessions();
+    store.actions.setSessions(initial);
+    store.actions.setSelectedSessionId("w");
+    store.actions.updateSession({ ...initial[1]!, status: "idle" });
+    await waitForDebounce();
+    expect(store.collapsedGroups().has("alpha")).toBe(true);
+    expect(store.state.selectedSessionId).toBe("w");
+    expect(persisted.some((u) => "collapsedGroups" in u)).toBe(false);
   });
 });

@@ -115,7 +115,12 @@ import type {
   PromptDisplay,
   Preferences,
 } from "../lib/preferences";
-import type { FlatItem, GroupBy } from "./utils/grouping";
+import {
+  getGroupKey,
+  isSyntheticGroupKey,
+  type FlatItem,
+  type GroupBy,
+} from "./utils/grouping";
 import {
   createSidebarWidthPersister,
   WIDTH_SETTLE_MS,
@@ -138,6 +143,8 @@ interface AppProps {
   columns?: ColumnsConfig;
   promptLines?: number;
   breakpoints?: BreakpointConfig;
+  ageFadeAfter?: number;
+  attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   searchTranscript?: boolean;
@@ -269,6 +276,8 @@ export function App(props: AppProps) {
     columns: props.columns,
     promptLines: props.promptLines,
     breakpoints: props.breakpoints,
+    ageFadeAfter: props.ageFadeAfter,
+    attentionBand: props.attentionBand,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
     searchTranscript: props.searchTranscript,
@@ -1242,6 +1251,10 @@ export function App(props: AppProps) {
       if (session.trackingMode !== "background") {
         refreshMenuDirty(session, openGeneration);
       }
+    } else if (isSyntheticGroupKey(item.groupKey)) {
+      // Collapse, pin, kill, new-session, and worktrees are all no-ops or
+      // the wrong group on a synthetic header. Opening would draw an empty box.
+      return;
     } else {
       store.actions.showGroupContextMenu(item.groupKey, x, y);
     }
@@ -1385,11 +1398,8 @@ export function App(props: AppProps) {
   function groupContextMenuKill() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const ids = store.selectedGroupSessions().map((s) => s.id);
     store.actions.hideGroupContextMenu();
-    if (ids.length > 0) {
-      store.actions.showConfirmDialog(null, "kill-group", ids);
-    }
+    store.actions.showGroupKillDialog(cm.groupKey);
   }
 
   /**
@@ -1401,6 +1411,8 @@ export function App(props: AppProps) {
    * known repo.
    */
   function selectedRepoRoot(): string | null {
+    const header = store.selectedGroupHeader();
+    if (header && isSyntheticGroupKey(header.groupKey)) return null;
     return (
       store.selectedSession()?.mainRepoRoot ??
       store.selectedGroupSessions().find((s) => s.mainRepoRoot)?.mainRepoRoot ??
@@ -1411,8 +1423,16 @@ export function App(props: AppProps) {
   function groupContextMenuWorktrees() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
-    const repo = selectedRepoRoot();
+    const header = store
+      .flatItems()
+      .find((item) => item.type === "header" && item.groupKey === cm.groupKey);
     store.actions.hideGroupContextMenu();
+    if (!header || header.type !== "header" || isSyntheticGroupKey(header.groupKey))
+      return;
+    const repo =
+      header.members
+        .map((member) => member.session)
+        .find((session) => session.mainRepoRoot)?.mainRepoRoot ?? null;
     store.actions.showWorktrees(repo);
   }
 
@@ -2357,6 +2377,7 @@ export function App(props: AppProps) {
     }
     if (
       item?.type === "header" &&
+      !isSyntheticGroupKey(item.groupKey) &&
       GROUPINGS_BY_DIRECTORY.has(store.state.groupBy)
     ) {
       const members = item.members.map((member) => member.session);
@@ -3488,8 +3509,16 @@ export function App(props: AppProps) {
   /** Extract group context from the selected item for group move operations */
   const getGroupMoveContext = (item: FlatItem | null) => {
     if (!item?.groupKey) return null;
+    // A synthetic header has no home group. A waiting session's groupKey is
+    // also synthetic; its home group is resolved below, including a group
+    // whose header is hidden because every member is waiting.
+    if (item.type === "header" && isSyntheticGroupKey(item.groupKey))
+      return null;
     return {
-      groupKey: item.groupKey,
+      groupKey:
+        item.type === "session"
+          ? getGroupKey(item.filteredSession.session, store.state.groupBy)
+          : item.groupKey,
       sessionId:
         item.type === "session" ? item.filteredSession.session.id : undefined,
     };
@@ -3746,7 +3775,12 @@ export function App(props: AppProps) {
           // as `"N"` or as `"n"` with `shift` set.
           store.actions.showSourcePicker(selectedRepoRoot());
         } else {
-          openNewSession(newSessionContext(store.selectedFlatItem()));
+          const item = store.selectedFlatItem();
+          if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
+            event.preventDefault();
+            break;
+          }
+          openNewSession(newSessionContext(item));
         }
         event.preventDefault();
         break;
@@ -3794,8 +3828,9 @@ export function App(props: AppProps) {
           if (sessionToKill) {
             store.actions.showConfirmDialog(sessionToKill.id, "kill");
           } else if (store.selectedGroupHeader()) {
-            const ids = store.selectedGroupSessions().map((s) => s.id);
-            store.actions.showConfirmDialog(null, "kill-group", ids);
+            store.actions.showGroupKillDialog(
+              store.selectedGroupHeader()!.groupKey,
+            );
           }
         }
         event.preventDefault();
@@ -3808,6 +3843,11 @@ export function App(props: AppProps) {
         // `shift` set rather than as `"W"`; gating on the modifier is what
         // keeps a bare `w` from opening a surface that can delete.
         if (key !== "W" && !event.shift) break;
+        const item = store.selectedFlatItem();
+        if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
+          event.preventDefault();
+          break;
+        }
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise. The
         // panel's own Tab widens from there.
@@ -4094,6 +4134,11 @@ export function App(props: AppProps) {
         <box flexDirection="row" flexGrow={1}>
           <SessionList
             items={store.flatItems()}
+            // Deliberately NOT the filtered list: the only thing reading it
+            // is the worktree-counts scope, which must not move when a
+            // search query or the hide-idle toggle changes.
+            sessions={store.unfilteredSessions()}
+            groupBy={store.state.groupBy}
             selectedIndex={store.selectedIndex()}
             iconStyle={store.state.iconStyle}
             showPreview={store.state.showPreview}
@@ -4101,6 +4146,8 @@ export function App(props: AppProps) {
             activePaneId={store.state.activePaneId}
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
+            ageFadeAfter={store.state.ageFadeAfter}
+            connectionState={store.state.connectionState}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry

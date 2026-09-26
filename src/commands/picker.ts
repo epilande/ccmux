@@ -101,6 +101,8 @@ export function createPickerCommand(): Command {
           columns: prefs.columns,
           promptLines: prefs.promptLines,
           breakpoints: prefs.breakpoints,
+          ageFadeAfter: prefs.ageFade?.after,
+          attentionBand: prefs.attentionBand,
           searchPaneContent: prefs.searchPaneContent,
           searchPaneLines: prefs.searchPaneLines,
           searchTranscript: prefs.searchTranscript,

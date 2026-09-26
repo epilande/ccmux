@@ -74,6 +74,8 @@ export type FlatItem =
       groupKey: string;
       label: string;
       count: number;
+      /** Present only when a project header unambiguously names one repository. */
+      repoRoot?: string;
       collapsed: boolean;
       /** Raw member references, not a precomputed summary. The status summary
        * is derived downstream in the header's own reactive scope so this memo
@@ -86,6 +88,7 @@ export type FlatItem =
       type: "session";
       groupKey: string;
       filteredSession: FilteredSession;
+      sharedTmuxSession?: string;
     };
 
 /** A group of sessions keyed for sorting */
@@ -202,9 +205,39 @@ export function groupSessions(
   return [...groups.entries()].map(([key, members]) => ({ key, members }));
 }
 
-/** Extract group keys from the header items in a flat item list */
-export function headerGroupKeys(items: FlatItem[]): string[] {
-  return items.flatMap((i) => (i.type === "header" ? [i.groupKey] : []));
+/** Repository facts belong only to an unambiguous project group. */
+export function groupRepoRoot(
+  members: FilteredSession[],
+  groupBy: GroupBy,
+): string | undefined {
+  const root =
+    members[0]?.session.mainRepoRoot ?? members[0]?.session.worktreeRoot;
+  return groupBy === "project" &&
+    root &&
+    members.every(
+      ({ session }) => (session.mainRepoRoot ?? session.worktreeRoot) === root,
+    )
+    ? root
+    : undefined;
+}
+
+export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
+export const NEEDS_YOU_GROUP_LABEL = "needs attention";
+
+/**
+ * The header that ENDS the `needs attention` band in the flat (`none`) grouping.
+ * Grouped modes need no such thing because the next real group header already
+ * closes the band; a flat list has no next header, so without this every
+ * ordinary row reads as a member of the band. Like the band it is synthetic:
+ * selectable, but guarded out of every group action (kill, move, collapse).
+ */
+export const SESSIONS_GROUP_KEY = "\0sessions";
+export const SESSIONS_GROUP_LABEL = "sessions";
+
+/** A header ccmux synthesizes rather than one a real group owns. Group actions
+ *  (bulk kill, move, pin, collapse and its persistence) must never reach one. */
+export function isSyntheticGroupKey(key: string): boolean {
+  return key === NEEDS_YOU_GROUP_KEY || key === SESSIONS_GROUP_KEY;
 }
 
 /**
@@ -255,6 +288,7 @@ export function sortGroups(
  * Build the flat item list from filtered sessions, applying grouping,
  * sorting, and collapse state.
  * During search, all groups are forced expanded.
+ * With `attentionBand` off, waiting sessions stay in their own groups.
  */
 export function buildFlatItems(
   filtered: FilteredSession[],
@@ -262,24 +296,76 @@ export function buildFlatItems(
   collapsed: Set<string>,
   isSearching: boolean,
   pinnedGroups: string[] = [],
+  attentionBand = true,
 ): FlatItem[] {
-  if (groupBy === "none") {
-    return filtered.map((fs) => ({
-      type: "session" as const,
-      groupKey: "",
-      filteredSession: fs,
-    }));
+  const waitingStartedAt = (fs: FilteredSession): number => {
+    const parsed = Date.parse(
+      fs.session.statusChangedAt ?? fs.session.lastActivityAt ?? "",
+    );
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  const inBand = (fs: FilteredSession) =>
+    attentionBand && fs.session.status === "waiting";
+  const waiting = filtered
+    .filter(inBand)
+    .sort((a, b) => waitingStartedAt(a) - waitingStartedAt(b));
+  const rest = filtered.filter((fs) => !inBand(fs));
+  const items: FlatItem[] = [];
+  if (waiting.length) {
+    items.push({
+      type: "header",
+      groupKey: NEEDS_YOU_GROUP_KEY,
+      label: NEEDS_YOU_GROUP_LABEL,
+      count: waiting.length,
+      collapsed: false,
+      members: waiting,
+    });
+    for (const fs of waiting)
+      items.push({
+        type: "session",
+        groupKey: NEEDS_YOU_GROUP_KEY,
+        filteredSession: fs,
+      });
   }
-
+  if (groupBy === "none") {
+    if (waiting.length && rest.length) {
+      items.push({
+        type: "header",
+        groupKey: SESSIONS_GROUP_KEY,
+        label: SESSIONS_GROUP_LABEL,
+        count: rest.length,
+        collapsed: false,
+        members: rest,
+      });
+    }
+    return [
+      ...items,
+      ...rest.map(
+        (fs): FlatItem => ({
+          type: "session",
+          groupKey: "",
+          filteredSession: fs,
+        }),
+      ),
+    ];
+  }
   const sorted = sortGroups(
-    groupSessions(filtered, groupBy),
+    groupSessions(rest, groupBy),
     pinnedGroups,
     isSearching,
   );
-
-  const items: FlatItem[] = [];
   for (const { key, members } of sorted) {
     const isCollapsed = !isSearching && collapsed.has(key);
+    const repoRoot = groupRepoRoot(members, groupBy);
+    const tmuxName = (fs: FilteredSession) =>
+      fs.session.tmuxTarget?.split(":")[0];
+    const firstTmux = tmuxName(members[0]!);
+    const sharedTmuxSession =
+      (groupBy === "session" || groupBy === "window") &&
+      firstTmux &&
+      members.every((fs) => tmuxName(fs) === firstTmux)
+        ? firstTmux
+        : undefined;
     items.push({
       type: "header",
       groupKey: key,
@@ -287,15 +373,16 @@ export function buildFlatItems(
       count: members.length,
       collapsed: isCollapsed,
       members,
+      repoRoot,
     });
     if (!isCollapsed) {
-      for (const fs of members) {
+      for (const fs of members)
         items.push({
           type: "session",
           groupKey: key,
           filteredSession: fs,
+          sharedTmuxSession,
         });
-      }
     }
   }
 
@@ -311,7 +398,10 @@ export function buildFlatItems(
  * from this one answer, and the SAME function feeds the renderer, so a row
  * cannot be measured as one height and drawn at another.
  */
-type SessionLineCount = (session: EnrichedSession) => number;
+type SessionLineCount = (
+  session: EnrichedSession,
+  item: Extract<FlatItem, { type: "session" }>,
+) => number;
 
 /**
  * Compute the visual height of a flat item.
@@ -329,7 +419,7 @@ export function itemVisualHeight(
   if (item.type === "session") {
     if (!lineCount) return 2;
     // A row always draws its identity line, whatever the caller computes.
-    return Math.max(1, lineCount(item.filteredSession.session));
+    return Math.max(1, lineCount(item.filteredSession.session, item));
   }
   return 1;
 }

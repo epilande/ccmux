@@ -470,6 +470,8 @@ describe("completableConfigKeys() parity with config set", () => {
     const choices = configValueChoices(key);
     if (choices && choices.length > 0) return choices[0]!;
     switch (key) {
+      case "ageFade.after":
+        return "24";
       case "previewWidth":
         return "40"; // integer 20-80
       case "searchPaneLines":
@@ -526,5 +528,52 @@ describe("completableConfigKeys() parity with config set", () => {
       errorSpy.mockRestore();
       logSpy.mockRestore();
     }
+  });
+});
+
+describe("ageFade.after", () => {
+  it("accepts hours including fractions and zero, and exposes the completion key", async () => {
+    store = {};
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    try {
+      for (const value of ["48", "0.5", "0"]) {
+        expect(await runConfigSet("ageFade.after", value)).toBeNull();
+        expect(store.ageFade?.after).toBe(Number(value));
+        expect(getNestedValue(store, ["ageFade", "after"])).toBe(Number(value));
+      }
+      expect(completableConfigKeys()).toContain("ageFade.after");
+    } finally {
+      log.mockRestore();
+    }
+  });
+  it("rejects negative, empty and nonfinite hours without changing preferences", async () => {
+    store = { ageFade: { after: 24 } };
+    const restoreExit = withExitSentinel();
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const value of ["-1", "", "NaN", "Infinity"]) {
+        expect((await runConfigSet("ageFade.after", value))?.code).toBe(1);
+        expect(store.ageFade?.after).toBe(24);
+      }
+    } finally {
+      restoreExit();
+      error.mockRestore();
+    }
+  });
+});
+
+describe("KNOWN_KEYS.attentionBand", () => {
+  const spec = KNOWN_KEYS.attentionBand!;
+
+  it("accepts booleans only", () => {
+    expect(spec.validate("true")).toBe(true);
+    expect(spec.validate("false")).toBe(true);
+    expect(spec.validate("off")).toBe(false);
+  });
+
+  it("parses to a boolean and completes", () => {
+    expect(spec.parse("false")).toBe(false);
+    expect(completableConfigKeys()).toContain("attentionBand");
+    expect(configValueChoices("attentionBand")).toEqual(["true", "false"]);
   });
 });

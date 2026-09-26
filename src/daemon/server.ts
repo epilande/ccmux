@@ -135,7 +135,11 @@ import {
   type WorktreeSession,
 } from "./worktree-prune";
 import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
-import { listAllWorktrees } from "./worktree-list";
+import {
+  countRepoWorktrees,
+  listAllWorktrees,
+  type WorktreeCount,
+} from "./worktree-list";
 import { listOpenPRs, type OpenPR, type PRListResponse } from "./pr-list";
 import {
   listOpenIssues,
@@ -652,6 +656,11 @@ export class DaemonServer {
   private getScanHealth: () => DaemonHealth;
   /** When each repo last had `git fetch --prune` run for a prune scan. */
   private worktreeFetchedAt = new Map<string, number>();
+  /** Share overlapping header reads; completed counts are not cached. */
+  private worktreeCountsInflight = new Map<
+    string,
+    Promise<WorktreeCount | null>
+  >();
   /**
    * One repo's open-PR answer, keyed by repo root.
    *
@@ -1023,7 +1032,10 @@ export class DaemonServer {
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
-  private async enrichSession(session: Session): Promise<EnrichedSession> {
+  private async enrichSession(
+    session: Session,
+    localOnly = false,
+  ): Promise<EnrichedSession> {
     const paneCache = this.getPaneCache();
     const paneInfo = session.tmuxPane ? paneCache.get(session.tmuxPane) : null;
     const tmuxTarget = paneInfo?.target ?? null;
@@ -1033,7 +1045,9 @@ export class DaemonServer {
     const gitBranch = gitInfo.branch ?? session.gitBranch;
     // Synchronous cache read; the resolver refreshes in the background and
     // onBranchPRsChanged re-broadcasts when a lookup lands a new value.
-    const branchPRs = this.prResolver.get(effectiveCwd, gitBranch);
+    const branchPRs = localOnly
+      ? null
+      : this.prResolver.get(effectiveCwd, gitBranch);
     // Derived exactly like tmuxTarget, off the same paneInfo: a Claude
     // invoke runs inside a `ccmux-invoke-<id>` detached session, so the
     // pane's sessionName carries the invocation id. No cold-cache
@@ -1186,8 +1200,9 @@ export class DaemonServer {
 
   private async enrichSessions(
     sessions: Session[],
+    localOnly = false,
   ): Promise<EnrichedSession[]> {
-    return Promise.all(sessions.map((s) => this.enrichSession(s)));
+    return Promise.all(sessions.map((s) => this.enrichSession(s, localOnly)));
   }
 
   private resolveSession(id: string): Session | undefined {
@@ -1376,6 +1391,10 @@ export class DaemonServer {
 
     if (path === "/worktrees" && req.method === "GET") {
       return await this.handleWorktreeList(url, corsHeaders);
+    }
+
+    if (path === "/worktrees/counts" && req.method === "GET") {
+      return await this.handleWorktreeCounts(url, corsHeaders);
     }
 
     if (path === "/worktrees/prune-candidates" && req.method === "GET") {
@@ -1780,6 +1799,46 @@ export class DaemonServer {
     });
   }
 
+  private async handleWorktreeCounts(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const roots = [
+      ...new Set(
+        url.searchParams.getAll("repo").filter(Boolean).map(normalizePath),
+      ),
+    ];
+    // Unlike the panel listing, omitted scope must never scan every session's repo.
+    if (roots.length === 0) {
+      return Response.json(
+        { error: "repo is required" },
+        { status: 400, headers },
+      );
+    }
+    try {
+      const counts = await mapWithConcurrency(roots, 3, (root) => {
+        const existing = this.worktreeCountsInflight.get(root);
+        if (existing) return existing;
+        const pending = countRepoWorktrees(root).finally(() => {
+          this.worktreeCountsInflight.delete(root);
+        });
+        this.worktreeCountsInflight.set(root, pending);
+        return pending;
+      });
+      const repos = counts.filter(
+        (count): count is WorktreeCount =>
+          count !== null &&
+          normalizePath(count.repoRoot) !== normalizePath(this.homeDir),
+      );
+      return Response.json({ repos }, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to count worktrees: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
   /**
    * `GET /worktrees` — every worktree of every repo in scope, from local data
    * only. This is the panel's first paint; its slower half (fetch, PR state,
@@ -1797,6 +1856,7 @@ export class DaemonServer {
     try {
       const sessions = await this.enrichSessions(
         this.sessionManager.getSessions(),
+        true,
       );
       const repoRoots = await this.worktreeRepoRoots(
         sessions,

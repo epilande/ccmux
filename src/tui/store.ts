@@ -50,9 +50,9 @@ import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
   buildFlatItems,
+  isSyntheticGroupKey,
   getGroupKey,
   groupSessions,
-  headerGroupKeys,
   sortGroups,
   VALID_GROUP_BY,
   DEFAULT_GROUP_BY,
@@ -649,6 +649,7 @@ interface TUIState {
   columns?: ColumnsConfig;
   promptLines?: number;
   breakpoints?: BreakpointConfig;
+  ageFadeAfter?: number;
   groupBy: GroupBy;
   hideIdle: boolean;
 }
@@ -661,6 +662,9 @@ interface TUIStoreOptions {
   columns?: ColumnsConfig;
   promptLines?: number;
   breakpoints?: BreakpointConfig;
+  ageFadeAfter?: number;
+  /** Pin waiting sessions in the `needs attention` band (default true). */
+  attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   /** TTL (ms) for the search pane-content cache (issue #55). Defaults to
@@ -809,6 +813,7 @@ const PROMPT_DISPLAY_LABEL: Record<PromptDisplay, string> = {
 
 export function createTUIStore(options: TUIStoreOptions = {}) {
   const [tick, setTick] = createSignal(0);
+  const attentionBand = options.attentionBand ?? true;
   const searchPaneContentEnabled = options.searchPaneContent ?? true;
   const searchPaneLines = options.searchPaneLines ?? 100;
   const searchTranscriptEnabled = options.searchTranscript ?? true;
@@ -980,6 +985,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     columns: options.columns,
     promptLines: options.promptLines,
     breakpoints: options.breakpoints,
+    ageFadeAfter: options.ageFadeAfter,
     groupBy: options.groupBy ?? DEFAULT_GROUP_BY,
     hideIdle: options.hideIdle ?? false,
   });
@@ -1127,6 +1133,25 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       equals: (prev, next) =>
         prev.length === next.length && prev.every((s, i) => s === next[i]),
     },
+  );
+
+  /**
+   * Every session, wrapped as a `FilteredSession` but never filtered.
+   *
+   * The worktree-counts scope in `SessionList` needs a membership that no
+   * user-facing filter can move: each change costs an aborted fetch, a
+   * `git worktree list` per repo on the daemon, and a restarted refresh
+   * interval, so deriving it from `filteredSessions()` made every keystroke
+   * of a search that changed the matching project set pay for a refetch.
+   * Built on `sortedSessions`, whose identity-preserving equality means this
+   * array is rebuilt only when membership or ordering actually changes.
+   */
+  const unfilteredSessions = trackedMemo("unfilteredSessions", () =>
+    sortedSessions().map((session) => ({
+      session,
+      highlights: null,
+      paneMatch: false,
+    })),
   );
 
   // Derived: status-filtered sessions (hide idle toggle, keeps unread/read visible)
@@ -1380,6 +1405,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       collapsedGroups(),
       isSearching,
       pinnedGroups(),
+      attentionBand,
     );
   });
 
@@ -1439,12 +1465,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   // Derived: sessions belonging to the selected group
   const selectedGroupSessions = createMemo(() => {
     const header = selectedGroupHeader();
-    if (!header || state.groupBy === "none") return [];
-    return filteredSessions()
-      .filter(
-        (fs) => getGroupKey(fs.session, state.groupBy) === header.groupKey,
-      )
-      .map((fs) => fs.session);
+    return header?.members.map((fs) => fs.session) ?? [];
   });
 
   /** Stable identity for a flat row. Used to find a pre-kill predecessor in
@@ -1512,11 +1533,60 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return null;
   }
 
-  /** Persist collapsed groups, pruning keys that no longer match active groups */
+  /** A waiting row sits in the band, outside its home group, only while the band is on. */
+  function inBand(session: EnrichedSession): boolean {
+    return attentionBand && session.status === "waiting";
+  }
+
+  function activeGroupKeys(): Set<string> {
+    return new Set(
+      state.groupBy === "none"
+        ? []
+        : state.sessions.map((session) => getGroupKey(session, state.groupBy)),
+    );
+  }
+
+  /** Include waiting-only home groups even while their headers are absent. */
+  function orderedGroupKeys(): string[] {
+    return sortGroups(
+      groupSessions(filteredSessions(), state.groupBy),
+      pinnedGroups(),
+      state.searchQuery.trim().length > 0,
+    ).map((group) => group.key);
+  }
+
+  /** A waiting-only group is still active even while its header is absent. */
   function persistCollapsedGroups(collapsed: Set<string>) {
-    const activeKeys = new Set(headerGroupKeys(flatItems()));
+    const activeKeys = activeGroupKeys();
     const pruned = [...collapsed].filter((k) => activeKeys.has(k));
     persistUIState({ collapsedGroups: pruned });
+  }
+
+  /**
+   * Keep the action target aligned with a selected row whose wait ended.
+   * A row the filters now remove is deselected either way. Only a row
+   * returning from the band expands its group: with the band off it never
+   * left, so a collapsed group stays collapsed.
+   */
+  function reconcileWaitingSelection(wasWaiting: boolean) {
+    if (!wasWaiting || !state.selectedSessionId) return;
+    const selected = state.sessions.find(
+      (s) => s.id === state.selectedSessionId,
+    );
+    if (!selected || selected.status === "waiting") return;
+    if (!filteredSessions().some((fs) => fs.session.id === selected.id)) {
+      setState("selectedSessionId", null);
+      setSelectedHeaderKey(null);
+      setState("previewFocused", false);
+      return;
+    }
+    if (!attentionBand) return;
+    const key = getGroupKey(selected, state.groupBy);
+    if (state.groupBy === "none" || !collapsedGroups().has(key)) return;
+    const expanded = new Set(collapsedGroups());
+    expanded.delete(key);
+    setCollapsedGroups(expanded);
+    persistCollapsedGroups(expanded);
   }
 
   /**
@@ -1673,16 +1743,20 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       const merged =
         synthetic.length > 0 ? [...sessions, ...synthetic] : sessions;
-      setState("sessions", merged);
-      if (
-        state.selectedSessionId &&
-        !merged.some((s) => s.id === state.selectedSessionId)
-      ) {
-        if (state.previewFocused) {
-          setState("previewFocused", false);
+      const wasWaiting = selectedSession()?.status === "waiting";
+      batch(() => {
+        setState("sessions", merged);
+        if (
+          state.selectedSessionId &&
+          !merged.some((s) => s.id === state.selectedSessionId)
+        ) {
+          if (state.previewFocused) {
+            setState("previewFocused", false);
+          }
+          setState("selectedSessionId", null);
         }
-        setState("selectedSessionId", null);
-      }
+        reconcileWaitingSelection(wasWaiting);
+      });
     },
 
     addSession(session: EnrichedSession) {
@@ -1703,7 +1777,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
-        setState("sessions", idx, reconcile(session));
+        const wasWaiting =
+          state.selectedSessionId === session.id &&
+          state.sessions[idx]?.status === "waiting";
+        batch(() => {
+          setState("sessions", idx, reconcile(session));
+          reconcileWaitingSelection(wasWaiting);
+        });
       }
     },
 
@@ -1916,6 +1996,22 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setError(error: string | null) {
       setState("error", error);
+    },
+
+    showGroupKillDialog(groupKey: string) {
+      // The attention band spans repositories, and the flat list's `sessions`
+      // header spans every other row; their members are preview data, never a
+      // bulk-kill target. Individual rows remain killable.
+      if (isSyntheticGroupKey(groupKey)) return;
+      const header = flatItems().find(
+        (item) => item.type === "header" && item.groupKey === groupKey,
+      );
+      if (header?.type !== "header" || header.members.length === 0) return;
+      this.showConfirmDialog(
+        null,
+        "kill-group",
+        header.members.map((fs) => fs.session.id),
+      );
     },
 
     showConfirmDialog(
@@ -2578,6 +2674,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     toggleGroupCollapse(groupKey: string) {
+      if (isSyntheticGroupKey(groupKey)) return;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
         if (next.has(groupKey)) {
@@ -2589,7 +2686,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             const session = state.sessions.find(
               (s) => s.id === state.selectedSessionId,
             );
-            if (session && getGroupKey(session, state.groupBy) === groupKey) {
+            if (
+              session &&
+              !inBand(session) &&
+              getGroupKey(session, state.groupBy) === groupKey
+            ) {
               setState("selectedSessionId", null);
               setSelectedHeaderKey(groupKey);
             }
@@ -2602,13 +2703,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     collapseAll() {
       const items = flatItems();
-      const keys = new Set(headerGroupKeys(items));
+      const keys = activeGroupKeys();
       setCollapsedGroups(keys);
       persistCollapsedGroups(keys);
-      // Select the first header if a session was selected
-      if (state.selectedSessionId) {
+      // Band rows remain visible outside the collapsed groups.
+      const selected = selectedSession();
+      if (state.selectedSessionId && !(selected && inBand(selected))) {
         setState("selectedSessionId", null);
-        const firstHeader = items.find((i) => i.type === "header");
+        const firstHeader = items.find(
+          (i) => i.type === "header" && !isSyntheticGroupKey(i.groupKey),
+        );
         if (firstHeader?.type === "header") {
           setSelectedHeaderKey(firstHeader.groupKey);
         }
@@ -2626,6 +2730,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         (s) => s.id === state.selectedSessionId,
       );
       if (!session) return;
+      if (inBand(session)) return;
       const groupKey = getGroupKey(session, state.groupBy);
       if (state.groupBy === "none" || !groupKey) return;
       setState("selectedSessionId", null);
@@ -2670,7 +2775,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     moveGroup(groupKey: string, direction: -1 | 1, sessionId?: string) {
       if (state.groupBy === "none") return;
 
-      const groupOrder = headerGroupKeys(flatItems());
+      const groupOrder = orderedGroupKeys();
       const idx = groupOrder.indexOf(groupKey);
       const targetIdx = idx + direction;
       if (idx === -1 || targetIdx < 0 || targetIdx >= groupOrder.length) return;
@@ -2695,7 +2800,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     ) {
       if (state.groupBy === "none") return;
 
-      const groupOrder = headerGroupKeys(flatItems());
+      const groupOrder = orderedGroupKeys();
       const idx = groupOrder.indexOf(groupKey);
       if (idx === -1) return;
 
@@ -2720,6 +2825,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   return {
     state,
     sortedSessions,
+    unfilteredSessions,
     filteredSessions,
     flatItems,
     invocationInFlightCount,

@@ -15,6 +15,7 @@ import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
 import { getAgentDisplayName, getAgentShortCode } from "../../lib/agents";
 import { HighlightedText } from "./HighlightedText";
 import { StatusBadge } from "./StatusBadge";
+import { getEffectiveStatus } from "../../daemon/status-machine";
 import { InvokeStatusBadge, type InvokeStatus } from "./InvokeStatusBadge";
 import { BackgroundStatusBadge } from "./BackgroundStatusBadge";
 import {
@@ -93,6 +94,9 @@ interface SessionItemProps {
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
   sidebar?: boolean;
+  ageFadeAfter?: number;
+  needsYou?: boolean;
+  sharedTmuxSession?: string;
   /** Prompt display mode for the fallback layout resolution (direct mounts /
    * tests). Ignored when `layout` is supplied pre-resolved by SessionList. */
   promptDisplay?: PromptDisplay;
@@ -117,6 +121,19 @@ export function abbreviateTarget(target: string, maxLen: number = 12): string {
   const availableLen = maxLen - displayWidth(suffix) - 1;
   if (availableLen <= 0) return sliceToWidth(target, maxLen - 1) + "~";
   return sliceToWidth(sessionName, availableLen) + "~" + suffix;
+}
+
+export function isAgeFaded(
+  session: EnrichedSession,
+  after: number,
+  now: number,
+): boolean {
+  return (
+    after > 0 &&
+    getEffectiveStatus(session).status === "idle" &&
+    now - Date.parse(session.statusChangedAt ?? session.lastActivityAt ?? "") >
+      after * 3_600_000
+  );
 }
 
 interface ProjectPathParts {
@@ -303,6 +320,7 @@ interface FieldRenderContext {
   isActiveSession?: boolean;
   selected: boolean;
   dimmed?: boolean;
+  ageFaded?: boolean;
   sidebar?: boolean;
   transcriptSnippet?: string;
   matchSource?: MatchSource;
@@ -331,6 +349,11 @@ interface FieldRenderContext {
 
 function dimColor(ctx: FieldRenderContext, color?: string): string | undefined {
   return ctx.dimmed ? theme.border : color;
+}
+
+/** Fade task text without erasing agent, completion, or PR state colors. */
+function contentColor(ctx: FieldRenderContext): string | undefined {
+  return dimColor(ctx, ctx.ageFaded ? theme.subtext : theme.text);
 }
 
 /**
@@ -446,9 +469,7 @@ const PromptCell: Component<{
             fallback={
               <Show
                 when={transcriptLine()}
-                fallback={
-                  <text fg={dimColor(ctx, theme.overlay)}>{text()}</text>
-                }
+                fallback={<text fg={contentColor(ctx)}>{text()}</text>}
               >
                 <text fg={dimColor(ctx, theme.overlay)}>
                   {transcriptLine()}
@@ -714,7 +735,7 @@ const FieldCell: Component<{
             <Show
               when={ctx.highlights?.summary}
               fallback={
-                <text fg={dimColor(ctx, theme.overlay)}>
+                <text fg={contentColor(ctx)}>
                   {truncateText(summary() ?? "", ctx.maxFlexLen(row))}
                 </text>
               }
@@ -1053,6 +1074,10 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   const maxFlexLen = (row: 1 | 2) =>
     row === 1 ? maxPromptLenRow1() : maxPromptLenRow2();
 
+  const ageFaded = createMemo(() => {
+    void tick();
+    return isAgeFaded(props.session, props.ageFadeAfter ?? 24, Date.now());
+  });
   const agentColor = () => agentColorFor(props.session.agentType);
 
   const bgColor = () =>
@@ -1104,6 +1129,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     get dimmed() {
       return props.dimmed;
     },
+    get ageFaded() {
+      return ageFaded();
+    },
     get sidebar() {
       return props.sidebar;
     },
@@ -1124,7 +1152,14 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     },
     get paneInfo() {
       return props.session.tmuxTarget
-        ? abbreviateTarget(props.session.tmuxTarget, 12)
+        ? abbreviateTarget(
+            props.sharedTmuxSession
+              ? props.session.tmuxTarget.slice(
+                  props.sharedTmuxSession.length + 1,
+                )
+              : props.session.tmuxTarget,
+            12,
+          )
         : "";
     },
     get versionLabel() {
@@ -1169,7 +1204,13 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   // The shared empty array rather than a fresh `[]`, so a row with no block
   // reads the same reference every time and the `<For>` below stays still.
   const promptBlock = () => props.promptBlock ?? EMPTY_PROMPT_BLOCK;
-  const rowHeight = () => 1 + (row2HasContent() ? 1 : 0) + promptBlock().length;
+  const bandTarget = () =>
+    props.needsYou && props.sidebar && props.session.tmuxTarget;
+  const rowHeight = () =>
+    1 +
+    (row2HasContent() ? 1 : 0) +
+    promptBlock().length +
+    (bandTarget() ? 1 : 0);
 
   return (
     <box width="100%" height={rowHeight()} flexDirection="column">
@@ -1222,6 +1263,16 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             left a list of rows hard to scan. The row now reads shortest to
             longest. Height is a sum, so neither `rowHeight` here nor
             SessionList's `sessionLines` changes. */}
+        <Show when={bandTarget()}>
+          <box paddingLeft={2} height={1}>
+            <text fg={dimColor(ctx, theme.subtext)}>
+              {abbreviateTarget(
+                props.session.tmuxTarget ?? "",
+                Math.max(1, effectiveWidth() - 7),
+              )}
+            </text>
+          </box>
+        </Show>
         <For each={promptBlock()}>
           {(line) => (
             <box flexDirection="row">

@@ -1,9 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listAllWorktrees, listRepoWorktrees } from "./worktree-list";
+import {
+  countRepoWorktrees,
+  listAllWorktrees,
+  listRepoWorktrees,
+} from "./worktree-list";
 import type { WorktreeRow } from "./worktree-list";
 import type { WorktreeSession } from "./worktree-prune";
 import { normalizePath, runGit } from "./worktree-git";
@@ -75,6 +87,82 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
+});
+
+describe("countRepoWorktrees", () => {
+  it("times out a stuck default metadata read and allows a later retry", async () => {
+    const repo = await makeRepo("counts-timeout");
+    const kill = mock(() => {});
+    const spawn = spyOn(Bun, "spawn").mockImplementation((() => ({
+      stdout: new ReadableStream<Uint8Array>(),
+      stderr: new ReadableStream<Uint8Array>(),
+      exited: new Promise<number>(() => {}),
+      kill,
+    })) as unknown as typeof Bun.spawn);
+    const originalSetTimeout = globalThis.setTimeout;
+    const deadlines: number[] = [];
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
+      callback: () => void,
+      ms: number,
+    ) => {
+      deadlines.push(ms);
+      return originalSetTimeout(callback, ms === 30_000 ? 5 : ms);
+    }) as typeof setTimeout);
+    try {
+      expect(await countRepoWorktrees(repo)).toBeNull();
+      expect(kill).toHaveBeenCalledWith("SIGKILL");
+      expect(deadlines).toContain(30_000);
+    } finally {
+      timer.mockRestore();
+      spawn.mockRestore();
+    }
+    expect(await countRepoWorktrees(repo)).toEqual({
+      repoRoot: normalizePath(repo),
+      hasMain: true,
+      linked: 0,
+    });
+  });
+
+  it("counts present checkouts using only worktree metadata", async () => {
+    const repo = await makeRepo("counts");
+    await addWorktree(repo, "live");
+    const missing = await addWorktree(repo, "missing");
+    await rm(missing, { recursive: true });
+    const calls: string[][] = [];
+    const count = await countRepoWorktrees(repo, async (cwd, args) => {
+      calls.push(args);
+      return runGit(cwd, args);
+    });
+    expect(count).toEqual({
+      repoRoot: normalizePath(repo),
+      hasMain: true,
+      linked: 1,
+    });
+    expect(calls).toEqual([["worktree", "list", "--porcelain"]]);
+  });
+
+  it("counts linked checkouts without presenting a bare repo as main", async () => {
+    const bare = join(root, "bare.git");
+    const linked = join(root, "linked");
+    await mkdir(bare);
+    await mkdir(linked);
+    const count = await countRepoWorktrees(bare, async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: `worktree ${bare}\nbare\n\nworktree ${linked}\nHEAD abc\ndetached\n\n`,
+    }));
+    expect(count).toEqual({ repoRoot: bare, hasMain: false, linked: 1 });
+  });
+
+  it("omits failed metadata reads", async () => {
+    expect(
+      await countRepoWorktrees(root, async () => ({
+        exitCode: 128,
+        stderr: "not a repo",
+        stdout: "",
+      })),
+    ).toBeNull();
+  });
 });
 
 describe("listRepoWorktrees", () => {

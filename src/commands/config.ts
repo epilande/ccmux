@@ -106,6 +106,13 @@ export const KNOWN_KEYS: Record<
       "Additional Claude config dirs to watch, as a JSON array of absolute or ~/-prefixed paths (e.g. '[\"~/.claude-personal\"]')",
     note: "Run `ccmux setup --agent claude` to install hooks into the new dirs, then restart the daemon (ccmux daemon restart)",
   },
+  attentionBand: {
+    validate: (v) => v === "true" || v === "false",
+    parse: (v) => v === "true",
+    description:
+      "Pin waiting sessions in a `needs attention` band at the top of the list (true, false; default true)",
+    choices: BOOLEAN_CHOICES,
+  },
   searchPaneContent: {
     validate: (v) => v === "true" || v === "false",
     parse: (v) => v === "true",
@@ -173,6 +180,7 @@ function isPromptLines(v: string): boolean {
 export function completableConfigKeys(): string[] {
   return [
     ...Object.keys(KNOWN_KEYS),
+    "ageFade.after",
     "sidebar.width",
     "sidebar.position",
     "sidebar.promptLines",
@@ -302,7 +310,7 @@ export function createConfigCommand(): Command {
         if (!spec) {
           console.error(`Unknown key: ${key}`);
           console.error(
-            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, sidebar.<key>, notifications.<key>`,
+            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>`,
           );
           process.exit(1);
         }
@@ -314,6 +322,17 @@ export function createConfigCommand(): Command {
         await setPreferences({ [key]: spec.parse(value) });
         console.log(`${key} = ${value}`);
         if (spec.note) console.log(spec.note);
+        return;
+      }
+
+      if (key === "ageFade.after") {
+        const after = Number(value);
+        if (!value.trim() || !Number.isFinite(after) || after < 0) {
+          console.error("ageFade.after must be nonnegative hours (0 disables)");
+          process.exit(1);
+        }
+        await setPreferences({ ageFade: { after } });
+        console.log(`${key} = ${after}`);
         return;
       }
 
@@ -514,7 +533,7 @@ export function createConfigCommand(): Command {
 
       console.error(`Unknown key: ${key}`);
       console.error(
-        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, sidebar.<key>, notifications.<key>`,
+        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>`,
       );
       process.exit(1);
     });
