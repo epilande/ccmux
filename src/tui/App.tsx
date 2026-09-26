@@ -152,6 +152,7 @@ interface AppProps {
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
   columnHeader?: ColumnHeaderMode;
+  attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
   searchTranscript?: boolean;
@@ -285,6 +286,7 @@ export function App(props: AppProps) {
     breakpoints: props.breakpoints,
     ageFadeAfter: props.ageFadeAfter,
     columnHeader: props.columnHeader,
+    attentionBand: props.attentionBand,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
     searchTranscript: props.searchTranscript,

@@ -367,6 +367,8 @@ export interface Preferences {
    * `prompt` from the rows rather than showing it twice.
    */
   promptLines?: number;
+  /** Pin waiting sessions in a `needs attention` band at the top of the list (default true) */
+  attentionBand?: boolean;
   /** Search pane content in TUI search (default true) */
   searchPaneContent?: boolean;
   /** Lines of pane content to scan in TUI search (default 100) */

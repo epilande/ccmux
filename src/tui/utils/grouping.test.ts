@@ -945,3 +945,62 @@ describe("buildFlatItems with pinnedGroups", () => {
     expect(ids).toEqual(["undated", "dated-early", "dated-late"]);
   });
 });
+
+describe("buildFlatItems with the attention band off", () => {
+  const sessions = () => [
+    toFiltered(mockSession({ id: "a", project: "alpha", status: "idle" })),
+    toFiltered(mockSession({ id: "b", project: "alpha", status: "waiting" })),
+    toFiltered(mockSession({ id: "c", project: "beta", status: "waiting" })),
+  ];
+
+  it("keeps waiting rows in their own groups", () => {
+    const items = buildFlatItems(
+      sessions(),
+      "project",
+      new Set(),
+      false,
+      [],
+      false,
+    );
+    expect(
+      items.map((i) =>
+        i.type === "header" ? `# ${i.label}` : i.filteredSession.session.id,
+      ),
+    ).toEqual(["# alpha", "a", "b", "# beta", "c"]);
+    const alpha = items[0];
+    if (alpha?.type === "header") expect(alpha.count).toBe(2);
+  });
+
+  it("leaves the flat list without synthetic headers", () => {
+    const items = buildFlatItems(
+      sessions(),
+      "none",
+      new Set(),
+      false,
+      [],
+      false,
+    );
+    expect(items.every((i) => i.type === "session")).toBe(true);
+    expect(
+      items.map((i) =>
+        i.type === "session" ? i.filteredSession.session.id : "",
+      ),
+    ).toEqual(["a", "b", "c"]);
+  });
+
+  it("hides a waiting row inside its collapsed group", () => {
+    const items = buildFlatItems(
+      sessions(),
+      "project",
+      new Set(["alpha"]),
+      false,
+      [],
+      false,
+    );
+    expect(
+      items.map((i) =>
+        i.type === "header" ? `# ${i.label}` : i.filteredSession.session.id,
+      ),
+    ).toEqual(["# alpha", "# beta", "c"]);
+  });
+});

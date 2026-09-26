@@ -563,3 +563,19 @@ describe("ageFade.after", () => {
     }
   });
 });
+
+describe("KNOWN_KEYS.attentionBand", () => {
+  const spec = KNOWN_KEYS.attentionBand!;
+
+  it("accepts booleans only", () => {
+    expect(spec.validate("true")).toBe(true);
+    expect(spec.validate("false")).toBe(true);
+    expect(spec.validate("off")).toBe(false);
+  });
+
+  it("parses to a boolean and completes", () => {
+    expect(spec.parse("false")).toBe(false);
+    expect(completableConfigKeys()).toContain("attentionBand");
+    expect(configValueChoices("attentionBand")).toEqual(["true", "false"]);
+  });
+});
