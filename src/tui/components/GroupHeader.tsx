@@ -14,6 +14,7 @@ import { theme } from "../theme";
 interface GroupHeaderProps {
   label: string;
   count: number;
+  /** Budget for the label and its segments; the rule is sized by layout. */
   width?: number;
   facts?: string;
   sharedBranch?: string;
@@ -26,14 +27,18 @@ interface GroupHeaderProps {
   iconStyle?: IconStyle;
   dimmed?: boolean;
   /**
-   * Run the rule to the last column of `width` instead of leaving the
-   * one-cell right margin. For lists whose rows have no right padding of
-   * their own (the Worktrees panel), so the rule still ends where the rows do.
+   * Run the rule to the box's last column instead of leaving the one-cell
+   * right margin. For lists whose rows have no right padding of their own
+   * (the Worktrees panel, the source picker), so the rule ends where the
+   * rows do.
    */
   flushRight?: boolean;
   onActivate?: () => void;
   onContextMenu?: (event: MouseEvent) => void;
 }
+
+/** Longer than any terminal is wide; the rule's box clips it to fit. */
+const RULE_LENGTH = 1000;
 
 function staticDots(
   summary: StatusSummary,
@@ -137,7 +142,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         ? [{ text: `   ${props.facts}`, color: theme.subtext }]
         : []),
     ];
-    const drawn = segments.flatMap((segment) => {
+    return segments.flatMap((segment) => {
       // Facts are useful as complete phrases; do not leave a dangling
       // "main +…" in a narrow sidebar. The identity may still truncate.
       if (
@@ -152,23 +157,13 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         ? [{ text, color: c(segment.color), label: segment.label }]
         : [];
     });
-    // The header IS the divider: a rule fills what the label leaves, so a
-    // group boundary costs one line, not a rule line plus a label line. The
-    // gap rides on the rule text because a segment of its own would be
-    // trimmed away above.
-    if (left >= 2)
-      drawn.push({
-        text: ` ${"─".repeat(left - 1)}`,
-        color: theme.border,
-        label: false,
-      });
-    return drawn;
   });
 
   return (
     <box
       width="100%"
       height={1}
+      flexDirection="row"
       paddingLeft={1}
       paddingRight={paddingRight()}
       backgroundColor={bgColor()}
@@ -180,7 +175,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         }
       }}
     >
-      <text>
+      <text wrapMode="none" flexShrink={0}>
         <For each={parts()}>
           {(part) => (
             <span style={{ fg: part.color }}>
@@ -191,6 +186,17 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
           )}
         </For>
       </text>
+      {/* The header IS the divider: a rule fills what the label leaves, so a
+          group boundary costs one line, not a rule line plus a label line.
+          Layout sizes it, not `width`, so it ends where the rows do however
+          the caller's budget drifts from the real box, and a label that
+          measures wider than `displayWidth` thought eats the rule instead of
+          wrapping the line. */}
+      <box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+        <text fg={c(theme.border)} wrapMode="none">
+          {` ${"─".repeat(RULE_LENGTH)}`}
+        </text>
+      </box>
     </box>
   );
 };

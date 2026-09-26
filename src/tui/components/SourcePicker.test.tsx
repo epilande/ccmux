@@ -199,6 +199,21 @@ async function mountSettled(
 }
 
 describe("SourcePicker", () => {
+  it("ends the repo header's rule on the rows' last column", async () => {
+    // The rows have no right padding, so the header's rule must not either.
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [openIssue()],
+    });
+    const lines = (await harness.frame()).split("\n");
+    const header = lines.find((l) => /repo \(2\) ─+/.test(l));
+    const row = lines.find((l) => l.includes("#156"));
+    expect(header).toBeDefined();
+    expect(row).toBeDefined();
+    const end = (l: string) => l.replace(/[│█\s]+$/, "").length;
+    expect(end(header!)).toBe(end(row!));
+  });
+
   it("lists both sources under one repo header with its count", async () => {
     const harness = await mountSettled({
       prs: [openPR()],

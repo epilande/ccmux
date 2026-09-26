@@ -328,8 +328,8 @@ export const SessionList: Component<SessionListProps> = (props) => {
           <GroupHeader
             label={item.label}
             count={item.count}
-            // The viewport's real width, so the header's rule ends on the
-            // column the rows' last cell does, scrollbar or not.
+            // The viewport's width, scrollbar or not, as the label budget.
+            // The rule itself is sized by layout.
             width={effectiveWidth() - viewportInset()}
             facts={factsText(headerFacts(item))}
             collapsed={item.collapsed}
