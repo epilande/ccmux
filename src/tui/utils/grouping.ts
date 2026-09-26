@@ -280,15 +280,15 @@ export function buildFlatItems(
   isSearching: boolean,
   pinnedGroups: string[] = [],
 ): FlatItem[] {
+  const waitingStartedAt = (fs: FilteredSession): number => {
+    const parsed = Date.parse(
+      fs.session.statusChangedAt ?? fs.session.lastActivityAt ?? "",
+    );
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
   const waiting = filtered
     .filter((fs) => fs.session.status === "waiting")
-    .sort(
-      (a, b) =>
-        Date.parse(
-          a.session.statusChangedAt ?? a.session.lastActivityAt ?? "",
-        ) -
-        Date.parse(b.session.statusChangedAt ?? b.session.lastActivityAt ?? ""),
-    );
+    .sort((a, b) => waitingStartedAt(a) - waitingStartedAt(b));
   const rest = filtered.filter((fs) => fs.session.status !== "waiting");
   const items: FlatItem[] = [];
   if (waiting.length) {
