@@ -912,4 +912,36 @@ describe("buildFlatItems with pinnedGroups", () => {
       expect(headers[2].label).toBe("charlie");
     }
   });
+
+  it("sorts a waiting session with no timestamps as oldest", () => {
+    const sessions = [
+      toFiltered(
+        mockSession({
+          id: "dated-late",
+          status: "waiting",
+          statusChangedAt: "2024-01-15T13:00:00Z",
+        }),
+      ),
+      toFiltered(
+        mockSession({
+          id: "undated",
+          status: "waiting",
+          statusChangedAt: null,
+          lastActivityAt: null,
+        }),
+      ),
+      toFiltered(
+        mockSession({
+          id: "dated-early",
+          status: "waiting",
+          statusChangedAt: "2024-01-15T12:00:00Z",
+        }),
+      ),
+    ];
+    const items = buildFlatItems(sessions, "none", new Set(), false);
+    const ids = items
+      .filter((item) => item.type === "session")
+      .map((item) => item.filteredSession.session.id);
+    expect(ids).toEqual(["undated", "dated-early", "dated-late"]);
+  });
 });
