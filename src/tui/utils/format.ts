@@ -101,7 +101,10 @@ export function padStartWidth(text: string, width: number): string {
 /** Truncate plain text to `maxLen` columns, adding an ellipsis when clipped. */
 export function truncateText(text: string, maxLen: number): string {
   if (displayWidth(text) <= maxLen) return text;
-  return sliceToWidth(text, Math.max(1, maxLen - 1)) + "…";
+  if (maxLen <= 0) return "";
+  // Nothing but the ellipsis fits; a one-column head would overflow the cell.
+  if (maxLen === 1) return "…";
+  return sliceToWidth(text, maxLen - 1) + "…";
 }
 
 /**

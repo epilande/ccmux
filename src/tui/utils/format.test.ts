@@ -179,6 +179,12 @@ describe("truncateText", () => {
     expect(displayWidth(truncateText("hello world", 8))).toBe(8);
   });
 
+  it("never exceeds a one- or zero-column budget", () => {
+    expect(truncateText("hello", 1)).toBe("…");
+    expect(truncateText("hello", 0)).toBe("");
+    expect(truncateText("h", 1)).toBe("h");
+  });
+
   it("measures CJK in columns rather than characters", () => {
     // Seven characters, fourteen columns: it does NOT fit an 8-column cell.
     const out = truncateText(CJK, 8);

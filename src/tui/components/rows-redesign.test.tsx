@@ -508,4 +508,27 @@ describe("rows redesign", () => {
     expect(lines[0]).toContain("● 1");
     expect(lines[0]).not.toContain("worktrees");
   });
+
+  it("keeps a one-column label inside its budget", async () => {
+    // Width 18 leaves the label exactly one column after the count and the
+    // collapsed activity. A two-cell "l…" would push the last dot off the row.
+    setup = await testRender(
+      () => (
+        <GroupHeader
+          label="longproject"
+          count={42}
+          collapsed={true}
+          selected={false}
+          members={[make("idle"), make("work", { status: "working" })]}
+          width={18}
+        />
+      ),
+      { width: 20, height: 3 },
+    );
+    await setup.renderOnce();
+    const lines = setup.captureCharFrame().split("\n");
+    expect(lines[0]).toContain("▶ … (42)");
+    expect(lines[0]).toContain("● 1");
+    expect(lines[1].trim()).toBe("");
+  });
 });
