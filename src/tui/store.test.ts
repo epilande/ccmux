@@ -1,4 +1,5 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
+import { createRoot } from "solid-js";
 import {
   getGroupKey,
   NEEDS_YOU_GROUP_KEY,
@@ -38,10 +39,30 @@ function headerLabels(items: FlatItem[]): string[] {
     .map((h) => h.label);
 }
 
-/** Wrap createTUIStore with a no-op persist to avoid writing state.json in tests */
+const storeDisposers: Array<() => void> = [];
+let restoreFetch: () => void;
+
+beforeEach(() => {
+  // The store also broadcasts selections over HTTP, independently of file
+  // persistence. Never let fixtures become the live daemon's sidebar state.
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(async () => Response.json({}), { preconnect: () => {} }),
+  );
+  restoreFetch = () => fetchSpy.mockRestore();
+});
+
+afterEach(() => {
+  for (const dispose of storeDisposers.splice(0)) dispose();
+  restoreFetch();
+});
+
+/** Own each store's timers and suppress state.json writes. */
 const noop = () => {};
 function createTUIStore(options: Parameters<typeof _createTUIStore>[0] = {}) {
-  return _createTUIStore({ onPersistState: noop, ...options });
+  return createRoot((dispose) => {
+    storeDisposers.push(dispose);
+    return _createTUIStore({ onPersistState: noop, ...options });
+  });
 }
 
 const createMockSession = mockEnrichedSession;

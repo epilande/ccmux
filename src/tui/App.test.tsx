@@ -205,14 +205,21 @@ function withExitSpy() {
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
+let restoreFetch: () => void;
 
 beforeEach(() => {
+  // Startup hydration and selection broadcasts must not read or change the
+  // developer's daemon. Tests needing daemon data override this empty reply.
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(async () => Response.json({}), { preconnect: () => {} }),
+  );
+  restoreFetch = () => fetchSpy.mockRestore();
   sseCallbacks = null;
   switchToPaneSpy.mockClear();
   switchToPaneSpy.mockImplementation(async (_target: string) => true);
   sendKeysSpy.mockClear();
   sendKeysSpy.mockImplementation(async () => true);
-  flashPaneSpy.mockClear();
+  flashPaneSpy.mockReset();
   flashPaneDetachedSpy.mockClear();
   notifyActivePaneSpy.mockClear();
   isPaneInCurrentWindowSpy.mockClear();
@@ -240,6 +247,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setup?.renderer.destroy();
+  restoreFetch();
   // refreshServerInfo writes the module-global server-guard cache; restore
   // fail-open so a guard test's refusal can't leak into other test files.
   setDaemonSocketPath(null);
@@ -1133,14 +1141,16 @@ describe("App sidebar mode", () => {
     flashPaneSpy.mockClear();
     isPaneInCurrentWindowSpy.mockClear();
 
-    // Rapid navigation: j then j again within the debounce window
-    setup.mockInput.pressKey("j");
-    await setup.renderOnce();
-    setup.mockInput.pressKey("j");
-    await setup.renderOnce();
+    const flashed = new Promise<void>((resolve) => {
+      flashPaneSpy.mockImplementationOnce(() => resolve());
+    });
 
-    // Wait for debounce to fire
-    await new Promise((r) => setTimeout(r, 100));
+    // Deliver one burst without yielding to hydration or debounce timers
+    // between keys; rendering speed must not decide whether input is rapid.
+    setup.mockInput.pressKey("j");
+    setup.mockInput.pressKey("j");
+
+    await flashed;
 
     // Should only flash the final destination pane, not intermediate ones
     expect(flashPaneSpy).toHaveBeenCalledTimes(1);
