@@ -550,6 +550,7 @@ export const Preview: Component<PreviewProps> = (props) => {
               ref={(r: ScrollBoxRenderable) => props.onScrollboxRef?.(r)}
             >
               <text
+                fg={theme.text}
                 wrapMode="none"
                 ref={(r: TextRenderable) => (textRef = r)}
               />

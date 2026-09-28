@@ -4,6 +4,8 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createSignal } from "solid-js";
 import { testRender } from "@opentui/solid";
+import { RGBA, type CapturedFrame } from "@opentui/core";
+import { theme } from "../theme";
 import { TickContext } from "../store";
 import { mockEnrichedSession } from "./test-helpers";
 import type { EnrichedSession } from "../../types";
@@ -653,6 +655,57 @@ function mockBackgroundSession(
     ...overrides,
   });
 }
+
+// Regression test for the pane-content <text> in the preview. Captured pane
+// output that carries no explicit colour (SGR 39, "default foreground") maps
+// to an undefined chunk fg, and OpenTUI's <text> defaults an undefined fg to
+// opaque white. Without fg={theme.text} on that element the whole body of a
+// captured Claude/Codex pane renders white, which is invisible on a light
+// theme. Same bug class as #141/#142. captureCharFrame() is text-only, so
+// the colour is asserted via captureSpans().
+describe("Preview pane content color", () => {
+  function paneSpanFg(
+    frame: CapturedFrame,
+    needle: string,
+  ): [number, number, number, number] {
+    for (const line of frame.lines) {
+      for (const span of line.spans) {
+        if (span.text.includes(needle)) return span.fg.toInts();
+      }
+    }
+    throw new Error(`pane span ("${needle}") not found in frame`);
+  }
+
+  const hex = (h: string) => RGBA.fromHex(h).toInts();
+
+  it("renders unstyled pane text in theme.text, not opaque white", async () => {
+    // \x1b[39m is an explicit reset to the terminal default foreground, which
+    // is what agents emit for ordinary body text.
+    captureImpl = async () => "\x1b[39mPLAIN_PANE_TEXT";
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <Preview
+            session={mockEnrichedSession({ tmuxPane: "%1" })}
+            width={40}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 15 },
+    );
+    await setup.renderOnce();
+    let frame = "";
+    for (let i = 0; i < 30 && !frame.includes("PLAIN_PANE_TEXT"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      await setup.renderOnce();
+      frame = setup.captureCharFrame();
+    }
+    expect(frame).toContain("PLAIN_PANE_TEXT");
+    expect(paneSpanFg(setup.captureSpans(), "PLAIN_PANE_TEXT")).toEqual(
+      hex(theme.text),
+    );
+  });
+});
 
 describe("BackgroundPeek", () => {
   it("shows the ask (intent) above the detail", async () => {
