@@ -30,6 +30,7 @@ export const SearchInput: Component<SearchInputProps> = (props) => {
         placeholder="Search sessions..."
         placeholderColor={theme.overlay}
         textColor={theme.text}
+        focusedTextColor={theme.text}
         cursorColor={theme.blue}
         backgroundColor="transparent"
         focusedBackgroundColor="transparent"

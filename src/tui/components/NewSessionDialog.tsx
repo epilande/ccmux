@@ -986,6 +986,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 placeholder={promptPlaceholder()}
                 placeholderColor={theme.overlay}
                 textColor={theme.text}
+                focusedTextColor={theme.text}
                 cursorColor={theme.blue}
                 backgroundColor="transparent"
                 focusedBackgroundColor="transparent"
@@ -1060,6 +1061,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 placeholder={namePlaceholder()}
                 placeholderColor={theme.overlay}
                 textColor={theme.text}
+                focusedTextColor={theme.text}
                 cursorColor={theme.blue}
                 backgroundColor="transparent"
                 focusedBackgroundColor="transparent"

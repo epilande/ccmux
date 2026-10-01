@@ -737,6 +737,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
             placeholder="Filter pull requests and issues..."
             placeholderColor={theme.overlay}
             textColor={theme.text}
+            focusedTextColor={theme.text}
             cursorColor={theme.blue}
             backgroundColor="transparent"
             focusedBackgroundColor="transparent"

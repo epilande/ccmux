@@ -361,6 +361,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
             placeholder={notePlaceholder()}
             placeholderColor={theme.overlay}
             textColor={theme.text}
+            focusedTextColor={theme.text}
             cursorColor={theme.blue}
             backgroundColor="transparent"
             focusedBackgroundColor="transparent"
