@@ -56,6 +56,101 @@ describe("summaryFromPaneTitle", () => {
     });
   });
 
+  describe("codex", () => {
+    // Live captures on codex-cli 0.159.x, plus the shapes its title code
+    // writes in states hard to hold still (the blink, the mic, a pending
+    // `/rename`), read from the 0.160.0 source.
+    const codex = (title: string | null) =>
+      summaryFromPaneTitle("codex", title, "/tmp/probe-codex-x7", HOST);
+    // Codex's own spinner, in its order.
+    const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    const UUID = "019a3c2e-7b41-7d10-9f3e-2c5b8a6d4e1f";
+
+    it("takes the thread name before the project", () => {
+      expect(codex("lab-tests | probe-codex-x7")).toBe("lab-tests");
+      expect(codex("Resolve Git conflicts, suggest Ops | probe-codex-x7")).toBe(
+        "Resolve Git conflicts, suggest Ops",
+      );
+    });
+
+    it("takes the thread name after the spinner shown while working", () => {
+      expect(codex("⠋ lab-tests | probe-codex-x7")).toBe("lab-tests");
+    });
+
+    it("takes the thread name behind the approval prefix, in both blink states", () => {
+      // The prefix blinks every second; a summary that followed it would
+      // change between scans and re-send the row each time.
+      expect(codex("[ ! ] Action Required | lab-tests | probe-codex-x7")).toBe(
+        "lab-tests",
+      );
+      expect(codex("[ . ] Action Required | lab-tests | probe-codex-x7")).toBe(
+        "lab-tests",
+      );
+    });
+
+    it("drops the frame trailing a name while a /rename suggestion is pending", () => {
+      expect(codex("lab-tests ⠋ | probe-codex-x7")).toBe("lab-tests");
+    });
+
+    it("drops the dot shown while the mic is listening", () => {
+      expect(codex("● lab-tests | probe-codex-x7")).toBe("lab-tests");
+      expect(codex("● ⠋ lab-tests | probe-codex-x7")).toBe("lab-tests");
+    });
+
+    it("gives the same summary on every spinner frame in each animated slot", () => {
+      for (const f of FRAMES) {
+        expect([f, codex(`${f} lab-tests | probe-codex-x7`)]).toEqual([
+          f,
+          "lab-tests",
+        ]);
+        expect([f, codex(`lab-tests ${f} | probe-codex-x7`)]).toEqual([
+          f,
+          "lab-tests",
+        ]);
+        expect([f, codex(`${f} lab-tests ${f} | probe-codex-x7`)]).toEqual([
+          f,
+          "lab-tests",
+        ]);
+      }
+    });
+
+    it("reads an unnamed thread, idle or working, as no summary", () => {
+      expect(codex("probe-codex-x7")).toBeNull();
+      expect(codex("⠏ probe-codex-x7")).toBeNull();
+    });
+
+    it("reads a title still being generated as no summary", () => {
+      for (const f of FRAMES) {
+        expect([f, codex(`${f} | probe-codex-x7`)]).toEqual([f, null]);
+        expect([f, codex(`⠋ ${f} | probe-codex-x7`)]).toEqual([f, null]);
+      }
+    });
+
+    it("reads the bare approval prefix as no summary", () => {
+      expect(codex("[ ! ] Action Required")).toBeNull();
+      expect(codex("[ . ] Action Required")).toBeNull();
+      // An unnamed thread waiting on approval.
+      expect(codex("[ ! ] Action Required | probe-codex-x7")).toBeNull();
+    });
+
+    it("reads a title with an extra separator as no summary", () => {
+      // An unfamiliar layout falls back to the prompt rather than showing
+      // part of it; a thread name holding `|` falls back the same way.
+      expect(codex("a | b | probe-codex-x7")).toBeNull();
+    });
+
+    it("reads the app-name and thread-title items as no summary", () => {
+      expect(codex("codex | probe-codex-x7")).toBeNull();
+      expect(codex(`${UUID} | probe-codex-x7`)).toBeNull();
+      expect(codex(`${UUID.toUpperCase()} | probe-codex-x7`)).toBeNull();
+    });
+
+    it("reads tmux's hostname seed as no summary", () => {
+      expect(codex("probe-host.local")).toBeNull();
+      expect(codex("probe-host")).toBeNull();
+    });
+  });
+
   describe("copilot", () => {
     const copilot = (title: string | null) =>
       summaryFromPaneTitle("copilot", title, "/tmp/probe-copilot", HOST);
@@ -222,6 +317,27 @@ describe("summaryFromPaneTitle", () => {
       ).toBe("Fix the scroll math");
     });
 
+    it("caps a long title before any rule runs", () => {
+      // A title is free text another process wrote, so no rule gets to see
+      // more than 512 characters of it, however it is written.
+      expect(
+        summaryFromPaneTitle(
+          "claude",
+          `✳ ${"a".repeat(10_000)}`,
+          "/tmp/p",
+          HOST,
+        ),
+      ).toBe("a".repeat(510));
+      const started = Date.now();
+      for (const agent of BUILTIN_AGENTS) {
+        summaryFromPaneTitle(agent.name, "⠋ ".repeat(5_000), "/tmp/p", HOST);
+      }
+      expect(
+        summaryFromPaneTitle("codex", "⠋ ".repeat(5_000), "/tmp/p", HOST),
+      ).toBeNull();
+      expect(Date.now() - started).toBeLessThan(100);
+    });
+
     it("normalizes before the cwd comparison", () => {
       expect(
         summaryFromPaneTitle(
@@ -235,13 +351,7 @@ describe("summaryFromPaneTitle", () => {
   });
 
   describe("agents with no rule", () => {
-    it("has no summary for codex, pi or gemini", () => {
-      expect(
-        summaryFromPaneTitle("codex", "probe-codex-x7", "/tmp/p", HOST),
-      ).toBeNull();
-      expect(
-        summaryFromPaneTitle("codex", "⠏ probe-codex-x7", "/tmp/p", HOST),
-      ).toBeNull();
+    it("has no summary for pi or gemini", () => {
       expect(
         summaryFromPaneTitle("pi", "π - probe-pi-z3", "/tmp/p", HOST),
       ).toBeNull();

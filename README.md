@@ -169,7 +169,7 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 
 Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
 
-The preview header names the session: the project in bold, then the agent's own summary of the session on agents that publish one (Claude Code, OpenCode, Cursor, oh-my-pi, and Copilot do; on the rest the line is omitted), then the working directory and the branch/version/target metadata.
+The preview header names the session: the project in bold, then the agent's own summary of the session on agents that publish one (Claude Code, Codex, OpenCode, Cursor, oh-my-pi, and Copilot do; on the rest the line is omitted), then the working directory and the branch/version/target metadata.
 
 When the session has agents running, an **Agents** section lists each one with its runtime. Finished agents drop off the list.
 
@@ -731,7 +731,7 @@ Pass an empty string to clear a side: `ccmux config set columns.row2.left ""`.
 | `pr`      | `short`/`full`        | `full`       | Open PRs for the branch (`#25`/`PR #25`)                                                 |
 | `summary` | —                     | —            | The agent's own summary of the session, falling back to the last prompt (truncated)      |
 
-`summary` is the default subtitle cell, and shows what the agent says it is doing. Claude Code, Copilot, Cursor, OpenCode and oh-my-pi each keep a generated summary in their tmux pane title; the column reads that through a per-agent rule that drops the status glyph, the spinner frame and the app name, so what lands on the row is the summary alone. Every other agent writes its cwd, its own state or a static app name there, and for those the cell falls back to the last prompt. A pane title equal to the machine's own hostname is never shown either: that is the seed tmux gives a pane whose agent never set a title. Never both on one line.
+`summary` is the default subtitle cell, and shows what the agent says it is doing. Claude Code, Codex, Copilot, Cursor, OpenCode and oh-my-pi each keep a generated summary in their tmux pane title; the column reads that through a per-agent rule that drops the status glyph, the spinner frame and the app name, so what lands on the row is the summary alone. Every other agent writes its cwd, its own state or a static app name there, and for those the cell falls back to the last prompt. A pane title equal to the machine's own hostname is never shown either: that is the seed tmux gives a pane whose agent never set a title. Never both on one line.
 
 `prompt` is unchanged and still shows the raw last prompt. To keep it as the subtitle, name it in the column config:
 

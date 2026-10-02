@@ -4979,7 +4979,7 @@ describe("search over the agent's summary", () => {
   });
 
   it("finds nothing in the pane title of an agent with no rule", () => {
-    // codex writes its cwd basename there; the `project` column already
+    // pi writes its cwd basename there; the `project` column already
     // carries that, and matching it would make the query mean two things.
     // The daemon ships `summary: null` for it, and the raw title is not a
     // search field.
@@ -4987,17 +4987,17 @@ describe("search over the agent's summary", () => {
     store.actions.setSessions([
       createMockSession({
         id: "s1",
-        agentType: "codex",
+        agentType: "pi",
         project: "proj",
         gitBranch: null,
-        paneTitle: "probe-codex-x7",
+        paneTitle: "π - probe-pi-z3",
         summary: null,
         lastPrompt: null,
         prompts: [],
       }),
     ]);
 
-    store.actions.setSearchQuery("probe-codex");
+    store.actions.setSearchQuery("probe-pi");
     expect(store.filteredSessions()).toHaveLength(0);
   });
 
