@@ -16,6 +16,11 @@
   <img alt="ccmux picker showing live agent sessions grouped by project" src="https://github.com/user-attachments/assets/e4c41e9c-9221-47e2-86d4-362dd799651a" width="900">
 </p>
 
+<p align="center">
+  <a href="https://ccmux.dev">Website</a> ·
+  <a href="https://ccmux.dev/docs/">Documentation</a>
+</p>
+
 ## ❓ Why?
 
 When running multiple AI coding agent sessions across tmux panes, it's hard to keep track of which session is idle, which is waiting for permission, and which pane to switch to. `ccmux` solves this with a background daemon that monitors session activity and an interactive TUI that shows live session states at a glance.
