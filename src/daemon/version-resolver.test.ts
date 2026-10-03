@@ -138,6 +138,104 @@ describe("version-resolver", () => {
   });
 
   describe("VersionResolver.resolve", () => {
+    it("uses each native process's executable instead of a shared PATH probe", async () => {
+      const probes: string[][] = [];
+      const resolver = new VersionResolver({
+        runCommand: async (argv) => {
+          probes.push(argv);
+          return {
+            stdout: argv[0] === "/agents/v1/opencode" ? "1.18.34" : "2.0.21",
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      });
+      const agent = getBuiltinAgent("opencode");
+      expect(
+        await resolver.resolve(agent, "opencode", "/agents/v1/opencode"),
+      ).toBe("1.18.34");
+      expect(
+        await resolver.resolve(agent, "opencode", "/agents/v2/opencode.exe"),
+      ).toBe("2.0.21");
+      expect(probes).toEqual([
+        ["/agents/v1/opencode", "--version"],
+        ["/agents/v2/opencode.exe", "--version"],
+      ]);
+    });
+
+    it("does not fall back to another installation when the known binary cannot be probed", async () => {
+      const probes: string[][] = [];
+      const resolver = new VersionResolver({
+        runCommand: async (argv) => {
+          probes.push(argv);
+          return {
+            stdout: argv[0] === "opencode" ? "1.18.34" : "",
+            stderr: "",
+            exitCode: 1,
+          };
+        },
+      });
+      expect(
+        await resolver.resolve(
+          getBuiltinAgent("opencode"),
+          "opencode",
+          "/agents/v2/opencode",
+        ),
+      ).toBeNull();
+      expect(probes).toEqual([["/agents/v2/opencode", "--version"]]);
+    });
+
+    it("preserves node script probes instead of reporting the runtime version", async () => {
+      const probes: string[][] = [];
+      const resolver = new VersionResolver({
+        runCommand: async (argv) => {
+          probes.push(argv);
+          return { stdout: "0.29.5", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(
+        await resolver.resolve(
+          getBuiltinAgent("gemini"),
+          "node /agents/gemini",
+          "/usr/bin/node",
+        ),
+      ).toBe("0.29.5");
+      expect(probes).toEqual([["node", "/agents/gemini", "--version"]]);
+    });
+
+    it("does not replace a renamed agent process with its Bun runtime", async () => {
+      const probes: string[][] = [];
+      const resolver = new VersionResolver({
+        runCommand: async (argv) => {
+          probes.push(argv);
+          return { stdout: "0.79.9", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(
+        await resolver.resolve(getBuiltinAgent("pi"), "pi", "/usr/bin/bun"),
+      ).toBe("0.79.9");
+      expect(probes).toEqual([["pi", "--version"]]);
+    });
+
+    it("preserves spaces and quotes in the PID executable path", async () => {
+      const executable = "/agents/owner's tools/opencode";
+      const probes: string[][] = [];
+      const resolver = new VersionResolver({
+        runCommand: async (argv) => {
+          probes.push(argv);
+          return { stdout: "2.0.21", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(
+        await resolver.resolve(
+          getBuiltinAgent("opencode"),
+          "/other/opencode",
+          executable,
+        ),
+      ).toBe("2.0.21");
+      expect(probes).toEqual([[executable, "--version"]]);
+    });
+
     it("deduplicates in-flight probes and caches successful results", async () => {
       const opencode = getBuiltinAgent("opencode");
       let calls = 0;

@@ -402,7 +402,21 @@ export class VersionResolver {
   async resolve(
     agent: AgentDef,
     processCommand: string,
+    executablePath?: string,
   ): Promise<string | null> {
+    const commandName = executableName(
+      parseShellTokens(processCommand)[0] ?? "",
+    );
+    if (
+      executablePath &&
+      regexTest(agent.processMatch, commandName) &&
+      regexTest(agent.processMatch, executableName(executablePath))
+    ) {
+      // A native agent's argv[0] may be bare, a symlink, or a different
+      // installation on daemon PATH. Keep wrappers' script arguments intact;
+      // their PID executable is a runtime whose version is not the agent's.
+      processCommand = `'${executablePath.replace(/'/g, "'\\''")}'`;
+    }
     const probe = buildVersionProbeCommand(processCommand, agent);
     if (!probe) {
       return null;
