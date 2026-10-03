@@ -313,6 +313,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  request-site-deploy:
+    needs: release
+    if: ${{ !contains(needs.release.outputs.version, '-') }}
+    uses: ./.github/workflows/deploy-site.yml
+    permissions: {}
+    secrets:
+      CCMUX_SITE_DEPLOY_TOKEN: ${{ secrets.CCMUX_SITE_DEPLOY_TOKEN }}
+
   homebrew:
     needs: release
     runs-on: ubuntu-latest
