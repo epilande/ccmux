@@ -730,9 +730,8 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       // the multi-select Confirm tab renders no arrow glyphs at all, so that
       // anchor silently misses it (fixtures in terminal-detector.test.ts).
       //
-      // MUST stay ahead of the permission rule below, whose `matchAny`
-      // includes the bare word "reject": model-authored question text can
-      // contain it, and a permission misclassification on the pane-only path
+      // MUST stay ahead of the permission rules below: question text can
+      // quote permission controls, and a misclassification on the pane-only path
       // attaches Approve/Deny buttons whose approve key is a bare Enter,
       // which the picker consumes as a selection. See
       // docs/agent-adapters.md for the full capture.
@@ -743,7 +742,21 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: null,
       },
       {
-        matchAny: ["allow once", "allow always", "reject", "[y/n]", "(y/n)"],
+        matchAll: ["allow once", "reject"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      },
+      {
+        // A child permission's Reject action opens a second form. The bare
+        // word "reject" also occurs in completed permission.rejected output.
+        matchAll: ["reject permission", "enter confirm", "esc cancel"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      },
+      {
+        matchAny: ["[y/n]", "(y/n)"],
         status: "waiting",
         attentionType: "permission",
         pendingTool: "Command",

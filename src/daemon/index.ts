@@ -40,7 +40,7 @@ import { getAgents } from "../lib/agents";
 import { getPreferences, type Preferences } from "../lib/preferences";
 import { tmuxCaptureSync } from "../lib/tmux-exec";
 import { markDaemonProcess } from "../lib/tmux-socket";
-import { VersionResolver, parseShellTokens } from "./version-resolver";
+import { VersionResolver } from "./version-resolver";
 import { readClaudeHistory } from "./adapters/claude/history";
 import {
   getAllSessionPidMarkers,
@@ -879,19 +879,12 @@ export class Daemon {
     if (!agent) return;
 
     try {
-      let version = await this.versionResolver.resolve(agent, processCommand);
-
-      // Some CLIs are launched by bare command names that are absent from daemon PATH.
-      // Retry with PID-derived executable path when command token is not absolute.
-      if (!version) {
-        const firstToken = parseShellTokens(processCommand)[0];
-        if (firstToken && !firstToken.includes("/")) {
-          const executablePath = await this.resolveProcessExecutablePath(pid);
-          if (executablePath) {
-            version = await this.versionResolver.resolve(agent, executablePath);
-          }
-        }
-      }
+      const executablePath = await this.resolveProcessExecutablePath(pid);
+      const version = await this.versionResolver.resolve(
+        agent,
+        processCommand,
+        executablePath,
+      );
 
       if (version) {
         this.sessionManager.updateSession(sessionId, { version });

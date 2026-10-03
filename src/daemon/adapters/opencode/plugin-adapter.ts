@@ -111,11 +111,17 @@ function installPluginFile(plugin: PluginFile): HookAdapterOutcome {
       changed: false,
     };
   }
-  mkdirSync(plugin.dir, { recursive: true });
   const source = plugin.render({
     markersDir: MARKERS_DIR,
     version: CCMUX_VERSION,
   });
+  if (inspection.exists && readFileSync(plugin.file, "utf-8") === source) {
+    return {
+      lines: [`Plugin already up to date: ${plugin.file}`],
+      changed: false,
+    };
+  }
+  mkdirSync(plugin.dir, { recursive: true });
   const tmp = `${plugin.file}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmp, source);
   renameSync(tmp, plugin.file);
@@ -231,7 +237,9 @@ export class OpenCodePluginAdapter implements HookAdapter {
     const lines = outcomes.flatMap((o) => o.lines);
     const changed = outcomes.some((o) => o.changed);
     if (changed) {
-      lines.push("Restart any running OpenCode sessions to pick up the plugin.");
+      lines.push(
+        "Restart any running OpenCode sessions to pick up the plugin.",
+      );
     }
     return { lines, changed };
   }

@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -133,18 +141,48 @@ describe("OpenCodePluginAdapter", () => {
   });
 
   describe("install", () => {
-    it("writes a plugin file with the sentinel header and is idempotent", async () => {
-      await adapter.install();
-      expect(existsSync(opencodePluginFile)).toBe(true);
-      const firstLine = readFileSync(opencodePluginFile, "utf-8").split(
-        "\n",
-        1,
-      )[0];
-      expect(firstLine).toBe(`// ccmux-plugin v${CCMUX_VERSION}`);
+    it.each(["1.18.34", "2.0.21"])(
+      "leaves identical installed plugins untouched on %s",
+      async (version) => {
+        openCodeVersion = version;
+        await adapter.install();
+        const files = version.startsWith("1.")
+          ? [opencodePluginFile, opencodeTuiPluginFile]
+          : [opencodeTuiPluginFile];
+        const before = files.map((file) => {
+          expect(readFileSync(file, "utf-8").split("\n", 1)[0]).toBe(
+            `// ccmux-plugin v${CCMUX_VERSION}`,
+          );
+          const time = new Date("2024-01-15T12:00:00Z");
+          utimesSync(file, time, time);
+          return statSync(file);
+        });
+        const result = await adapter.install();
+        expect(result.changed).toBe(false);
+        expect(result.lines.some((line) => /Updated|Restart/.test(line))).toBe(
+          false,
+        );
+        files.forEach((file, i) => {
+          expect(statSync(file).ino).toBe(before[i].ino);
+          expect(statSync(file).mtimeMs).toBe(before[i].mtimeMs);
+        });
+      },
+    );
 
-      // Second install should succeed (our own sentinel present).
-      await expect(adapter.install()).resolves.toBeDefined();
-      expect(existsSync(opencodePluginFile)).toBe(true);
+    it("refreshes same-version plugins when their contents or marker directory differ", async () => {
+      await adapter.install();
+      for (const file of [opencodePluginFile, opencodeTuiPluginFile]) {
+        const expected = readFileSync(file, "utf-8");
+        writeFileSync(
+          file,
+          expected.replace(
+            JSON.stringify(markersDir),
+            JSON.stringify("/old/markers"),
+          ),
+        );
+        expect((await adapter.install()).changed).toBe(true);
+        expect(readFileSync(file, "utf-8")).toBe(expected);
+      }
     });
 
     it("refuses to overwrite a same-named file lacking the sentinel, returns advisory lines", async () => {
@@ -217,7 +255,9 @@ describe("OpenCodePluginAdapter", () => {
         await adapter.install();
         expect(existsSync(opencodePluginFile)).toBe(true);
         const body = readFileSync(opencodeTuiPluginFile, "utf-8");
-        expect(body.split("\n", 1)[0]).toBe(`// ccmux-plugin v${CCMUX_VERSION}`);
+        expect(body.split("\n", 1)[0]).toBe(
+          `// ccmux-plugin v${CCMUX_VERSION}`,
+        );
         expect(body).toContain(`markersDir: ${JSON.stringify(markersDir)}`);
         expect(body).toContain("makeTuiPlugin");
       });
