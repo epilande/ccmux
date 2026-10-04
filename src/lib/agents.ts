@@ -991,6 +991,29 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       ],
       output: { kind: "tmpfile" },
     },
+    // Captured on codex-cli 0.159.1 and 0.159.3 with the default
+    // `[tui].terminal_title` (`activity`, `thread-name`, `project-name`), and
+    // checked against the 0.160.0 source: `<thread> | <project>` idle, a
+    // braille frame ahead of it while working. Codex names every thread after
+    // its first prompt; before that the title is the bare project, which has
+    // no separator and so no summary. An approval prepends
+    // `[ ! ] Action Required | ` and blinks it to `[ . ]` every second, a
+    // pending `/rename` suggestion puts a frame after the name, and `●` leads
+    // while the mic listens. The capture cannot hold `|`, so a reordered or
+    // extended `terminal_title` falls back to the prompt rather than showing
+    // junk, at the cost of a thread name that contains one. It also has to
+    // start on a character the leading class cannot take: otherwise a long
+    // pipe-less run of spaces and frames backtracks quadratically. The `codex`
+    // and UUID patterns cover the `app-name` and `thread-title` items.
+    summaryTitle: {
+      match:
+        /^[\u25CF\u2800-\u28FF\s]*(?:\[ [!.] \] Action Required \| )?([^|\s\u25CF\u2800-\u28FF][^|]*?)(?: [\u2800-\u28FF])? \| [^|]+$/,
+      empty: [
+        /^\[ [!.] \] Action Required$/,
+        /^codex$/,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      ],
+    },
   },
   {
     name: "cursor",

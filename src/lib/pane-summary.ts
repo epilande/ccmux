@@ -23,6 +23,14 @@ const RULES = new Map<string, SummaryTitleRule>(
 const HOSTNAME = hostname();
 
 /**
+ * How much of a normalized title any rule sees. A title is free text another
+ * process wrote, and a rule that backtracks badly on some shape would turn a
+ * long one into a stall on every scan tick. Well above any real summary:
+ * Codex caps its own title at 240 characters.
+ */
+const MAX_TITLE_LENGTH = 512;
+
+/**
  * The summary as it will be stored and rendered: no escape sequences, no
  * runs of whitespace, no surrounding space.
  *
@@ -69,7 +77,7 @@ export function summaryFromPaneTitle(
   // Normalize the WHOLE title, not just the capture: every rule anchors on
   // `^`, so an escape sequence ahead of the agent's own marker would defeat
   // the match itself. Idempotent, so the capture comes out clean too.
-  const title = normalizeTitle(paneTitle);
+  const title = normalizeTitle(paneTitle).slice(0, MAX_TITLE_LENGTH);
   if (title === "") return null;
   if (rule.empty?.some((re) => re.test(title))) return null;
 

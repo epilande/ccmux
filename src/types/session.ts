@@ -324,7 +324,7 @@ export interface EnrichedSession extends Session {
    * The agent's own summary of what this session is doing, normalized, or
    * null when this agent writes none.
    *
-   * Five built-in agents keep a generated summary in {@link paneTitle}, each
+   * Six built-in agents keep a generated summary in {@link paneTitle}, each
    * behind its own decoration (a status glyph, a spinner frame, an appended
    * app name); the rest write their cwd, their own run state, or a static app
    * name. `summaryFromPaneTitle` (`lib/pane-summary.ts`) is the per-agent rule
