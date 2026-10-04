@@ -265,6 +265,28 @@ describe("opencode reader", () => {
       expect(result?.turns[0]?.text).toBe("v1 reply");
     });
 
+    it("refuses the cwd fallback for a 2.x session even when the timestamps miss it", async () => {
+      // A 2.x session resumed after newer 1.x use: its time_updated only
+      // moves on its next prompt, so the timestamp guard alone would let
+      // the stale 1.x reply through.
+      insertV2Session("ses_v2", "/tmp/proj", 100);
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", version: "2.0.21" },
+        1,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("keeps the fallback for a session known to run 1.x", async () => {
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", version: "1.18.34" },
+        1,
+      );
+      expect(result?.turns[0]?.text).toBe("v1 reply");
+    });
+
     it("still reads an explicit nativeSessionId", async () => {
       insertV2Session("ses_v2", "/tmp/proj", 900);
       const result = await readOpenCodeTranscript(

@@ -260,9 +260,11 @@ export interface AgentDef {
    * agent whose permission prompt `approve`/`deny` were verified against. A
    * session on a newer major, or one whose version has not resolved, gets
    * neither key (see `sessionNotificationActions`), because a prompt
-   * redesign can turn a deny sequence into an approve. It describes these
-   * builtin keys, so a user override, which replaces the map wholesale,
-   * drops it along with them.
+   * redesign can turn a deny sequence into an approve. Like
+   * `unsafeReplyPattern`, it survives a user override that omits it: the
+   * README tells users to copy across the keys they keep, and a copied 1.x
+   * deny sequence is exactly what approves on 2.x. An override lifts the
+   * gate only by setting a larger number itself.
    */
   notificationActions?: {
     approve?: string[];
@@ -509,6 +511,17 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
       merged.notificationActions.unsafeReplyPattern =
         base.notificationActions.unsafeReplyPattern;
     }
+    // Same exception for the approval version gate: an override that copies
+    // the builtin approve/deny keys must not also re-arm them on a major
+    // version where they were never verified (OpenCode 2's Deny approves).
+    if (
+      merged.notificationActions.approvalKeysVerifiedThroughMajor ===
+        undefined &&
+      base.notificationActions?.approvalKeysVerifiedThroughMajor !== undefined
+    ) {
+      merged.notificationActions.approvalKeysVerifiedThroughMajor =
+        base.notificationActions.approvalKeysVerifiedThroughMajor;
+    }
   }
   if (override.ambiguousPermissionMarker !== undefined) {
     merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
@@ -533,6 +546,15 @@ function parseNotificationActions(
     parsed.unsafeReplyPattern = parseRegex(
       unsafeReplyPattern,
       `${fieldName}.unsafeReplyPattern`,
+    );
+  }
+  const verifiedThrough = config.approvalKeysVerifiedThroughMajor;
+  if (
+    verifiedThrough !== undefined &&
+    !(Number.isInteger(verifiedThrough) && verifiedThrough >= 0)
+  ) {
+    throw new Error(
+      `Invalid ${fieldName}.approvalKeysVerifiedThroughMajor: must be a non-negative integer`,
     );
   }
   return parsed;

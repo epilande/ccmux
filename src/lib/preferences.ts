@@ -96,6 +96,9 @@ export interface AgentConfig {
    * regex (string form, parsed like `readyPattern`) matching reply text the
    * delivery path must refuse for this agent (composer triggers a leading
    * space cannot defuse; see `AgentDef.notificationActions`).
+   * `approvalKeysVerifiedThroughMajor` is the newest major version the
+   * `approve`/`deny` keys are known to be safe on; like `unsafeReplyPattern`
+   * it carries over from the built-in when an override omits it.
    */
   notificationActions?: {
     approve?: string[];
@@ -108,6 +111,7 @@ export interface AgentConfig {
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
     unsafeReplyPattern?: string;
+    approvalKeysVerifiedThroughMajor?: number;
   };
   /**
    * Set when this custom agent's permission marker can actually cover an

@@ -777,6 +777,60 @@ describe("sessionNotificationActions", () => {
   it("is undefined for an unknown agent", () => {
     expect(sessionNotificationActions(undefined, "1.0.0")).toBeUndefined();
   });
+
+  describe("under a notificationActions override", () => {
+    it("keeps the gate when the override copies the builtin keys without it", () => {
+      // The README says to copy across the keys you keep; a copied 1.x deny
+      // sequence must not come back on OpenCode 2, where it approves.
+      const overridden = getAgents({
+        agents: {
+          opencode: {
+            notificationActions: {
+              approve: ["Enter"],
+              deny: ["Right", "Right", "Enter"],
+              replyOnFinished: false,
+            },
+          },
+        },
+      }).find((a) => a.name === "opencode");
+      expect(
+        overridden?.notificationActions?.approvalKeysVerifiedThroughMajor,
+      ).toBe(1);
+      const actions = sessionNotificationActions(overridden, "2.0.21");
+      expect(actions?.approve).toBeUndefined();
+      expect(actions?.deny).toBeUndefined();
+      expect(actions?.replyOnFinished).toBe(false);
+    });
+
+    it("lifts the gate only when the override raises it explicitly", () => {
+      const overridden = getAgents({
+        agents: {
+          opencode: {
+            notificationActions: {
+              approve: ["Enter"],
+              deny: ["Escape"],
+              approvalKeysVerifiedThroughMajor: 2,
+            },
+          },
+        },
+      }).find((a) => a.name === "opencode");
+      expect(sessionNotificationActions(overridden, "2.0.21")?.deny).toEqual([
+        "Escape",
+      ]);
+    });
+
+    it("rejects a gate that is not a non-negative integer", () => {
+      expect(() =>
+        getAgents({
+          agents: {
+            opencode: {
+              notificationActions: { approvalKeysVerifiedThroughMajor: 1.5 },
+            },
+          },
+        }),
+      ).toThrow(/approvalKeysVerifiedThroughMajor/);
+    });
+  });
 });
 
 describe("agents.<builtin>.notificationActions unsafeReplyPattern carry-forward", () => {

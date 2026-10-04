@@ -35,6 +35,7 @@
  */
 
 import { Database } from "bun:sqlite";
+import { parseMajorVersion } from "../../lib/agents";
 import { OPENCODE_DB_FILE } from "../../lib/config";
 import type {
   TranscriptReader,
@@ -102,8 +103,13 @@ function resolveSessionId(
   db: Database,
   nativeSessionId: string | undefined,
   cwd: string,
+  version: string | null | undefined,
 ): string | null {
   if (nativeSessionId) return nativeSessionId;
+  // The fallback only knows 1.x tables, so for a pane known to run 2.x any
+  // session it finds is stale 1.x history, not what the pane is showing.
+  const major = parseMajorVersion(version);
+  if (major !== null && major >= 2) return null;
 
   const candidates = db
     .query<
@@ -147,10 +153,15 @@ function resolveSessionId(
  *
  * OpenCode 2 writes its sessions to `session_v2`/`session_message` in the
  * same database and leaves the 1.x tables behind (issue #214). This reader
- * only reads the 1.x tables, so once the cwd has seen newer 2.x activity its
+ * only reads the 1.x tables, so once the cwd has a newer 2.x session its
  * newest 1.x session is stale history rather than what the pane is running,
  * and handing it to `ccmux handoff` would relay the wrong conversation.
  * Returning null instead lets `ccmux last` fall back to the pane capture.
+ *
+ * This is the second line of defense, behind the session's own version:
+ * 2.x advances `time_updated` when a prompt is queued but not on replies or
+ * turn completion, so an older 2.x session resumed after newer 1.x use in
+ * the same cwd reads as older here until its first new prompt.
  */
 function newestOpenCode2Activity(db: Database, cwd: string): number {
   try {
@@ -367,7 +378,7 @@ function isOpenCode2Session(db: Database, sessionId: string): boolean {
  */
 export async function readOpenCodeTranscript(
   dbPath: string,
-  session: { nativeSessionId?: string; cwd: string },
+  session: { nativeSessionId?: string; cwd: string; version?: string | null },
   turns: number,
 ): Promise<TranscriptResult | null> {
   let db: Database;
@@ -381,6 +392,7 @@ export async function readOpenCodeTranscript(
       db,
       session.nativeSessionId,
       session.cwd,
+      session.version,
     );
     if (!sessionId) return null;
     return foldTurns(

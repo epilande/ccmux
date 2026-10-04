@@ -40,7 +40,7 @@ import { getAgents } from "../lib/agents";
 import { getPreferences, type Preferences } from "../lib/preferences";
 import { tmuxCaptureSync } from "../lib/tmux-exec";
 import { markDaemonProcess } from "../lib/tmux-socket";
-import { VersionResolver } from "./version-resolver";
+import { VersionResolver, probesThroughPath } from "./version-resolver";
 import { readClaudeHistory } from "./adapters/claude/history";
 import {
   getAllSessionPidMarkers,
@@ -57,8 +57,10 @@ import type {
 import {
   discoverAgentProcesses,
   discoverAgentProcessesOrThrow,
+  PROCFS_DELETED_SUFFIX,
   ProcessDiscoveryError,
   readProcfsExecutable,
+  type ProcessExecutable,
 } from "./processes";
 import { ScanHealth } from "./scan-health";
 import {
@@ -879,11 +881,24 @@ export class Daemon {
     if (!agent) return;
 
     try {
-      const executablePath = await this.resolveProcessExecutablePath(pid);
+      const executable = await this.resolveProcessExecutable(pid);
+      // An agent whose Approve/Deny keys are gated on its version must not
+      // take its version from whichever installation the daemon's PATH holds:
+      // a 2.x pane reading a 1.x PATH binary would re-arm 1.x keys that
+      // approve on 2.x. With the running executable unknown, stay versionless
+      // (no buttons) rather than guess.
+      if (
+        !executable &&
+        agent.notificationActions?.approvalKeysVerifiedThroughMajor !==
+          undefined &&
+        probesThroughPath(agent, processCommand)
+      ) {
+        return;
+      }
       const version = await this.versionResolver.resolve(
         agent,
         processCommand,
-        executablePath,
+        executable,
       );
 
       if (version) {
@@ -894,11 +909,11 @@ export class Daemon {
     }
   }
 
-  private async resolveProcessExecutablePath(
+  private async resolveProcessExecutable(
     pid: number,
-  ): Promise<string | undefined> {
-    const procfsPath = await readProcfsExecutable(pid);
-    if (procfsPath) return procfsPath;
+  ): Promise<ProcessExecutable | undefined> {
+    const procfs = await readProcfsExecutable(pid);
+    if (procfs) return procfs;
 
     try {
       const lines = await this.getLsofLines(pid);
@@ -912,7 +927,11 @@ export class Daemon {
         if (expectTxtPath) {
           expectTxtPath = false;
           if (line.startsWith("n") && line.length > 1) {
-            return line.slice(1);
+            const path = line.slice(1);
+            // Replaced while running: the path now names the replacement,
+            // and lsof offers no way to probe the running inode.
+            if (path.endsWith(PROCFS_DELETED_SUFFIX)) return undefined;
+            return { path, probePath: path };
           }
         }
       }

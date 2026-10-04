@@ -1,6 +1,8 @@
 import type { AgentDef } from "../lib/agents";
 import { existsSync, readFileSync, realpathSync } from "fs";
-import { dirname, join } from "path";
+import { stat } from "fs/promises";
+import { dirname, isAbsolute, join } from "path";
+import type { ProcessExecutable } from "./processes";
 
 interface CommandResult {
   stdout: string;
@@ -18,11 +20,20 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+/** The fields of a file's stat that change when it is replaced or rewritten. */
+interface FileIdentity {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
 interface VersionResolverOptions {
   ttlMs?: number;
   timeoutMs?: number;
   now?: () => number;
   runCommand?: CommandRunner;
+  statFile?: (path: string) => Promise<FileIdentity>;
 }
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
@@ -38,6 +49,23 @@ function regexTest(pattern: RegExp, value: string): boolean {
 
 function executableName(token: string): string {
   return token.split("/").filter(Boolean).at(-1)?.toLowerCase() ?? "";
+}
+
+/**
+ * Whether a version probe for this process command would find the agent by
+ * its bare name on the daemon's PATH, which may hold a different installation
+ * than the one the process runs.
+ */
+export function probesThroughPath(
+  agent: AgentDef,
+  processCommand: string,
+): boolean {
+  const first = parseShellTokens(processCommand)[0] ?? "";
+  return (
+    first !== "" &&
+    !first.includes("/") &&
+    regexTest(agent.processMatch, executableName(first))
+  );
 }
 
 function findFirstNonOption(tokens: string[], start: number): string | null {
@@ -389,6 +417,7 @@ export class VersionResolver {
   private readonly timeoutMs: number;
   private readonly now: () => number;
   private readonly runCommand: CommandRunner;
+  private readonly statFile: (path: string) => Promise<FileIdentity>;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly inflight = new Map<string, Promise<string | null>>();
 
@@ -397,32 +426,43 @@ export class VersionResolver {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
     this.runCommand = options.runCommand ?? runCommandWithTimeout;
+    this.statFile = options.statFile ?? stat;
   }
 
   async resolve(
     agent: AgentDef,
     processCommand: string,
-    executablePath?: string,
+    executable?: ProcessExecutable,
   ): Promise<string | null> {
     const commandName = executableName(
       parseShellTokens(processCommand)[0] ?? "",
     );
+    let probe: string[] | null;
     if (
-      executablePath &&
+      executable &&
       regexTest(agent.processMatch, commandName) &&
-      regexTest(agent.processMatch, executableName(executablePath))
+      regexTest(agent.processMatch, executableName(executable.path))
     ) {
       // A native agent's argv[0] may be bare, a symlink, or a different
       // installation on daemon PATH. Keep wrappers' script arguments intact;
       // their PID executable is a runtime whose version is not the agent's.
-      processCommand = `'${executablePath.replace(/'/g, "'\\''")}'`;
+      // The probe is built here rather than by buildVersionProbeCommand:
+      // a replaced binary's `/proc/<pid>/exe` does not match processMatch,
+      // and that builder would fall back to `versionCommand` on PATH.
+      processCommand = `'${executable.probePath.replace(/'/g, "'\\''")}'`;
+      probe = [executable.probePath, "--version"];
+    } else {
+      probe = buildVersionProbeCommand(processCommand, agent);
     }
-    const probe = buildVersionProbeCommand(processCommand, agent);
     if (!probe) {
       return null;
     }
 
-    const cacheKey = `${agent.name}\0${probe.join("\0")}`;
+    // The probed file's identity is part of the key: an installer that
+    // replaces the binary at the same path (OpenCode 2's writes over 1.x's
+    // ~/.opencode/bin/opencode) must not inherit the old binary's version.
+    const identity = await this.fileIdentity(probe[0]);
+    const cacheKey = `${agent.name}\0${probe.join("\0")}\0${identity}`;
     const now = this.now();
     const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
@@ -471,5 +511,17 @@ export class VersionResolver {
     }
 
     return value;
+  }
+
+  /** A probed executable's stat identity, or "" for a bare name or a file
+   *  that cannot be stat'd (the key then falls back to the path alone). */
+  private async fileIdentity(path: string | undefined): Promise<string> {
+    if (!path || !isAbsolute(path)) return "";
+    try {
+      const { dev, ino, size, mtimeMs } = await this.statFile(path);
+      return `${dev}:${ino}:${size}:${mtimeMs}`;
+    } catch {
+      return "";
+    }
   }
 }

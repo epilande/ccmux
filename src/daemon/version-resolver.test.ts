@@ -8,7 +8,10 @@ import {
   buildVersionProbeCommand,
   extractVersionFromOutput,
   inferVersionFromProcessCommand,
+  probesThroughPath,
 } from "./version-resolver";
+
+const exe = (path: string, probePath = path) => ({ path, probePath });
 
 describe("version-resolver", () => {
   describe("buildVersionProbeCommand", () => {
@@ -152,10 +155,10 @@ describe("version-resolver", () => {
       });
       const agent = getBuiltinAgent("opencode");
       expect(
-        await resolver.resolve(agent, "opencode", "/agents/v1/opencode"),
+        await resolver.resolve(agent, "opencode", exe("/agents/v1/opencode")),
       ).toBe("1.18.34");
       expect(
-        await resolver.resolve(agent, "opencode", "/agents/v2/opencode.exe"),
+        await resolver.resolve(agent, "opencode", exe("/agents/v2/opencode.exe")),
       ).toBe("2.0.21");
       expect(probes).toEqual([
         ["/agents/v1/opencode", "--version"],
@@ -179,7 +182,7 @@ describe("version-resolver", () => {
         await resolver.resolve(
           getBuiltinAgent("opencode"),
           "opencode",
-          "/agents/v2/opencode",
+          exe("/agents/v2/opencode"),
         ),
       ).toBeNull();
       expect(probes).toEqual([["/agents/v2/opencode", "--version"]]);
@@ -197,7 +200,7 @@ describe("version-resolver", () => {
         await resolver.resolve(
           getBuiltinAgent("gemini"),
           "node /agents/gemini",
-          "/usr/bin/node",
+          exe("/usr/bin/node"),
         ),
       ).toBe("0.29.5");
       expect(probes).toEqual([["node", "/agents/gemini", "--version"]]);
@@ -212,7 +215,7 @@ describe("version-resolver", () => {
         },
       });
       expect(
-        await resolver.resolve(getBuiltinAgent("pi"), "pi", "/usr/bin/bun"),
+        await resolver.resolve(getBuiltinAgent("pi"), "pi", exe("/usr/bin/bun")),
       ).toBe("0.79.9");
       expect(probes).toEqual([["pi", "--version"]]);
     });
@@ -230,7 +233,7 @@ describe("version-resolver", () => {
         await resolver.resolve(
           getBuiltinAgent("opencode"),
           "/other/opencode",
-          executable,
+          exe(executable),
         ),
       ).toBe("2.0.21");
       expect(probes).toEqual([[executable, "--version"]]);
@@ -276,6 +279,75 @@ describe("version-resolver", () => {
       );
       expect(refreshed).toBe("2.5.2");
       expect(calls).toBe(2);
+    });
+
+    it("re-probes a binary replaced at the same path instead of reusing its cached version", async () => {
+      // OpenCode 2's installer writes over 1.x's ~/.opencode/bin/opencode, so
+      // a path-only cache key would stamp the new 2.x process with 1.x.
+      const opencode = getBuiltinAgent("opencode");
+      const path = "/home/u/.opencode/bin/opencode";
+      let installed = { version: "1.18.34", ino: 1 };
+      let calls = 0;
+      const resolver = new VersionResolver({
+        statFile: async () => ({
+          dev: 1,
+          ino: installed.ino,
+          size: 100,
+          mtimeMs: installed.ino,
+        }),
+        runCommand: async () => {
+          calls += 1;
+          return { stdout: installed.version, stderr: "", exitCode: 0 };
+        },
+      });
+
+      expect(await resolver.resolve(opencode, "opencode", exe(path))).toBe(
+        "1.18.34",
+      );
+      expect(await resolver.resolve(opencode, "opencode", exe(path))).toBe(
+        "1.18.34",
+      );
+      expect(calls).toBe(1);
+
+      installed = { version: "opencode v2.0.21", ino: 2 };
+      expect(await resolver.resolve(opencode, "opencode", exe(path))).toBe(
+        "2.0.21",
+      );
+      expect(calls).toBe(2);
+    });
+
+    it("probes a replaced binary through its exe link but matches it by its original name", async () => {
+      const probes: string[][] = [];
+      const resolver = new VersionResolver({
+        runCommand: async (argv) => {
+          probes.push(argv);
+          return { stdout: "1.18.26", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(
+        await resolver.resolve(
+          getBuiltinAgent("opencode"),
+          "opencode",
+          exe("/home/u/.opencode/bin/opencode", "/proc/100/exe"),
+        ),
+      ).toBe("1.18.26");
+      expect(probes).toEqual([["/proc/100/exe", "--version"]]);
+    });
+  });
+
+  describe("probesThroughPath", () => {
+    const opencode = getBuiltinAgent("opencode");
+
+    it("is true for the agent's bare name, which the daemon's PATH resolves", () => {
+      expect(probesThroughPath(opencode, "opencode --continue")).toBe(true);
+    });
+
+    it("is false for an absolute path or another program", () => {
+      expect(probesThroughPath(opencode, "/opt/opencode/bin/opencode")).toBe(
+        false,
+      );
+      expect(probesThroughPath(opencode, "node /agents/opencode")).toBe(false);
+      expect(probesThroughPath(opencode, "")).toBe(false);
     });
   });
 });
