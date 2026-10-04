@@ -97,6 +97,9 @@ export function makeTuiPlugin({
     let written = null;
     /** Last user prompt per session, from `session.inbox.enqueued`. */
     const lastPrompt = new Map();
+    /** Sessions deleted while this TUI ran: a route still naming one (before
+     *  OpenCode navigates away) must not bring its marker back. */
+    const deleted = new Set();
 
     function release() {
       if (!owned) return;
@@ -120,7 +123,8 @@ export function makeTuiPlugin({
       // skip it the same way. Reporting it would give every such pane, in
       // any repo, one shared fake session id.
       if (route.sessionID === CONTINUE_PLACEHOLDER_ID) return null;
-      return ctx.data.session.root(route.sessionID) || route.sessionID;
+      const root = ctx.data.session.root(route.sessionID) || route.sessionID;
+      return deleted.has(root) ? null : root;
     }
 
     function seed(root) {
@@ -197,10 +201,13 @@ export function makeTuiPlugin({
           lastPrompt.set(data.sessionID, text.trim().slice(0, 1024));
         }
       }
-      if (type === "session.deleted" && data.sessionID === owned) {
-        release();
-        observed = null;
-        return;
+      if (type === "session.deleted" && data.sessionID) {
+        deleted.add(data.sessionID);
+        if (data.sessionID === owned) {
+          release();
+          observed = null;
+          return;
+        }
       }
       // OpenCode patches its stores from the same event; read them after.
       setTimeout(refresh, 0);

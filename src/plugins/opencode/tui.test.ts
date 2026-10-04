@@ -307,6 +307,35 @@ describe("OpenCode 2 TUI plugin", () => {
     expect(marker("ses_a")).toBeNull();
   });
 
+  it("does not bring a deleted session's marker back while the route still names it", async () => {
+    // OpenCode can keep the deleted session's route for a moment before it
+    // navigates away; the next poll must not treat it as a new session.
+    const { fake } = start({ pollMs: 5 });
+    fake.route = { type: "session", sessionID: "ses_a" };
+    fake.emit("session.renamed", { sessionID: "ses_a" });
+    await settle();
+    expect(marker("ses_a")).not.toBeNull();
+
+    fake.emit("session.deleted", { sessionID: "ses_a" });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(marker("ses_a")).toBeNull();
+  });
+
+  it("lets go of a session another pane deleted, even though it never owned it", async () => {
+    writeForeignMarker("ses_a", OTHER_PID);
+    const { fake } = start({ pollMs: 5 });
+    fake.route = { type: "session", sessionID: "ses_a" };
+    fake.emit("session.renamed", { sessionID: "ses_a" });
+    await settle();
+
+    // The owner goes away with the session; this pane must not claim it.
+    alive.delete(OTHER_PID);
+    rmSync(join(markersDir, "opencode-ses_a.json"));
+    fake.emit("session.deleted", { sessionID: "ses_a" });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(marker("ses_a")).toBeNull();
+  });
+
   it("removes its own marker on cleanup", async () => {
     const { fake, cleanup } = start();
     fake.route = { type: "session", sessionID: "ses_a" };
