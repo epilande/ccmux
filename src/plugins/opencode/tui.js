@@ -34,6 +34,9 @@ import { join } from "node:path";
 
 const AGENT_TYPE = "opencode";
 
+/** The route's session id before `--continue` resolves a real session. */
+const CONTINUE_PLACEHOLDER_ID = "dummy";
+
 /** Events after which the reported state may have changed. */
 const STATE_EVENT = /^(session\.execution\.|session\.retry\.|permission\.|form\.|session\.inbox\.enqueued$|session\.renamed$|session\.deleted$)/;
 
@@ -112,6 +115,11 @@ export function makeTuiPlugin({
     function currentRoot() {
       const route = ctx.ui.router.current();
       if (route?.type !== "session" || !route.sessionID) return null;
+      // `opencode --continue` starts on this placeholder and stays there when
+      // the directory has nothing to continue; OpenCode's own session tabs
+      // skip it the same way. Reporting it would give every such pane, in
+      // any repo, one shared fake session id.
+      if (route.sessionID === CONTINUE_PLACEHOLDER_ID) return null;
       return ctx.data.session.root(route.sessionID) || route.sessionID;
     }
 

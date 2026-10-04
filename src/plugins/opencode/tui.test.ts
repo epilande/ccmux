@@ -116,6 +116,23 @@ describe("OpenCode 2 TUI plugin", () => {
     expect(existsSync(join(markersDir, "opencode-ses_a.json"))).toBe(false);
   });
 
+  it("writes nothing while --continue has no session to continue", async () => {
+    // OpenCode starts `--continue` on a placeholder session id and stays on
+    // it when the directory has no session; it must not become a marker.
+    const { fake } = start();
+    fake.route = { type: "session", sessionID: "dummy" };
+    fake.emit("session.execution.started", { sessionID: "ses_other" });
+    await settle();
+    expect(marker("dummy")).toBeNull();
+    expect(fake.synced).toEqual([]);
+
+    // Once --continue lands on a real session, that one is reported.
+    fake.route = { type: "session", sessionID: "ses_a" };
+    fake.emit("session.execution.started", { sessionID: "ses_a" });
+    await settle();
+    expect(marker("ses_a")?.session_id).toBe("ses_a");
+  });
+
   it("reports the session on screen with the 1.x marker schema", async () => {
     const { fake } = start();
     fake.info.set("ses_a", {
