@@ -37,8 +37,8 @@ const WITH_SUMMARY: Partial<EnrichedSession> = {
 };
 
 const NO_RULE: Partial<EnrichedSession> = {
-  agentType: "codex",
-  paneTitle: "probe-codex-x7",
+  agentType: "pi",
+  paneTitle: "π - probe-pi-z3",
   summary: null,
   lastPrompt: "commit and push",
 };
@@ -93,14 +93,14 @@ describe("the summary cell", () => {
   it("falls back to the prompt for an agent with no rule", async () => {
     const frame = await render(NO_RULE);
     expect(frame).toContain("commit and push");
-    // The cwd basename codex writes as its title is the `project` column's job.
-    expect(frame).not.toContain("probe-codex-x7");
+    // The cwd basename pi writes as its title is the `project` column's job.
+    expect(frame).not.toContain("probe-pi-z3");
   });
 
   it("shows nothing at all when there is no summary and no prompt", async () => {
     const frame = await render({ ...NO_RULE, lastPrompt: null });
     expect(frame).not.toContain("commit and push");
-    expect(frame).not.toContain("probe-codex-x7");
+    expect(frame).not.toContain("probe-pi-z3");
   });
 });
 
