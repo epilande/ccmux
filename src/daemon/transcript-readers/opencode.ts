@@ -290,6 +290,15 @@ function* openCodeCandidates(
   }
 }
 
+/** A 2.x step's `content[]` items, minus anything that is not an object
+ *  (one malformed item must not lose the whole transcript). */
+function contentParts(content: unknown): ParsedPart[] {
+  if (!Array.isArray(content)) return [];
+  return content.filter(
+    (item): item is ParsedPart => !!item && typeof item === "object",
+  );
+}
+
 /**
  * OpenCode 2.x: `session_message` rows (`type` + JSON `data`), newest first.
  * A turn is every row since the previous `idle` row: usually a `user` row
@@ -307,12 +316,17 @@ function* openCode2Candidates(
   db: Database,
   sessionId: string,
 ): Generator<TurnCandidate> {
+  // Streamed, not `.all()`: a long session's tool output lives in these
+  // rows' `data`, and the fold usually stops after the newest turn or two.
+  // Only the three row types that make up a turn are fetched.
   const rows = db
     .query<
       { type: string; time_created: number; data: string },
       [string]
-    >("SELECT type, time_created, data FROM session_message WHERE session_id = ? ORDER BY seq DESC")
-    .all(sessionId);
+    >(
+      "SELECT type, time_created, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant', 'idle') ORDER BY seq DESC",
+    )
+    .iterate(sessionId);
 
   let completed = false;
   let replyTime = 0;
@@ -330,6 +344,8 @@ function* openCode2Candidates(
       : null;
 
   for (const row of rows) {
+    // An unfinished turn's steps are never shown, so skip parsing them.
+    if (row.type === "assistant" && !completed) continue;
     let data: { text?: unknown; content?: unknown; outcome?: unknown };
     try {
       data = JSON.parse(row.data);
@@ -347,8 +363,7 @@ function* openCode2Candidates(
       reply = [];
       replyTime = 0;
     } else if (row.type === "assistant") {
-      if (!completed) continue;
-      reply.push(Array.isArray(data.content) ? (data.content as ParsedPart[]) : []);
+      reply.push(contentParts(data.content));
       replyTime = Math.max(replyTime, row.time_created);
     } else if (row.type === "user") {
       const turn = pendingReply();

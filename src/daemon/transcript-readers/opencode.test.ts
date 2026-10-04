@@ -409,6 +409,32 @@ describe("opencode reader", () => {
       });
     });
 
+    it("keeps the readable text when a step carries a malformed content item", async () => {
+      user(100, "q");
+      step(110, null, "stray", { type: "text", text: "still here" });
+      idle(120, "succeeded");
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["still here"]);
+    });
+
+    it("stops at the newest turn of a longer session and still closes cleanly", async () => {
+      for (let i = 0; i < 50; i++) {
+        user(i * 100, `q${i}`);
+        // Rows outside a turn's shape are never fetched.
+        row("shell", i * 100 + 10, { output: "x".repeat(1000) });
+        step(i * 100 + 20, { type: "text", text: `a${i}` });
+        idle(i * 100 + 30, "succeeded");
+      }
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["a49"]);
+      // The early stop left the database closed and readable again.
+      expect((await read(2))?.turns.map((t) => t.text)).toEqual([
+        "a48",
+        "q49",
+        "a49",
+      ]);
+    });
+
     it("returns a reply from a session that never had a user row", async () => {
       row("synthetic", 100, { text: "<subagent/>" });
       step(110, { type: "text", text: "only reply" });
