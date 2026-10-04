@@ -342,6 +342,19 @@ describe("version-resolver", () => {
       expect(probesThroughPath(opencode, "opencode --continue")).toBe(true);
     });
 
+    it("is false once the process's own executable is known to be the agent", () => {
+      expect(
+        probesThroughPath(opencode, "opencode", exe("/home/u/.opencode/bin/opencode")),
+      ).toBe(false);
+    });
+
+    it("stays true when the known executable is a runtime or another binary", () => {
+      // The resolver would not swap to it, so the probe would go to PATH.
+      expect(probesThroughPath(opencode, "opencode", exe("/usr/bin/bun"))).toBe(
+        true,
+      );
+    });
+
     it("is false for an absolute path or another program", () => {
       expect(probesThroughPath(opencode, "/opt/opencode/bin/opencode")).toBe(
         false,

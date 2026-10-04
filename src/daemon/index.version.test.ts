@@ -95,6 +95,24 @@ describe("pane-tracked version provenance", () => {
     expect(updates).toEqual([]);
   });
 
+  it("leaves it versionless when the known executable is not the agent", async () => {
+    // A bare `opencode` whose PID executable is a runtime would otherwise be
+    // probed through PATH, the same guess as an unknown executable.
+    const { daemon, probes, updates } = harness(() => "1.18.34");
+    daemon.resolveProcessExecutable = async () => ({
+      path: "/usr/bin/bun",
+      probePath: "/usr/bin/bun",
+    });
+    await daemon.resolvePaneTrackedSessionVersion(
+      "opencode_pane1",
+      "opencode",
+      1234,
+      getBuiltinAgent("opencode"),
+    );
+    expect(probes).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+
   it("still probes PATH for an agent whose keys are not version-gated", async () => {
     const { daemon, probes, updates } = harness(() => "0.160.0");
     daemon.resolveProcessExecutable = async () => undefined;

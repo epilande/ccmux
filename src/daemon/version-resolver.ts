@@ -54,17 +54,24 @@ function executableName(token: string): string {
 /**
  * Whether a version probe for this process command would find the agent by
  * its bare name on the daemon's PATH, which may hold a different installation
- * than the one the process runs.
+ * than the one the process runs. That is the case unless the process's own
+ * executable is known AND is the agent (not a runtime or a renamed binary),
+ * which is when {@link VersionResolver.resolve} probes it directly instead.
  */
 export function probesThroughPath(
   agent: AgentDef,
   processCommand: string,
+  executable?: ProcessExecutable,
 ): boolean {
   const first = parseShellTokens(processCommand)[0] ?? "";
   return (
     first !== "" &&
     !first.includes("/") &&
-    regexTest(agent.processMatch, executableName(first))
+    regexTest(agent.processMatch, executableName(first)) &&
+    !(
+      executable &&
+      regexTest(agent.processMatch, executableName(executable.path))
+    )
   );
 }
 
