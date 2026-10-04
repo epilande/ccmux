@@ -391,7 +391,7 @@ describe("readProcfsExecutable", () => {
 
   it("reads the pid's exe link", async () => {
     let asked = "";
-    const path = await readProcfsExecutable(
+    const executable = await readProcfsExecutable(
       100,
       procfs(async (p) => {
         asked = p;
@@ -399,26 +399,33 @@ describe("readProcfsExecutable", () => {
       }),
     );
     expect(asked).toBe("/proc/100/exe");
-    expect(path).toBe("/home/u/.opencode/bin/opencode");
+    expect(executable).toEqual({
+      path: "/home/u/.opencode/bin/opencode",
+      probePath: "/home/u/.opencode/bin/opencode",
+    });
   });
 
-  it("is null for a binary replaced while the process ran", async () => {
-    // The bare path would now describe the replacement, not this process.
-    const path = await readProcfsExecutable(
+  it("probes a binary replaced while the process ran through its exe link", async () => {
+    // The bare path would now describe the replacement, not this process;
+    // the link still executes the inode the process is running.
+    const executable = await readProcfsExecutable(
       100,
       procfs(async () => "/home/u/.opencode/bin/opencode (deleted)"),
     );
-    expect(path).toBeNull();
+    expect(executable).toEqual({
+      path: "/home/u/.opencode/bin/opencode",
+      probePath: "/proc/100/exe",
+    });
   });
 
   it("is null when the link cannot be read", async () => {
-    const path = await readProcfsExecutable(
+    const executable = await readProcfsExecutable(
       100,
       procfs(async () => {
         throw Object.assign(new Error("EACCES"), { code: "EACCES" });
       }),
     );
-    expect(path).toBeNull();
+    expect(executable).toBeNull();
   });
 
   it("is null where there is no procfs to read", async () => {

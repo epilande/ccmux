@@ -445,10 +445,10 @@ export interface ProcessFdInfo {
 }
 
 /**
- * The kernel's marker for a cwd whose directory has been unlinked:
+ * The kernel's marker for a cwd or executable that has been unlinked:
  * `readlink("/proc/<pid>/cwd")` answers `/path/to/dir (deleted)`.
  */
-const PROCFS_DELETED_SUFFIX = " (deleted)";
+export const PROCFS_DELETED_SUFFIX = " (deleted)";
 
 /**
  * Resolve each pid's cwd from procfs — the whole of cwd discovery on Linux,
@@ -501,29 +501,45 @@ async function readProcfsCwd(
 }
 
 /**
+ * The executable a process runs, as the version probe needs it: `path` names
+ * the installation (matched against an agent's `processMatch`), `probePath`
+ * is what to run with `--version`.
+ */
+export interface ProcessExecutable {
+  path: string;
+  probePath: string;
+}
+
+/**
  * The executable a process is running, from `/proc/<pid>/exe`, or null where
  * there is no procfs or the link cannot be read. Probing `<path> --version`
  * is how an agent launched by a bare name (absent from the daemon's PATH)
  * gets a version, and lsof, the only other source, is not installed by
  * default on several distros.
  *
- * Unlike a cwd, a `(deleted)` target is NOT stripped: the binary was replaced
- * while the process ran (an in-place upgrade), so the bare path now answers
- * for the replacement's version, not this process's.
+ * A `(deleted)` target means the binary was replaced while the process ran
+ * (an in-place upgrade or auto-update), so its path now answers for the
+ * replacement's version, not this process's. Its probe goes through the
+ * `/proc/<pid>/exe` link instead, which still executes the running inode.
  */
 export async function readProcfsExecutable(
   pid: number,
   platform: DiscoveryPlatform = PLATFORM,
-): Promise<string | null> {
+): Promise<ProcessExecutable | null> {
   if (platform.cwdSource !== "procfs") return null;
+  const link = `/proc/${pid}/exe`;
   let target: string;
   try {
-    target = await platform.readLink(`/proc/${pid}/exe`);
+    target = await platform.readLink(link);
   } catch {
     return null;
   }
-  if (!target || target.endsWith(PROCFS_DELETED_SUFFIX)) return null;
-  return target;
+  if (!target) return null;
+  if (target.endsWith(PROCFS_DELETED_SUFFIX)) {
+    const path = target.slice(0, -PROCFS_DELETED_SUFFIX.length);
+    return path ? { path, probePath: link } : null;
+  }
+  return { path: target, probePath: target };
 }
 
 /**
