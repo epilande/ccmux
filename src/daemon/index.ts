@@ -885,13 +885,12 @@ export class Daemon {
       // An agent whose Approve/Deny keys are gated on its version must not
       // take its version from whichever installation the daemon's PATH holds:
       // a 2.x pane reading a 1.x PATH binary would re-arm 1.x keys that
-      // approve on 2.x. With the running executable unknown, stay versionless
-      // (no buttons) rather than guess.
+      // approve on 2.x. Unless the running executable is known to be the
+      // agent itself, stay versionless (no buttons) rather than guess.
       if (
-        !executable &&
         agent.notificationActions?.approvalKeysVerifiedThroughMajor !==
           undefined &&
-        probesThroughPath(agent, processCommand)
+        probesThroughPath(agent, processCommand, executable)
       ) {
         return;
       }
