@@ -901,7 +901,10 @@ export class Daemon {
         executable,
       );
 
-      if (version) {
+      // The probe is async: if the pane's process changed meanwhile (a 1.x
+      // quit and a 2.x launched in its place), this version describes the
+      // old process, and labeling the new one with it re-arms 1.x keys.
+      if (version && this.sessionManager.getSession(sessionId)?.pid === pid) {
         this.sessionManager.updateSession(sessionId, { version });
       }
     } catch {
