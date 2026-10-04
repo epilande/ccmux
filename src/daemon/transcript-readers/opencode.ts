@@ -292,12 +292,16 @@ function* openCodeCandidates(
 
 /**
  * OpenCode 2.x: `session_message` rows (`type` + JSON `data`), newest first.
- * A turn is a `user` row, the `assistant` rows that answer it (one per model
- * step, text in `content[]` items of `type: "text"`), and an `idle` row whose
- * `outcome` is `succeeded` once it completes. A turn that failed, was
- * interrupted (a declined permission ends it with no `idle` row at all), or
- * is still running yields no assistant reply, the analogue of 1.x's missing
- * `step-finish`. Verified against rows written by OpenCode 2.0.21.
+ * A turn is every row since the previous `idle` row: usually a `user` row
+ * and the `assistant` rows that answer it (one per model step, text in
+ * `content[]` items of `type: "text"`), closed by an `idle` row whose
+ * `outcome` is `succeeded` once it completes. A turn can also start with no
+ * user row at all, from a `synthetic` row (a background subagent or shell
+ * finishing), so a reply is emitted at the turn's boundary, not only at a
+ * prompt. A turn that failed, was interrupted (a declined permission ends it
+ * with no `idle` row at all), or is still running yields no assistant reply,
+ * the analogue of 1.x's missing `step-finish`. Verified against rows written
+ * by OpenCode 2.0.21.
  */
 function* openCode2Candidates(
   db: Database,
@@ -314,6 +318,17 @@ function* openCode2Candidates(
   let replyTime = 0;
   let reply: ParsedPart[][] = [];
 
+  /** The completed reply gathered since the newer boundary, if any. */
+  const pendingReply = (): TurnCandidate | null =>
+    completed && reply.length > 0
+      ? {
+          role: "assistant",
+          // Newest step first; reversed so the text reads in order.
+          ...collectText(reply.reverse().flat()),
+          time: replyTime,
+        }
+      : null;
+
   for (const row of rows) {
     let data: { text?: unknown; content?: unknown; outcome?: unknown };
     try {
@@ -324,22 +339,20 @@ function* openCode2Candidates(
     if (!data || typeof data !== "object") continue;
 
     if (row.type === "idle") {
+      // The previous turn's end is this turn's start: a reply gathered with
+      // no user row in between belongs to a synthetic-started turn.
+      const turn = pendingReply();
+      if (turn) yield turn;
       completed = data.outcome === "succeeded";
       reply = [];
       replyTime = 0;
     } else if (row.type === "assistant") {
       if (!completed) continue;
-      // Newest step first; reversed below so the text reads in order.
       reply.push(Array.isArray(data.content) ? (data.content as ParsedPart[]) : []);
       replyTime = Math.max(replyTime, row.time_created);
     } else if (row.type === "user") {
-      if (completed && reply.length > 0) {
-        yield {
-          role: "assistant",
-          ...collectText(reply.reverse().flat()),
-          time: replyTime,
-        };
-      }
+      const turn = pendingReply();
+      if (turn) yield turn;
       completed = false;
       reply = [];
       replyTime = 0;
@@ -351,6 +364,9 @@ function* openCode2Candidates(
       };
     }
   }
+  // The oldest turn, when no user row precedes it.
+  const turn = pendingReply();
+  if (turn) yield turn;
 }
 
 /**

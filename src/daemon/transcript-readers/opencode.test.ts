@@ -376,6 +376,47 @@ describe("opencode reader", () => {
       ]);
     });
 
+    describe("a turn started by a background job instead of a prompt", () => {
+      // A background subagent or shell finishing posts a `synthetic` row that
+      // resumes the session, so its turn has no user row of its own.
+      const synthetic = (time: number) =>
+        row("synthetic", time, {
+          text: '<subagent sessionID="ses_child" state="completed">\nfound 3 files\n</subagent>',
+        });
+
+      beforeEach(() => {
+        user(100, "explore the repo in the background");
+        step(110, { type: "text", text: "I started a subagent." });
+        idle(120, "succeeded");
+        synthetic(200);
+        step(210, { type: "text", text: "The subagent found 3 files." });
+        idle(220, "succeeded");
+      });
+
+      it("returns that turn's reply as the newest one", async () => {
+        const result = await read(1);
+        expect(result?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "The subagent found 3 files."],
+        ]);
+      });
+
+      it("shows no prompt between the two replies, since nobody typed one", async () => {
+        const result = await read(2);
+        expect(result?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "I started a subagent."],
+          ["assistant", "The subagent found 3 files."],
+        ]);
+      });
+    });
+
+    it("returns a reply from a session that never had a user row", async () => {
+      row("synthetic", 100, { text: "<subagent/>" });
+      step(110, { type: "text", text: "only reply" });
+      idle(120, "succeeded");
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["only reply"]);
+    });
+
     it("leaves a 1.x session in the same database to the 1.x tables", async () => {
       insertSession("ses_v1", "/tmp/proj", 50);
       seedExchange("ses_v1", 50, "v1 prompt", "v1 reply");
