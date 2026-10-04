@@ -10,6 +10,7 @@ interface VersionHarness {
   resolveProcessExecutable(pid: number): Promise<ProcessExecutable | undefined>;
   getLsofLines(pid: number): Promise<string[]>;
   sessionManager: {
+    getSession(id: string): { pid: number | null } | undefined;
     updateSession(id: string, patch: { version: string }): boolean;
   };
   resolvePaneTrackedSessionVersion(
@@ -23,9 +24,9 @@ interface VersionHarness {
 /**
  * A Daemon with only what version resolution touches, so the method runs
  * without starting services or reading user state. Every probe answers with
- * `version` and is recorded.
+ * `version` and is recorded; the session's current pid is `sessionPid`.
  */
-function harness(version: (argv: string[]) => string) {
+function harness(version: (argv: string[]) => string, sessionPid = 1234) {
   const daemon = Object.create(Daemon.prototype) as VersionHarness;
   const probes: string[][] = [];
   daemon.versionResolver = new VersionResolver({
@@ -36,6 +37,7 @@ function harness(version: (argv: string[]) => string) {
   });
   const updates: Array<{ id: string; version: string }> = [];
   daemon.sessionManager = {
+    getSession: () => ({ pid: sessionPid }),
     updateSession: (id, patch) => {
       updates.push({ id, ...patch });
       return true;
@@ -104,6 +106,23 @@ describe("pane-tracked version provenance", () => {
     );
     expect(probes).toEqual([["codex", "--version"]]);
     expect(updates).toEqual([{ id: "codex_pane1", version: "0.160.0" }]);
+  });
+
+  it("drops a version probed for a process the pane no longer runs", async () => {
+    // A 1.x probe finishing after a 2.x process replaced it in the pane must
+    // not label the 2.x session 1.x.
+    const { daemon, updates } = harness(() => "1.18.34", 5678);
+    daemon.resolveProcessExecutable = async () => ({
+      path: "/agents/native/opencode",
+      probePath: "/agents/native/opencode",
+    });
+    await daemon.resolvePaneTrackedSessionVersion(
+      "opencode_pane1",
+      "opencode",
+      1234,
+      getBuiltinAgent("opencode"),
+    );
+    expect(updates).toEqual([]);
   });
 
   it("does not take a replaced binary's path from lsof", async () => {
