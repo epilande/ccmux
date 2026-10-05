@@ -350,10 +350,12 @@ spawn rather than guessing a flag, and you can teach it the right shape with
 `--model <name>` starts the agent on that model, passed through as the agent's
 own flag (`--model` for every built-in, read from each CLI's `--help`). An
 agent with no known flag, including a custom one, refuses the spawn; declare
-`modelFlag` in its config to teach it. A new window is named after the
-worktree when the spawn has one (`fix-flicker`, `issue-150-...`, `pr-154-...`)
-and after the agent otherwise, so a batch of spawns is tellable apart; the name
-pins tmux's `automatic-rename` off for that window.
+`modelFlag` in its config to teach it. OpenCode 2's TUI has no model flag and
+exits on `--model`, so pick its model with `/models` inside OpenCode. A new
+window is named after the worktree when the spawn has one (`fix-flicker`,
+`issue-150-...`, `pr-154-...`) and after the agent otherwise, so a batch of
+spawns is tellable apart; the name pins tmux's `automatic-rename` off for that
+window.
 
 `--worktree [name]` spawns the agent into a git worktree at
 `<main>/.claude/worktrees/<name>`, creating it first if it doesn't exist yet.
