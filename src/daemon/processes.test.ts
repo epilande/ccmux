@@ -4,6 +4,7 @@ import { join } from "path";
 import {
   parseElapsedTime,
   parseLsofFdOutput,
+  parseLsofExecutable,
   parsePsOutput,
   isCodexPluginHostCwd,
   discoverAgentProcesses,
@@ -383,6 +384,43 @@ describe("readProcfsCwds", () => {
   });
 });
 
+describe("parseLsofExecutable", () => {
+  it("keeps the executable's exact device and inode across intervening fields", () => {
+    expect(
+      parseLsofExecutable([
+        "p100",
+        "fcwd",
+        "n/repo",
+        "ftxt",
+        "D0x1000012",
+        "i1152921500312573276",
+        "n/agents/opencode",
+        "ftxt",
+        "n/usr/lib/dyld",
+      ]),
+    ).toEqual({
+      path: "/agents/opencode",
+      probePath: "/agents/opencode",
+      identity: { dev: 0x1000012n, ino: 1152921500312573276n },
+    });
+  });
+
+  it.each(
+    [
+      ["ftxt", "n/agents/opencode"],
+      ["ftxt", "D0x1", "inope", "n/agents/opencode"],
+      ["ftxt", "Dunknown", "i2", "n/agents/opencode"],
+      ["ftxt", "D0x1", "i2", "n/agents/opencode (deleted)"],
+      ["ftxt", "n/agents/opencode", "ftxt", "D0x1", "i2", "n/usr/lib/dyld"],
+    ].map((lines) => ({ lines })),
+  )(
+    "rejects incomplete, invalid or deleted executable records: %j",
+    ({ lines }) => {
+      expect(parseLsofExecutable(lines)).toBeNull();
+    },
+  );
+});
+
 describe("readProcfsExecutable", () => {
   const procfs = (readLink: (path: string) => Promise<string>) => ({
     ...PS_TTY_DISCOVERY,
@@ -401,7 +439,7 @@ describe("readProcfsExecutable", () => {
     expect(asked).toBe("/proc/100/exe");
     expect(executable).toEqual({
       path: "/home/u/.opencode/bin/opencode",
-      probePath: "/home/u/.opencode/bin/opencode",
+      probePath: "/proc/100/exe",
     });
   });
 

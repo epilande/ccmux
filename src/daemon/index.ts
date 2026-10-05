@@ -40,7 +40,7 @@ import { getAgents } from "../lib/agents";
 import { getPreferences, type Preferences } from "../lib/preferences";
 import { tmuxCaptureSync } from "../lib/tmux-exec";
 import { markDaemonProcess } from "../lib/tmux-socket";
-import { VersionResolver, probesThroughPath } from "./version-resolver";
+import { VersionResolver, needsNativeExecutable } from "./version-resolver";
 import { readClaudeHistory } from "./adapters/claude/history";
 import {
   getAllSessionPidMarkers,
@@ -57,7 +57,7 @@ import type {
 import {
   discoverAgentProcesses,
   discoverAgentProcessesOrThrow,
-  PROCFS_DELETED_SUFFIX,
+  parseLsofExecutable,
   ProcessDiscoveryError,
   readProcfsExecutable,
   type ProcessExecutable,
@@ -822,7 +822,7 @@ export class Daemon {
    */
   private async getLsofLines(pid: number): Promise<string[]> {
     DaemonPerf.incSubprocessSpawn("lsof-session");
-    const proc = Bun.spawn(["lsof", "-p", String(pid), "-Fn"], {
+    const proc = Bun.spawn(["lsof", "-p", String(pid), "-FnDi"], {
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -890,7 +890,7 @@ export class Daemon {
       if (
         agent.notificationActions?.approvalKeysVerifiedThroughMajor !==
           undefined &&
-        probesThroughPath(agent, processCommand, executable)
+        needsNativeExecutable(agent, processCommand, executable)
       ) {
         return;
       }
@@ -918,25 +918,7 @@ export class Daemon {
     if (procfs) return procfs;
 
     try {
-      const lines = await this.getLsofLines(pid);
-      let expectTxtPath = false;
-
-      for (const line of lines) {
-        if (line === "ftxt") {
-          expectTxtPath = true;
-          continue;
-        }
-        if (expectTxtPath) {
-          expectTxtPath = false;
-          if (line.startsWith("n") && line.length > 1) {
-            const path = line.slice(1);
-            // Replaced while running: the path now names the replacement,
-            // and lsof offers no way to probe the running inode.
-            if (path.endsWith(PROCFS_DELETED_SUFFIX)) return undefined;
-            return { path, probePath: path };
-          }
-        }
-      }
+      return parseLsofExecutable(await this.getLsofLines(pid)) ?? undefined;
     } catch {}
 
     return undefined;

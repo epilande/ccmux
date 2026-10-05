@@ -8,10 +8,11 @@ import {
   buildVersionProbeCommand,
   extractVersionFromOutput,
   inferVersionFromProcessCommand,
-  probesThroughPath,
+  needsNativeExecutable,
 } from "./version-resolver";
 
 const exe = (path: string, probePath = path) => ({ path, probePath });
+const stableIdentity = { dev: 1n, ino: 2n, size: 100n, mtimeMs: 0n };
 
 describe("version-resolver", () => {
   describe("buildVersionProbeCommand", () => {
@@ -141,9 +142,123 @@ describe("version-resolver", () => {
   });
 
   describe("VersionResolver.resolve", () => {
+    it("accepts a path whose identity matches the live executable", async () => {
+      let probes = 0;
+      const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
+        runCommand: async () => {
+          probes++;
+          return { stdout: "1.18.34", stderr: "", exitCode: 0 };
+        },
+      });
+      const executable = {
+        ...exe("/agents/opencode"),
+        identity: stableIdentity,
+      };
+      const agent = getBuiltinAgent("opencode");
+      expect(await resolver.resolve(agent, "opencode", executable)).toBe(
+        "1.18.34",
+      );
+      expect(await resolver.resolve(agent, "opencode", executable)).toBe(
+        "1.18.34",
+      );
+      expect(probes).toBe(1);
+      // A cached version for this file must not label a different live inode.
+      expect(
+        await resolver.resolve(agent, "opencode", {
+          ...executable,
+          identity: { dev: 1n, ino: 3n },
+        }),
+      ).toBeNull();
+    });
+
+    it.each([
+      { dev: 1n, ino: 3n },
+      { dev: 2n, ino: 2n },
+      { dev: 1n, ino: 1152921500312573276n },
+    ])(
+      "rejects a different live device/inode without probing",
+      async (identity) => {
+        let probes = 0;
+        const resolver = new VersionResolver({
+          statFile: async () => stableIdentity,
+          runCommand: async () => {
+            probes++;
+            return { stdout: "1.18.34", stderr: "", exitCode: 0 };
+          },
+        });
+        expect(
+          await resolver.resolve(getBuiltinAgent("opencode"), "opencode", {
+            ...exe("/agents/opencode"),
+            identity,
+          }),
+        ).toBeNull();
+        expect(probes).toBe(0);
+      },
+    );
+
+    it("does not probe a native executable when stat fails", async () => {
+      let probes = 0;
+      const resolver = new VersionResolver({
+        statFile: async () => {
+          throw new Error("EACCES");
+        },
+        runCommand: async () => {
+          probes++;
+          return { stdout: "1.18.34", stderr: "", exitCode: 0 };
+        },
+      });
+      expect(
+        await resolver.resolve(
+          getBuiltinAgent("opencode"),
+          "opencode",
+          exe("/agents/opencode"),
+        ),
+      ).toBeNull();
+      expect(probes).toBe(0);
+    });
+
+    it.each(["replace", "rewrite", "unreadable"])(
+      "drops a native probe when its file changes during execution: %s",
+      async (change) => {
+        let current = { ...stableIdentity };
+        let unreadable = false;
+        const resolver = new VersionResolver({
+          statFile: async () => {
+            if (unreadable) throw new Error("ENOENT");
+            return { ...current };
+          },
+          runCommand: async () => {
+            if (change === "replace") current.ino++;
+            if (change === "rewrite") current.mtimeMs++;
+            if (change === "unreadable") unreadable = true;
+            return { stdout: "1.18.34", stderr: "", exitCode: 0 };
+          },
+        });
+        expect(
+          await resolver.resolve(getBuiltinAgent("opencode"), "opencode", {
+            ...exe("/agents/opencode"),
+            identity: stableIdentity,
+          }),
+        ).toBeNull();
+      },
+    );
+
+    it("reads native versions from the executable instead of a version-named directory", async () => {
+      const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
+        runCommand: async () => ({ stdout: "2.0.21", stderr: "", exitCode: 0 }),
+      });
+      const path = "/agents/Cellar/opencode/1.18.34/bin/opencode";
+      expect(
+        await resolver.resolve(getBuiltinAgent("opencode"), path, exe(path)),
+      ).toBe("2.0.21");
+    });
+
     it("uses each native process's executable instead of a shared PATH probe", async () => {
       const probes: string[][] = [];
       const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
         runCommand: async (argv) => {
           probes.push(argv);
           return {
@@ -158,7 +273,11 @@ describe("version-resolver", () => {
         await resolver.resolve(agent, "opencode", exe("/agents/v1/opencode")),
       ).toBe("1.18.34");
       expect(
-        await resolver.resolve(agent, "opencode", exe("/agents/v2/opencode.exe")),
+        await resolver.resolve(
+          agent,
+          "opencode",
+          exe("/agents/v2/opencode.exe"),
+        ),
       ).toBe("2.0.21");
       expect(probes).toEqual([
         ["/agents/v1/opencode", "--version"],
@@ -169,6 +288,7 @@ describe("version-resolver", () => {
     it("does not fall back to another installation when the known binary cannot be probed", async () => {
       const probes: string[][] = [];
       const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
         runCommand: async (argv) => {
           probes.push(argv);
           return {
@@ -191,6 +311,7 @@ describe("version-resolver", () => {
     it("preserves node script probes instead of reporting the runtime version", async () => {
       const probes: string[][] = [];
       const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
         runCommand: async (argv) => {
           probes.push(argv);
           return { stdout: "0.29.5", stderr: "", exitCode: 0 };
@@ -209,13 +330,18 @@ describe("version-resolver", () => {
     it("does not replace a renamed agent process with its Bun runtime", async () => {
       const probes: string[][] = [];
       const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
         runCommand: async (argv) => {
           probes.push(argv);
           return { stdout: "0.79.9", stderr: "", exitCode: 0 };
         },
       });
       expect(
-        await resolver.resolve(getBuiltinAgent("pi"), "pi", exe("/usr/bin/bun")),
+        await resolver.resolve(
+          getBuiltinAgent("pi"),
+          "pi",
+          exe("/usr/bin/bun"),
+        ),
       ).toBe("0.79.9");
       expect(probes).toEqual([["pi", "--version"]]);
     });
@@ -224,6 +350,7 @@ describe("version-resolver", () => {
       const executable = "/agents/owner's tools/opencode";
       const probes: string[][] = [];
       const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
         runCommand: async (argv) => {
           probes.push(argv);
           return { stdout: "2.0.21", stderr: "", exitCode: 0 };
@@ -319,6 +446,7 @@ describe("version-resolver", () => {
     it("probes a replaced binary through its exe link but matches it by its original name", async () => {
       const probes: string[][] = [];
       const resolver = new VersionResolver({
+        statFile: async () => stableIdentity,
         runCommand: async (argv) => {
           probes.push(argv);
           return { stdout: "1.18.26", stderr: "", exitCode: 0 };
@@ -335,32 +463,41 @@ describe("version-resolver", () => {
     });
   });
 
-  describe("probesThroughPath", () => {
+  describe("needsNativeExecutable", () => {
     const opencode = getBuiltinAgent("opencode");
 
     it("is true for the agent's bare name, which the daemon's PATH resolves", () => {
-      expect(probesThroughPath(opencode, "opencode --continue")).toBe(true);
+      expect(needsNativeExecutable(opencode, "opencode --continue")).toBe(true);
     });
 
     it("is false once the process's own executable is known to be the agent", () => {
       expect(
-        probesThroughPath(opencode, "opencode", exe("/home/u/.opencode/bin/opencode")),
+        needsNativeExecutable(
+          opencode,
+          "opencode",
+          exe("/home/u/.opencode/bin/opencode"),
+        ),
       ).toBe(false);
     });
 
     it("stays true when the known executable is a runtime or another binary", () => {
       // The resolver would not swap to it, so the probe would go to PATH.
-      expect(probesThroughPath(opencode, "opencode", exe("/usr/bin/bun"))).toBe(
-        true,
-      );
+      expect(
+        needsNativeExecutable(opencode, "opencode", exe("/usr/bin/bun")),
+      ).toBe(true);
     });
 
-    it("is false for an absolute path or another program", () => {
-      expect(probesThroughPath(opencode, "/opt/opencode/bin/opencode")).toBe(
+    it("also requires provenance for an absolute native path", () => {
+      expect(
+        needsNativeExecutable(opencode, "/opt/opencode/bin/opencode"),
+      ).toBe(true);
+    });
+
+    it("preserves script-based resolution for other programs", () => {
+      expect(needsNativeExecutable(opencode, "node /agents/opencode")).toBe(
         false,
       );
-      expect(probesThroughPath(opencode, "node /agents/opencode")).toBe(false);
-      expect(probesThroughPath(opencode, "")).toBe(false);
+      expect(needsNativeExecutable(opencode, "")).toBe(false);
     });
   });
 });

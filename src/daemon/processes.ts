@@ -508,6 +508,36 @@ async function readProcfsCwd(
 export interface ProcessExecutable {
   path: string;
   probePath: string;
+  /** Identity reported for the live executable, not its current pathname. */
+  identity?: { dev: bigint; ino: bigint };
+}
+
+/** Read the first executable record from `lsof -FnDi`, keeping its identity. */
+export function parseLsofExecutable(lines: string[]): ProcessExecutable | null {
+  const start = lines.indexOf("ftxt");
+  if (start === -1) return null;
+  let path = "";
+  let dev = "";
+  let ino = "";
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("f") || line.startsWith("p")) break;
+    if (line.startsWith("n")) path = line.slice(1);
+    if (line.startsWith("D")) dev = line.slice(1);
+    if (line.startsWith("i")) ino = line.slice(1);
+  }
+  if (
+    !path ||
+    path.endsWith(PROCFS_DELETED_SUFFIX) ||
+    !/^0x[\da-f]+$/i.test(dev) ||
+    !/^\d+$/.test(ino)
+  ) {
+    return null;
+  }
+  return {
+    path,
+    probePath: path,
+    identity: { dev: BigInt(dev), ino: BigInt(ino) },
+  };
 }
 
 /**
@@ -517,10 +547,9 @@ export interface ProcessExecutable {
  * gets a version, and lsof, the only other source, is not installed by
  * default on several distros.
  *
- * A `(deleted)` target means the binary was replaced while the process ran
- * (an in-place upgrade or auto-update), so its path now answers for the
- * replacement's version, not this process's. Its probe goes through the
- * `/proc/<pid>/exe` link instead, which still executes the running inode.
+ * Always probe the `/proc/<pid>/exe` link: it executes the running inode
+ * even if an installer replaces the pathname after this lookup. Strip a
+ * `(deleted)` suffix from the name used for agent matching only.
  */
 export async function readProcfsExecutable(
   pid: number,
@@ -539,7 +568,7 @@ export async function readProcfsExecutable(
     const path = target.slice(0, -PROCFS_DELETED_SUFFIX.length);
     return path ? { path, probePath: link } : null;
   }
-  return { path: target, probePath: target };
+  return { path: target, probePath: link };
 }
 
 /**
