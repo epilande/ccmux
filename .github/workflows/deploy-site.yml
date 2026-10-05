@@ -1,0 +1,29 @@
+name: Deploy website
+
+on:
+  workflow_call:
+    secrets:
+      CCMUX_SITE_DEPLOY_TOKEN:
+        required: true
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  request-deployment:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Trigger the website deployment
+        env:
+          # Fine-grained PAT: Actions write on epilande/ccmux-site only.
+          GH_TOKEN: ${{ secrets.CCMUX_SITE_DEPLOY_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set CCMUX_SITE_DEPLOY_TOKEN with Actions write permission on epilande/ccmux-site."
+            exit 1
+          fi
+          gh api --method POST \
+            repos/epilande/ccmux-site/actions/workflows/deploy.yml/dispatches \
+            -f ref=main
