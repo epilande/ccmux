@@ -9,7 +9,10 @@ import type { NotificationEventKind, NotificationPayload } from "../lib/notify";
 import type { NotificationsConfig } from "../lib/preferences";
 import type { AgentDef } from "../lib/agents";
 import { SCAN_INTERVAL_MS } from "../lib/config";
-import { getAgentDisplayName } from "../lib/agents";
+import {
+  getAgentDisplayName,
+  sessionNotificationActions,
+} from "../lib/agents";
 import {
   buildFinishedContext,
   buildNotificationContext,
@@ -524,7 +527,10 @@ export class Notifier {
     const buildContext = this.deps.buildContext ?? buildNotificationContext;
     const context = await buildContext(session);
     const effectiveAttention = context.reclassifyAs ?? session.attentionType;
-    const map = this.deps.getAgent?.(session.agentType)?.notificationActions;
+    const map = sessionNotificationActions(
+      this.deps.getAgent?.(session.agentType),
+      session.version,
+    );
 
     // Every action/reply types into the pane, so a paneless (background /
     // soft-evicted) row gets none (the button would only 409). The context

@@ -428,9 +428,14 @@ describe("handleNotificationAction: approve/deny", () => {
   // OpenCode has no `planApprove`, so the pane-authoritative gate never runs;
   // approve/deny resolve straight to the def's key sequences (verified e2e on
   // OpenCode 1.18.3: Enter approves the initially-highlighted "Allow once",
-  // Right Right Enter navigates to and confirms "Reject").
-  const opencodeSession = () =>
-    mkSession({ agentType: "opencode", pendingTool: "external_directory" });
+  // Right Right Enter navigates to and confirms "Reject"). The keys are gated
+  // on that major, so the session carries a resolved 1.x version.
+  const opencodeSession = (version: string | null = "1.18.3") =>
+    mkSession({
+      agentType: "opencode",
+      pendingTool: "external_directory",
+      version,
+    });
 
   it("opencode approve sends bare Enter and returns 200", async () => {
     const session = opencodeSession();
@@ -658,6 +663,39 @@ describe("handleNotificationAction: approve/deny", () => {
     );
     expect(res.code).toBe(200);
     expect(sendKeyCalls).toEqual([{ pane: "%1", key: "Escape" }]);
+  });
+
+  it("refuses opencode 2.x deny (409, no keys): its wrapping option row would approve (issue #214)", async () => {
+    const session = opencodeSession("2.0.21");
+    const { deps, sendKeyCalls, reNotifyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "deny",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
+    expect(reNotifyCalls).toHaveLength(1);
+  });
+
+  it("refuses opencode approve while the session's version is unresolved", async () => {
+    const session = opencodeSession(null);
+    const { deps, sendKeyCalls } = makeDeps(session);
+    const res = await handleNotificationAction(
+      {
+        sessionId: session.id,
+        action: "approve",
+        statusChangedAt: STAMP,
+        attentionGeneration: 0,
+      },
+      deps,
+    );
+    expect(res.code).toBe(409);
+    expect(sendKeyCalls).toHaveLength(0);
   });
 
   it("refuses approve on an aggregated row with multiple concurrent waits (409, no keys)", async () => {

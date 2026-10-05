@@ -111,7 +111,10 @@ describe("terminal-detector", () => {
   });
 
   it("uses first matching rule when multiple rules match", () => {
-    const result = detectTerminalStatus("Allow once\nEsc interrupt", opencode);
+    const result = detectTerminalStatus(
+      "Allow once  Reject\nEsc interrupt",
+      opencode,
+    );
     expect(result.status).toBe("waiting");
     expect(result.attentionType).toBe("permission");
     expect(result.pendingTool).toBe("Command");
@@ -167,12 +170,11 @@ describe("terminal-detector", () => {
       expect(result.attentionType).toBeNull();
     });
 
-    it("question text containing 'reject' still reads as a question, not a permission", () => {
-      // The permission rule matches the bare word "reject", so classifying
-      // this as a permission wait would attach Approve/Deny buttons whose
-      // approve key is a bare Enter, which the picker eats as a selection.
+    it("question text quoting permission controls still reads as a question", () => {
+      // A permission misclassification would attach Approve/Deny buttons
+      // whose approve key is a bare Enter, which the picker eats as a selection.
       const result = detectTerminalStatus(
-        `  ┃  Should I approve or reject this plan?
+        `  ┃  Should I choose Allow once or Reject?
   ┃  1. Approve it
   ┃  2. Reject it
   ┃  ↑↓ select  enter submit  esc dismiss`,
@@ -191,6 +193,41 @@ describe("terminal-detector", () => {
       expect(result.status).toBe("waiting");
       expect(result.attentionType).toBe("permission");
       expect(result.pendingTool).toBe("Command");
+    });
+  });
+
+  describe("OpenCode permission controls", () => {
+    it.each([
+      "Allow once  Allow always  Reject",
+      "Allow once  Always allow  Reject",
+      "Allow once  Reject",
+      "△ Reject permission\nTell OpenCode what to do differently\nenter confirm  esc cancel",
+    ])("detects the live permission widget: %s", (capture) => {
+      expect(detectTerminalStatus(capture, opencode)).toEqual({
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      });
+    });
+
+    it.each([
+      'Result: ls was denied — the shell tool returned:\n{"error":{"type":"permission.rejected","message":"Stop here; do not retry."}}\nBuild · MiMo-V2.6-Flash Free\nctrl+p commands',
+      "The user rejected this tool call. No commands were run.",
+      "You can reject permission requests when they are unsafe.",
+      "Choose Allow once to run a command once.",
+    ])("ignores permission words in completed prose: %s", (capture) => {
+      expect(detectTerminalStatus(capture, opencode)).toEqual({
+        status: "idle",
+        attentionType: null,
+        pendingTool: null,
+      });
+    });
+
+    it("keeps working when rejection text is above a live working footer", () => {
+      expect(
+        detectTerminalStatus("permission.rejected\nesc interrupt", opencode)
+          .status,
+      ).toBe("working");
     });
   });
 

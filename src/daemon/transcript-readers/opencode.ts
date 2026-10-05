@@ -18,20 +18,34 @@
  * prompt" rule. Tool/reasoning parts are separate rows a text-only query
  * never has to pay for.
  *
+ * OpenCode 2 writes the same database but its own tables: a session found
+ * in `session_v2` is read from `session_message` instead (one row per user
+ * prompt, assistant step and turn-ending `idle`; see `openCode2Candidates`).
+ * Both schemas feed the same `foldTurns`.
+ *
  * Session mapping: one ccmux row can aggregate N server-side OpenCode
  * sessions (`ambiguousWait`). `session.nativeSessionId`, when present, picks
- * the exact one. When absent, this reader falls back to the `session` row
+ * the exact one. A 2.x session also requires its on-disk TUI marker to name
+ * the pane's current PID; a released or foreign marker returns no transcript.
+ * When the native id is absent, this reader falls back to the `session` row
  * (which carries `directory`, OpenCode's own cwd) whose most recent
  * ASSISTANT message is newest among every session sharing the ccmux row's
  * cwd — a heuristic, not a guarantee, and a known soft spot: an aggregated
  * row's OTHER concurrent session could be the one the caller actually wants.
+ * The fallback yields nothing once the cwd has newer OpenCode 2 activity
+ * (see `newestOpenCode2Activity`).
  */
 
 import { Database } from "bun:sqlite";
-import { OPENCODE_DB_FILE } from "../../lib/config";
+import { readFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import { parseMajorVersion } from "../../lib/agents";
+import { MARKERS_DIR, OPENCODE_DB_FILE } from "../../lib/config";
+import { parseMarkerFile } from "../session-markers";
 import type {
   TranscriptReader,
   TranscriptResult,
+  TranscriptSession,
   TranscriptTurn,
 } from "../transcript-read";
 import { MAX_LINE_BYTES, capText } from "../transcript-read";
@@ -95,8 +109,13 @@ function resolveSessionId(
   db: Database,
   nativeSessionId: string | undefined,
   cwd: string,
+  version: string | null | undefined,
 ): string | null {
   if (nativeSessionId) return nativeSessionId;
+  // The fallback only knows 1.x tables, so for a pane known to run 2.x any
+  // session it finds is stale 1.x history, not what the pane is showing.
+  const major = parseMajorVersion(version);
+  if (major !== null && major >= 2) return null;
 
   const candidates = db
     .query<
@@ -123,7 +142,9 @@ function resolveSessionId(
     try {
       const data = JSON.parse(row.data);
       if (data && typeof data === "object" && data.role === "assistant") {
-        return row.session_id;
+        return newestOpenCode2Activity(db, cwd) >= row.time_created
+          ? null
+          : row.session_id;
       }
     } catch {
       continue;
@@ -132,11 +153,117 @@ function resolveSessionId(
   return null;
 }
 
-function readOpenCodeSession(
-  db: Database,
-  sessionId: string,
+/**
+ * Newest `time_updated` among the cwd's OpenCode 2 sessions, or -Infinity
+ * when there are none (or no `session_v2` table, i.e. 1.x never upgraded).
+ *
+ * OpenCode 2 writes its sessions to `session_v2`/`session_message` in the
+ * same database and leaves the 1.x tables behind (issue #214). This reader
+ * only reads the 1.x tables, so once the cwd has a newer 2.x session its
+ * newest 1.x session is stale history rather than what the pane is running,
+ * and handing it to `ccmux handoff` would relay the wrong conversation.
+ * Returning null instead lets `ccmux last` fall back to the pane capture.
+ *
+ * This is the second line of defense, behind the session's own version:
+ * 2.x advances `time_updated` when a prompt is queued but not on replies or
+ * turn completion, so an older 2.x session resumed after newer 1.x use in
+ * the same cwd reads as older here until its first new prompt.
+ */
+function newestOpenCode2Activity(db: Database, cwd: string): number {
+  try {
+    const row = db
+      .query<
+        { newest: number | null },
+        [string]
+      >("SELECT MAX(time_updated) AS newest FROM session_v2 WHERE directory = ?")
+      .get(cwd);
+    return row?.newest ?? -Infinity;
+  } catch {
+    return -Infinity;
+  }
+}
+
+/** One message offered to `foldTurns`, newest first. */
+interface TurnCandidate {
+  role: "user" | "assistant";
+  text: string;
+  /** An oversized fragment was skipped while collecting `text`. */
+  truncated: boolean;
+  /** Epoch ms. */
+  time: number;
+}
+
+/**
+ * Pair the newest `turns` completed assistant replies with their prompts.
+ * Callers yield only COMPLETED assistant turns, newest first, with every
+ * user prompt in between.
+ *
+ * Built newest-first, reversed at the end — same shape as foldJsonlTurns,
+ * and deliberately mirroring its held-user state machine: a message row is
+ * already a complete unit (unlike a JSONL line, nothing accumulates), but
+ * pairing a user prompt with "the newer of the two adjacent accepted
+ * assistant turns" needs the same care. `awaitingUser` is true only in the
+ * window right after accepting an assistant turn and before its own
+ * preceding prompt has been found; a user row seen OUTSIDE that window
+ * (before any turn has been accepted yet — a trailing unanswered prompt —
+ * or one already consumed) is invisible, exactly like `flushAssistant`
+ * returning false leaves `heldUser` untouched in the JSONL fold. Without
+ * this, a trailing INCOMPLETE turn's own prompt could otherwise drift
+ * sideways and get attached to an older, unrelated accepted turn.
+ */
+function foldTurns(
+  candidates: Iterable<TurnCandidate>,
   turns: number,
 ): TranscriptResult | null {
+  const out: TranscriptTurn[] = [];
+  let heldUser: TranscriptTurn | null = null;
+  let awaitingUser = false;
+  let assistantCount = 0;
+  let truncated = false;
+
+  for (const candidate of candidates) {
+    if (candidate.role === "assistant") {
+      if (candidate.truncated) truncated = true;
+      if (!candidate.text) continue;
+      const capped = capText(candidate.text);
+      if (capped.truncated) truncated = true;
+      if (heldUser) {
+        out.push(heldUser);
+        heldUser = null;
+      }
+      out.push({
+        role: "assistant",
+        text: capped.text,
+        timestamp: toIso(candidate.time),
+      });
+      assistantCount++;
+      awaitingUser = true;
+      if (assistantCount >= turns) break;
+    } else {
+      if (!awaitingUser) continue; // no accepted-but-unpaired turn to attach to
+      if (candidate.truncated) truncated = true;
+      if (!candidate.text) continue; // blank prompt: invisible, keep awaiting
+      const capped = capText(candidate.text);
+      if (capped.truncated) truncated = true;
+      heldUser = {
+        role: "user",
+        text: capped.text,
+        timestamp: toIso(candidate.time),
+      };
+      awaitingUser = false;
+    }
+  }
+
+  if (out.length === 0) return null;
+  out.reverse();
+  return { turns: out, truncated };
+}
+
+/** OpenCode 1.x: `message` rows with their `part` rows, newest first. */
+function* openCodeCandidates(
+  db: Database,
+  sessionId: string,
+): Generator<TurnCandidate> {
   const messages = db
     .query<
       MessageRow,
@@ -148,24 +275,6 @@ function readOpenCodeSession(
     "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC",
   );
 
-  // Built newest-first, reversed at the end — same shape as foldJsonlTurns,
-  // and deliberately mirroring its held-user state machine: a message row is
-  // already a complete unit (unlike a JSONL line, nothing accumulates), but
-  // pairing a user prompt with "the newer of the two adjacent accepted
-  // assistant turns" needs the same care. `awaitingUser` is true only in the
-  // window right after accepting an assistant turn and before its own
-  // preceding prompt has been found; a user row seen OUTSIDE that window
-  // (before any turn has been accepted yet — a trailing unanswered prompt —
-  // or one already consumed) is invisible, exactly like `flushAssistant`
-  // returning false leaves `heldUser` untouched in the JSONL fold. Without
-  // this, a trailing INCOMPLETE turn's own prompt could otherwise drift
-  // sideways and get attached to an older, unrelated accepted turn.
-  const out: TranscriptTurn[] = [];
-  let heldUser: TranscriptTurn | null = null;
-  let awaitingUser = false;
-  let assistantCount = 0;
-  let truncated = false;
-
   for (const message of messages) {
     let data: { role?: unknown };
     try {
@@ -174,60 +283,149 @@ function readOpenCodeSession(
       continue;
     }
     if (!data || typeof data !== "object") continue;
+    if (data.role !== "assistant" && data.role !== "user") continue;
 
+    // Parts are read lazily, so a fold that stops early stops querying.
     const parts = partsStmt
       .all(message.id)
       .map(parsePart)
       .filter((p): p is ParsedPart => p !== null);
-
-    if (data.role === "assistant") {
-      if (!hasStopFinish(parts)) continue; // mid-turn / aborted: not completed
-      const collected = collectText(parts);
-      if (collected.truncated) truncated = true;
-      if (!collected.text) continue;
-      const capped = capText(collected.text);
-      if (capped.truncated) truncated = true;
-      if (heldUser) {
-        out.push(heldUser);
-        heldUser = null;
-      }
-      out.push({
-        role: "assistant",
-        text: capped.text,
-        timestamp: toIso(message.time_created),
-      });
-      assistantCount++;
-      awaitingUser = true;
-      if (assistantCount >= turns) break;
-    } else if (data.role === "user") {
-      if (!awaitingUser) continue; // no accepted-but-unpaired turn to attach to
-      const collected = collectText(parts);
-      if (collected.truncated) truncated = true;
-      if (!collected.text) continue; // blank prompt: invisible, keep awaiting
-      const capped = capText(collected.text);
-      if (capped.truncated) truncated = true;
-      heldUser = {
-        role: "user",
-        text: capped.text,
-        timestamp: toIso(message.time_created),
-      };
-      awaitingUser = false;
-    }
+    // Mid-turn / aborted: not completed.
+    if (data.role === "assistant" && !hasStopFinish(parts)) continue;
+    yield { role: data.role, ...collectText(parts), time: message.time_created };
   }
+}
 
-  if (out.length === 0) return null;
-  out.reverse();
-  return { turns: out, truncated };
+/** A 2.x step's `content[]` items, minus anything that is not an object
+ *  (one malformed item must not lose the whole transcript). */
+function contentParts(content: unknown): ParsedPart[] {
+  if (!Array.isArray(content)) return [];
+  return content.filter(
+    (item): item is ParsedPart => !!item && typeof item === "object",
+  );
 }
 
 /**
- * Core implementation, taking the db path explicitly so tests can point it at
- * a fixture database instead of the real `OPENCODE_DB_FILE`.
+ * OpenCode 2.x: `session_message` rows (`type` + JSON `data`), newest first.
+ * A turn is every row since the previous `idle` row: usually a `user` row
+ * and the `assistant` rows that answer it (one per model step, text in
+ * `content[]` items of `type: "text"`), closed by an `idle` row whose
+ * `outcome` is `succeeded` once it completes. A turn can also start with no
+ * user row at all, from a `synthetic` row (a background subagent or shell
+ * finishing), so a reply is emitted at the turn's boundary, not only at a
+ * prompt. Steering adds user rows within that same turn, so those rows must
+ * not end collection. Failed/interrupted idle outcomes and a still-running
+ * turn without an idle row yield no assistant reply. Shutdown/resume has no
+ * intervening idle row because it continues the same turn. See OpenCode
+ * 2.0.21's `Session.Message.Idle` contract.
+ */
+function* openCode2Candidates(
+  db: Database,
+  sessionId: string,
+): Generator<TurnCandidate> {
+  // Streamed, not `.all()`: a long session's tool output lives in these
+  // rows' `data`, and the fold usually stops after the newest turn or two.
+  // Only the three row types that make up a turn are fetched.
+  const rows = db
+    .query<
+      { type: string; time_created: number; data: string },
+      [string]
+    >(
+      "SELECT type, time_created, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant', 'idle') ORDER BY seq DESC",
+    )
+    .iterate(sessionId);
+
+  let completed = false;
+  let replyTime = 0;
+  let reply: ParsedPart[][] = [];
+  let promptTime = 0;
+  let prompts: ParsedPart[] = [];
+
+  /** One idle-bounded turn, with all of its user prompts kept together. */
+  function* pendingTurn(): Generator<TurnCandidate> {
+    if (!completed || reply.length === 0) return;
+    const turn: TurnCandidate = {
+      role: "assistant",
+      // Newest step first; reversed so the text reads in order.
+      ...collectText(reply.reverse().flat()),
+      time: replyTime,
+    };
+    yield turn;
+    // An empty reply is skipped by the fold. Its prompts must not drift
+    // onto another accepted reply that had no prompt of its own.
+    if (turn.text && prompts.length > 0) {
+      yield {
+        role: "user",
+        ...collectText(prompts.reverse()),
+        time: promptTime,
+      };
+    }
+  }
+
+  for (const row of rows) {
+    if (row.type === "idle") {
+      yield* pendingTurn();
+      // Even a malformed idle row is a boundary: never merge the older
+      // execution into the completed one we just emitted.
+      completed = false;
+      reply = [];
+      replyTime = 0;
+      prompts = [];
+      promptTime = 0;
+    } else if (!completed) {
+      // Failed/interrupted/unfinished turns cannot contribute text or prompts.
+      continue;
+    }
+    let data: { text?: unknown; content?: unknown; outcome?: unknown };
+    try {
+      data = JSON.parse(row.data);
+    } catch {
+      continue;
+    }
+    if (!data || typeof data !== "object") continue;
+
+    if (row.type === "idle") {
+      completed = data.outcome === "succeeded";
+    } else if (row.type === "assistant") {
+      reply.push(contentParts(data.content));
+      replyTime = Math.max(replyTime, row.time_created);
+    } else if (row.type === "user") {
+      const text = typeof data.text === "string" ? data.text : "";
+      prompts.push({ type: "text", text });
+      // The earliest prompt timestamps the combined user entry.
+      promptTime = row.time_created;
+    }
+  }
+  yield* pendingTurn();
+}
+
+/**
+ * Which schema holds the session: OpenCode 2 sessions live in `session_v2`.
+ * Routed by the id rather than by version, since 1.18 has a
+ * `session_message` table of its own.
+ */
+function isOpenCode2Session(db: Database, sessionId: string): boolean {
+  try {
+    return (
+      db
+        .query<{ found: number }, [string]>(
+          "SELECT 1 AS found FROM session_v2 WHERE id = ?",
+        )
+        .get(sessionId) !== null
+    );
+  } catch {
+    return false; // no session_v2 table: a database 2.x never opened
+  }
+}
+
+/**
+ * Core implementation with explicit database and marker paths for fixtures.
  */
 export async function readOpenCodeTranscript(
   dbPath: string,
-  session: { nativeSessionId?: string; cwd: string },
+  session: Pick<TranscriptSession, "nativeSessionId" | "cwd" | "version" | "pid">,
   turns: number,
+  markersDir: string = MARKERS_DIR,
 ): Promise<TranscriptResult | null> {
   let db: Database;
   try {
@@ -240,11 +438,41 @@ export async function readOpenCodeTranscript(
       db,
       session.nativeSessionId,
       session.cwd,
+      session.version,
     );
     if (!sessionId) return null;
-    return readOpenCodeSession(db, sessionId, turns);
+    const isV2 = isOpenCode2Session(db, sessionId);
+    if (isV2) {
+      // A TUI can release its marker to show a session another pane owns,
+      // while the daemon still holds its previous native ID. Check the
+      // file itself: the scan cache can still contain the released marker.
+      // The id comes from a marker or the database, so one carrying a path
+      // separator is refused rather than read from outside the markers dir.
+      const file = `opencode-${sessionId}.json`;
+      if (!session.pid || basename(file) !== file) return null;
+      const marker = parseMarkerFile(
+        readFileSync(join(markersDir, file), "utf-8"),
+      );
+      // An exact pid, unlike the adapter's pane-by-ancestry lookup, because
+      // the two cannot differ: OpenCode is matched only by its executable
+      // name, and the process scan keeps the deepest match on a tty, which
+      // is the TUI process that writes the marker.
+      if (
+        marker?.agent_type !== "opencode" ||
+        marker.session_id !== sessionId ||
+        marker.pid !== session.pid
+      ) {
+        return null;
+      }
+    }
+    return foldTurns(
+      isV2
+        ? openCode2Candidates(db, sessionId)
+        : openCodeCandidates(db, sessionId),
+      turns,
+    );
   } catch {
-    return null; // a query against a live WAL writer failed
+    return null; // marker unavailable, or a query against a live WAL writer failed
   } finally {
     db.close();
   }

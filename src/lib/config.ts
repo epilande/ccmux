@@ -117,6 +117,17 @@ export const OPENCODE_CONFIG_DIR = join(
 );
 export const OPENCODE_PLUGIN_DIR = join(OPENCODE_CONFIG_DIR, "plugin");
 export const OPENCODE_PLUGIN_FILE = join(OPENCODE_PLUGIN_DIR, "ccmux.js");
+/**
+ * OpenCode 2 discovers TUI plugins only as directories under `plugins/`
+ * (plural) holding a `tui.js` entry. OpenCode 1 never loads it: it only
+ * globs loose `{plugin,plugins}/*.{js,ts}` files.
+ */
+export const OPENCODE_TUI_PLUGIN_DIR = join(
+  OPENCODE_CONFIG_DIR,
+  "plugins",
+  "ccmux",
+);
+export const OPENCODE_TUI_PLUGIN_FILE = join(OPENCODE_TUI_PLUGIN_DIR, "tui.js");
 
 /**
  * OpenCode's SQLite state database (message/part history), read-only via

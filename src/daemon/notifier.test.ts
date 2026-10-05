@@ -1005,6 +1005,8 @@ describe("Notifier", () => {
       getAgent?: NotifierDeps["getAgent"];
       buildContext?: NotifierDeps["buildContext"];
       ambiguousWait?: boolean;
+      /** The agent version the daemon resolved for the session. */
+      version?: string;
     }): Promise<NotificationPayload> {
       const h = createHarness();
       const notifier = new Notifier({
@@ -1028,6 +1030,7 @@ describe("Notifier", () => {
         ...(opts.ambiguousWait !== undefined
           ? { ambiguousWait: opts.ambiguousWait }
           : {}),
+        ...(opts.version !== undefined ? { version: opts.version } : {}),
       });
       await flush();
       expect(h.delivered.length).toBe(1);
@@ -1111,6 +1114,7 @@ describe("Notifier", () => {
         attentionType: "permission",
         pendingTool: "external_directory",
         getAgent: () => opencodeAgent,
+        version: "1.18.34",
       });
       expect(payload.actions).toEqual([
         { id: "approve", label: "Approve" },
@@ -1118,6 +1122,16 @@ describe("Notifier", () => {
       ]);
       // OpenCode has no permissionReplyPrelude, so no deny-with-feedback Reply.
       expect(payload.reply).toBeUndefined();
+    });
+
+    it("offers no Approve/Deny for an opencode 2.x permission wait (issue #214)", async () => {
+      const payload = await deliverWaiting({
+        attentionType: "permission",
+        pendingTool: "external_directory",
+        getAgent: () => opencodeAgent,
+        version: "2.0.21",
+      });
+      expect(payload.actions).toBeUndefined();
     });
 
     it("stamps Approve/Deny for a codex permission wait (no reply)", async () => {
@@ -1200,6 +1214,7 @@ describe("Notifier", () => {
         pendingTool: "external_directory",
         getAgent: () => opencodeAgent,
         ambiguousWait: true,
+        version: "1.18.34",
       });
       // A keystroke would land on whichever dialog the shared pane renders, so
       // the notification ships informational-only.

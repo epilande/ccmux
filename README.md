@@ -58,7 +58,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 ### Homebrew
 
 ```sh
-brew install epilande/tap/ccmux
+brew install ccmux
 ccmux setup
 ```
 
@@ -254,7 +254,7 @@ ccmux config set notifications.enabled true
 ccmux notify   # sends a test notification and prints setup diagnostics
 ```
 
-Actionable Approve/Deny buttons work for **Claude Code**, **OpenCode**, **Codex**, **Cursor**, **Gemini CLI**, **Antigravity**, **Copilot**, and **oh-my-pi**; Pi has no tool-approval pause, so it never raises a waiting notification. Inline **Reply** on waiting-state notifications (permission, plan, question) is Claude Code only; Reply on **finished** notifications works for every built-in agent. A reply the agent's composer would misread as a command (e.g. leading `!` or `/`) is refused instead of typed, and the text comes back in a follow-up notification so it isn't lost. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
+Actionable Approve/Deny buttons work for **Claude Code**, **OpenCode** (1.x only), **Codex**, **Cursor**, **Gemini CLI**, **Antigravity**, **Copilot**, and **oh-my-pi**; Pi has no tool-approval pause, so it never raises a waiting notification. OpenCode's buttons are withheld on OpenCode 2, whose permission row turns the 1.x Deny keys into an approval, and on any OpenCode session whose version ccmux could not read, including preview builds that report `0.0.0-*`. Inline **Reply** on waiting-state notifications (permission, plan, question) is Claude Code only; Reply on **finished** notifications works for every built-in agent. A reply the agent's composer would misread as a command (e.g. leading `!` or `/`) is refused instead of typed, and the text comes back in a follow-up notification so it isn't lost. Approve/Deny work on macOS and Linux; inline reply needs a notification server that advertises it (always on macOS, varies on Linux).
 
 For OpenCode, one server can host several sessions folded into a single row, so when more than one is waiting at once the buttons are withheld (the keystroke could land on the wrong session's dialog) and the notification is delivered informational-only.
 
@@ -350,10 +350,12 @@ spawn rather than guessing a flag, and you can teach it the right shape with
 `--model <name>` starts the agent on that model, passed through as the agent's
 own flag (`--model` for every built-in, read from each CLI's `--help`). An
 agent with no known flag, including a custom one, refuses the spawn; declare
-`modelFlag` in its config to teach it. A new window is named after the
-worktree when the spawn has one (`fix-flicker`, `issue-150-...`, `pr-154-...`)
-and after the agent otherwise, so a batch of spawns is tellable apart; the name
-pins tmux's `automatic-rename` off for that window.
+`modelFlag` in its config to teach it. OpenCode 2's TUI has no model flag and
+exits on `--model`, so pick its model with `/models` inside OpenCode. A new
+window is named after the worktree when the spawn has one (`fix-flicker`,
+`issue-150-...`, `pr-154-...`) and after the agent otherwise, so a batch of
+spawns is tellable apart; the name pins tmux's `automatic-rename` off for that
+window.
 
 `--worktree [name]` spawns the agent into a git worktree at
 `<main>/.claude/worktrees/<name>`, creating it first if it doesn't exist yet.
@@ -904,6 +906,8 @@ Uses OpenCode's plugin system rather than shell hooks. `ccmux setup --agent open
 
 Because one OpenCode server can host many sessions, the daemon folds all markers sharing a server PID into the single ccmux Session for the tmux pane that hosts the server. Status is worst-of (`waiting > working > idle`); `cwd` and `nativeSessionId` come from the newest-activity marker, while `pendingTool` and the attention indicator come from the newest-waiting marker.
 
+OpenCode 2 rejects that plugin and runs its sessions in a shared background service outside your panes, so setup also installs a TUI plugin at `~/.config/opencode/plugins/ccmux/tui.js`, which runs inside each pane's OpenCode and reports the session that pane is showing (OpenCode 1 ignores it). On 2.x, setup removes the 1.x plugin instead of installing it. Notification Approve/Deny buttons are not offered on OpenCode 2 yet.
+
 ### Pi / oh-my-pi
 
 Both use Pi's extension system rather than shell hooks (oh-my-pi, `omp`, is a hard fork of Pi that kept the extension API). `ccmux setup --agent pi` / `--agent omp` drops a single auto-discovered JS extension at `~/.pi/agent/extensions/ccmux.js` or `~/.omp/agent/extensions/ccmux.js`. The extension subscribes to the agent's lifecycle events and writes one marker per session:
@@ -1000,7 +1004,7 @@ names whichever one it found. The optional `{bin}`
 resolves to the agent's launcher, so a wrapper binary or `executable` override
 survives.
 
-You can also override built-in agent settings by using the agent's name as the key (e.g., `"claude"`, `"codex"`). An override of `notificationActions` (the notification button/reply keystroke map) **replaces the whole map**, it is not merged key by key; it also controls the reply surfaces (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, the `plan*` keys, and the `unsafeReplyPattern` reply guard, written as a regex string like `readyPattern`), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it. The one exception is `unsafeReplyPattern`: it is carried forward from the built-in as a safety default even when your override omits it, so a partial override can't accidentally re-enable unapproved shell execution through a reply. To disable it on purpose, set an explicit never-match pattern (e.g. `"/(?!x)x/"`).
+You can also override built-in agent settings by using the agent's name as the key (e.g., `"claude"`, `"codex"`). An override of `notificationActions` (the notification button/reply keystroke map) **replaces the whole map**, it is not merged key by key; it also controls the reply surfaces (`replyOnQuestion`, `replyOnFinished`, `permissionReplyPrelude`, the `plan*` keys, and the `unsafeReplyPattern` reply guard, written as a regex string like `readyPattern`), so any key you leave out is dropped rather than inherited from the built-in default. Copy across every key you still want when you override it. The one exception is `unsafeReplyPattern`: it is carried forward from the built-in as a safety default even when your override omits it, so a partial override can't accidentally re-enable unapproved shell execution through a reply. To disable it on purpose, set an explicit never-match pattern (e.g. `"/(?!x)x/"`). `approvalKeysVerifiedThroughMajor` carries forward the same way: it is the newest major version of the agent whose prompt the `approve`/`deny` keys were verified on (OpenCode's is `1`), and sessions on a newer or unresolved version get no Approve/Deny buttons. Set a larger number only once you have checked your keys against that version's prompt.
 
 | Field                 | Required | Description                                                                         |
 | :-------------------- | :------- | :---------------------------------------------------------------------------------- |

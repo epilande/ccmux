@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -10,14 +18,20 @@ const tempRoot = join(
 const opencodeConfigDir = join(tempRoot, "opencode");
 const opencodePluginDir = join(opencodeConfigDir, "plugin");
 const opencodePluginFile = join(opencodePluginDir, "ccmux.js");
+const opencodeTuiPluginDir = join(opencodeConfigDir, "plugins", "ccmux");
+const opencodeTuiPluginFile = join(opencodeTuiPluginDir, "tui.js");
 const markersDir = join(tempRoot, "markers");
 
+// Every path the adapter writes MUST be overridden here: anything left to
+// `actualConfig` is the developer's real OpenCode config.
 const actualConfig = await import("../../../lib/config");
 mock.module("../../../lib/config", () => ({
   ...actualConfig,
   OPENCODE_CONFIG_DIR: opencodeConfigDir,
   OPENCODE_PLUGIN_DIR: opencodePluginDir,
   OPENCODE_PLUGIN_FILE: opencodePluginFile,
+  OPENCODE_TUI_PLUGIN_DIR: opencodeTuiPluginDir,
+  OPENCODE_TUI_PLUGIN_FILE: opencodeTuiPluginFile,
   MARKERS_DIR: markersDir,
 }));
 
@@ -109,12 +123,17 @@ function makeCtx(
 
 describe("OpenCodePluginAdapter", () => {
   let adapter: OpenCodePluginAdapter;
+  // What the stubbed `opencode --version` probe reports; null = not runnable.
+  let openCodeVersion: string | null;
 
   beforeEach(() => {
     rmSync(tempRoot, { recursive: true, force: true });
     mkdirSync(tempRoot, { recursive: true });
     refreshMarkerCache();
-    adapter = new OpenCodePluginAdapter();
+    openCodeVersion = "1.18.34";
+    adapter = new OpenCodePluginAdapter({
+      readOpenCodeVersion: async () => openCodeVersion,
+    });
   });
 
   afterEach(() => {
@@ -122,18 +141,48 @@ describe("OpenCodePluginAdapter", () => {
   });
 
   describe("install", () => {
-    it("writes a plugin file with the sentinel header and is idempotent", async () => {
-      await adapter.install();
-      expect(existsSync(opencodePluginFile)).toBe(true);
-      const firstLine = readFileSync(opencodePluginFile, "utf-8").split(
-        "\n",
-        1,
-      )[0];
-      expect(firstLine).toBe(`// ccmux-plugin v${CCMUX_VERSION}`);
+    it.each(["1.18.34", "2.0.21"])(
+      "leaves identical installed plugins untouched on %s",
+      async (version) => {
+        openCodeVersion = version;
+        await adapter.install();
+        const files = version.startsWith("1.")
+          ? [opencodePluginFile, opencodeTuiPluginFile]
+          : [opencodeTuiPluginFile];
+        const before = files.map((file) => {
+          expect(readFileSync(file, "utf-8").split("\n", 1)[0]).toBe(
+            `// ccmux-plugin v${CCMUX_VERSION}`,
+          );
+          const time = new Date("2024-01-15T12:00:00Z");
+          utimesSync(file, time, time);
+          return statSync(file);
+        });
+        const result = await adapter.install();
+        expect(result.changed).toBe(false);
+        expect(result.lines.some((line) => /Updated|Restart/.test(line))).toBe(
+          false,
+        );
+        files.forEach((file, i) => {
+          expect(statSync(file).ino).toBe(before[i].ino);
+          expect(statSync(file).mtimeMs).toBe(before[i].mtimeMs);
+        });
+      },
+    );
 
-      // Second install should succeed (our own sentinel present).
-      await expect(adapter.install()).resolves.toBeDefined();
-      expect(existsSync(opencodePluginFile)).toBe(true);
+    it("refreshes same-version plugins when their contents or marker directory differ", async () => {
+      await adapter.install();
+      for (const file of [opencodePluginFile, opencodeTuiPluginFile]) {
+        const expected = readFileSync(file, "utf-8");
+        writeFileSync(
+          file,
+          expected.replace(
+            JSON.stringify(markersDir),
+            JSON.stringify("/old/markers"),
+          ),
+        );
+        expect((await adapter.install()).changed).toBe(true);
+        expect(readFileSync(file, "utf-8")).toBe(expected);
+      }
     });
 
     it("refuses to overwrite a same-named file lacking the sentinel, returns advisory lines", async () => {
@@ -158,6 +207,79 @@ describe("OpenCodePluginAdapter", () => {
       expect(body).toContain(`markersDir: ${JSON.stringify(markersDir)}`);
       expect(body).toContain(`version: "${CCMUX_VERSION}"`);
     });
+
+    it("installs as before when the OpenCode version cannot be read", async () => {
+      openCodeVersion = null;
+      const { changed } = await adapter.install();
+      expect(changed).toBe(true);
+      expect(existsSync(opencodePluginFile)).toBe(true);
+    });
+
+    describe("on OpenCode 2", () => {
+      beforeEach(() => {
+        openCodeVersion = "2.0.21";
+      });
+
+      it("installs the TUI plugin and no server plugin", async () => {
+        const { lines, changed } = await adapter.install();
+        expect(changed).toBe(true);
+        expect(existsSync(opencodeTuiPluginFile)).toBe(true);
+        expect(existsSync(opencodePluginFile)).toBe(false);
+        expect(lines.some((l) => l.startsWith("Restart"))).toBe(true);
+      });
+
+      it("removes a plugin ccmux installed under 1.x, which 2.x rejects", async () => {
+        openCodeVersion = "1.18.34";
+        await adapter.install();
+        expect(existsSync(opencodePluginFile)).toBe(true);
+
+        openCodeVersion = "2.0.21";
+        const { lines, changed } = await adapter.install();
+        expect(changed).toBe(true);
+        expect(existsSync(opencodePluginFile)).toBe(false);
+        expect(lines.some((l) => l.startsWith("Removed"))).toBe(true);
+        // The TUI plugin was already current, and 2.x never loaded the
+        // removed one, so nothing needs a restart.
+        expect(lines.some((l) => l.startsWith("Restart"))).toBe(false);
+      });
+
+      it("leaves a same-named file ccmux did not write", async () => {
+        mkdirSync(opencodePluginDir, { recursive: true });
+        writeFileSync(opencodePluginFile, "// user-authored plugin\n");
+        const { lines } = await adapter.install();
+        expect(readFileSync(opencodePluginFile, "utf-8")).toBe(
+          "// user-authored plugin\n",
+        );
+        expect(lines.some((l) => l.startsWith("Left"))).toBe(true);
+      });
+    });
+
+    describe("the OpenCode 2 TUI plugin", () => {
+      it("is installed alongside the server plugin on 1.x, which never loads it", async () => {
+        await adapter.install();
+        expect(existsSync(opencodePluginFile)).toBe(true);
+        const body = readFileSync(opencodeTuiPluginFile, "utf-8");
+        expect(body.split("\n", 1)[0]).toBe(
+          `// ccmux-plugin v${CCMUX_VERSION}`,
+        );
+        expect(body).toContain(`markersDir: ${JSON.stringify(markersDir)}`);
+        expect(body).toContain("makeTuiPlugin");
+      });
+
+      it("refuses to overwrite a tui.js ccmux did not write", async () => {
+        mkdirSync(opencodeTuiPluginDir, { recursive: true });
+        writeFileSync(opencodeTuiPluginFile, "// someone else's\n");
+        const { lines } = await adapter.install();
+        expect(readFileSync(opencodeTuiPluginFile, "utf-8")).toBe(
+          "// someone else's\n",
+        );
+        expect(
+          lines.some((l) => l.startsWith(`Skipped ${opencodeTuiPluginFile}`)),
+        ).toBe(true);
+        // The server plugin still installs.
+        expect(existsSync(opencodePluginFile)).toBe(true);
+      });
+    });
   });
 
   describe("uninstall", () => {
@@ -178,6 +300,22 @@ describe("OpenCodePluginAdapter", () => {
       const { lines } = await adapter.uninstall();
       expect(existsSync(opencodePluginFile)).toBe(true);
       expect(lines.some((l) => l.toLowerCase().includes("skipped"))).toBe(true);
+    });
+
+    it("removes both plugins and the TUI plugin's directory", async () => {
+      await adapter.install();
+      await adapter.uninstall();
+      expect(existsSync(opencodePluginFile)).toBe(false);
+      expect(existsSync(opencodeTuiPluginFile)).toBe(false);
+      expect(existsSync(opencodeTuiPluginDir)).toBe(false);
+    });
+
+    it("keeps the TUI plugin's directory when something else is in it", async () => {
+      await adapter.install();
+      writeFileSync(join(opencodeTuiPluginDir, "notes.txt"), "mine\n");
+      await adapter.uninstall();
+      expect(existsSync(opencodeTuiPluginFile)).toBe(false);
+      expect(existsSync(join(opencodeTuiPluginDir, "notes.txt"))).toBe(true);
     });
 
     it("is a no-op advisory when the plugin file is absent", async () => {
@@ -203,7 +341,53 @@ describe("OpenCodePluginAdapter", () => {
 
     it("reports no anomaly when versions match", async () => {
       await adapter.install();
-      expect(adapter.describeInstallAnomalies()).toEqual([]);
+      expect(await adapter.describeInstallAnomalies()).toEqual([]);
+    });
+
+    it("flags an installed plugin once OpenCode is upgraded to 2.x", async () => {
+      await adapter.install();
+      openCodeVersion = "2.0.21";
+      const warnings = await adapter.describeInstallAnomalies();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("OpenCode 2.0.21 rejects it");
+      expect(warnings[0]).toContain("ccmux setup --agent opencode");
+    });
+
+    it("counts the TUI plugin alone as installed (the OpenCode 2 shape)", async () => {
+      openCodeVersion = "2.0.21";
+      await adapter.install();
+      expect(adapter.isInstalled()).toBe(true);
+      expect(adapter.describeInstallDetail()).toContain(CCMUX_VERSION);
+      expect(await adapter.describeInstallAnomalies()).toEqual([]);
+    });
+
+    it("flags a TUI-only install once OpenCode 1 is on PATH", async () => {
+      openCodeVersion = "2.0.21";
+      await adapter.install();
+      openCodeVersion = "1.18.34";
+      const warnings = await adapter.describeInstallAnomalies();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("OpenCode 1.18.34 loads");
+      expect(warnings[0]).toContain("ccmux setup --agent opencode");
+
+      // An unreadable version is not evidence of 1.x.
+      openCodeVersion = null;
+      expect(await adapter.describeInstallAnomalies()).toEqual([]);
+    });
+
+    it("reports a stale TUI plugin", async () => {
+      openCodeVersion = "2.0.21";
+      mkdirSync(opencodeTuiPluginDir, { recursive: true });
+      writeFileSync(opencodeTuiPluginFile, "// ccmux-plugin v0.0.0-stale\n");
+      const warnings = await adapter.describeInstallAnomalies();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(opencodeTuiPluginFile);
+      expect(warnings[0]).toContain("v0.0.0-stale");
+    });
+
+    it("reports nothing on 2.x when no plugin is installed", async () => {
+      openCodeVersion = "2.0.21";
+      expect(await adapter.describeInstallAnomalies()).toEqual([]);
     });
 
     it("reports version skew when the sentinel version disagrees", async () => {
@@ -212,16 +396,16 @@ describe("OpenCodePluginAdapter", () => {
         opencodePluginFile,
         `// ccmux-plugin v0.0.0-stale\n// body\n`,
       );
-      const warnings = adapter.describeInstallAnomalies();
+      const warnings = await adapter.describeInstallAnomalies();
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain("v0.0.0-stale");
       expect(warnings[0]).toContain(CCMUX_VERSION);
     });
 
-    it("reports no anomaly for a foreign (non-ccmux) file", () => {
+    it("reports no anomaly for a foreign (non-ccmux) file", async () => {
       mkdirSync(opencodePluginDir, { recursive: true });
       writeFileSync(opencodePluginFile, "// not ccmux\n");
-      expect(adapter.describeInstallAnomalies()).toEqual([]);
+      expect(await adapter.describeInstallAnomalies()).toEqual([]);
     });
   });
 

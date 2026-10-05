@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { readOpenCodeTranscript } from "./opencode";
@@ -216,6 +216,520 @@ describe("opencode reader", () => {
         timestamp: new Date(502).toISOString(),
       },
     ]);
+  });
+
+  describe("after an upgrade to OpenCode 2 (issue #214)", () => {
+    // OpenCode 2 writes `session_v2` into the same database and leaves the
+    // 1.x tables behind; only the columns the guard reads are modeled.
+    function insertV2Session(id: string, directory: string, timeUpdated: number) {
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, time_updated INTEGER NOT NULL)",
+      );
+      db.query(
+        "INSERT INTO session_v2 (id, directory, time_updated) VALUES (?, ?, ?)",
+      ).run(id, directory, timeUpdated);
+    }
+
+    beforeEach(() => {
+      insertSession("ses_v1", "/tmp/proj", 500);
+      seedExchange("ses_v1", 500, "v1 prompt", "v1 reply");
+    });
+
+    it("refuses the cwd fallback when the cwd has newer 2.x activity", async () => {
+      insertV2Session("ses_v2", "/tmp/proj", 900);
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj" },
+        1,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("keeps the fallback when the 1.x session is the newer one", async () => {
+      insertV2Session("ses_v2", "/tmp/proj", 100);
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj" },
+        1,
+      );
+      expect(result?.turns[0]?.text).toBe("v1 reply");
+    });
+
+    it("ignores 2.x activity in a different cwd", async () => {
+      insertV2Session("ses_v2", "/tmp/elsewhere", 900);
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj" },
+        1,
+      );
+      expect(result?.turns[0]?.text).toBe("v1 reply");
+    });
+
+    it("refuses the cwd fallback for a 2.x session even when the timestamps miss it", async () => {
+      // A 2.x session resumed after newer 1.x use: its time_updated only
+      // moves on its next prompt, so the timestamp guard alone would let
+      // the stale 1.x reply through.
+      insertV2Session("ses_v2", "/tmp/proj", 100);
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", version: "2.0.21" },
+        1,
+      );
+      expect(result).toBeNull();
+    });
+
+    it("keeps the fallback for a session known to run 1.x", async () => {
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", version: "1.18.34" },
+        1,
+      );
+      expect(result?.turns[0]?.text).toBe("v1 reply");
+    });
+
+    it("still reads an explicit nativeSessionId", async () => {
+      insertV2Session("ses_v2", "/tmp/proj", 900);
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", nativeSessionId: "ses_v1" },
+        1,
+      );
+      expect(result?.turns[0]?.text).toBe("v1 reply");
+    });
+  });
+
+  describe("an OpenCode 2 session", () => {
+    // OpenCode 2's own tables, as 2.0.21 writes them: one `session_message`
+    // row per user prompt, assistant step and turn-ending `idle`.
+    let seq = 0;
+    let markersDir: string;
+    const pid = 12345;
+    function marker(sessionId: string, ownerPid: number) {
+      writeFileSync(
+        join(markersDir, `opencode-${sessionId}.json`),
+        JSON.stringify({
+          agent_type: "opencode",
+          session_id: sessionId,
+          pid: ownerPid,
+          timestamp: 1,
+        }),
+      );
+    }
+    beforeEach(() => {
+      seq = 0;
+      markersDir = join(dir, "markers");
+      mkdirSync(markersDir);
+      marker("ses_v2", pid);
+      db.exec(`
+        CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
+        CREATE TABLE session_message (
+          id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+          seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+          time_updated INTEGER NOT NULL, data TEXT NOT NULL
+        );
+      `);
+      db.query(
+        "INSERT INTO session_v2 (id, directory, time_updated) VALUES ('ses_v2', '/tmp/proj', 1)",
+      ).run();
+    });
+
+    function row(
+      type: string,
+      time: number,
+      data: unknown,
+      sessionId = "ses_v2",
+    ) {
+      seq++;
+      db.query(
+        "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(`msg_${seq}`, sessionId, type, seq, time, time, JSON.stringify(data));
+    }
+    const user = (time: number, text: string) => row("user", time, { text });
+    const step = (time: number, ...content: unknown[]) =>
+      row("assistant", time, { content });
+    const idle = (time: number, outcome: string) =>
+      row("idle", time, { outcome });
+    const read = (turns: number) =>
+      readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", nativeSessionId: "ses_v2", pid },
+        turns,
+        markersDir,
+      );
+
+    it("refuses the old conversation after switching to another pane's owned session, then reads after takeover", async () => {
+      user(100, "first pane prompt");
+      step(110, { type: "text", text: "first pane reply" });
+      idle(120, "succeeded");
+      db.query(
+        "INSERT INTO session_v2 VALUES ('ses_other', '/tmp/proj', 200)",
+      ).run();
+      row(
+        "assistant",
+        210,
+        { content: [{ type: "text", text: "second pane reply" }] },
+        "ses_other",
+      );
+      row("idle", 220, { outcome: "succeeded" }, "ses_other");
+      const otherPid = pid + 1;
+      marker("ses_other", otherPid);
+      const otherSession = {
+        cwd: "/tmp/proj",
+        nativeSessionId: "ses_other",
+        pid: otherPid,
+      };
+      expect((await read(1))?.turns[0]?.text).toBe("first pane reply");
+
+      // The TUI releases its old marker but cannot claim the destination's.
+      // The daemon may still carry the old native ID (and a stale cache).
+      unlinkSync(join(markersDir, "opencode-ses_v2.json"));
+      expect(await read(1)).toBeNull();
+      expect(
+        (await readOpenCodeTranscript(dbPath, otherSession, 1, markersDir))
+          ?.turns[0]?.text,
+      ).toBe("second pane reply");
+      expect(
+        await readOpenCodeTranscript(
+          dbPath,
+          { ...otherSession, pid },
+          1,
+          markersDir,
+        ),
+      ).toBeNull();
+
+      // Once the other pane releases ownership, this pane's new marker and
+      // native ID allow the correct transcript again.
+      marker("ses_other", pid);
+      expect(
+        (
+          await readOpenCodeTranscript(
+            dbPath,
+            { ...otherSession, pid },
+            1,
+            markersDir,
+          )
+        )?.turns[0]?.text,
+      ).toBe("second pane reply");
+      expect(
+        await readOpenCodeTranscript(dbPath, otherSession, 1, markersDir),
+      ).toBeNull();
+    });
+
+    it.each([
+      ["malformed", "{"],
+      [
+        "wrong agent",
+        JSON.stringify({ agent_type: "codex", session_id: "ses_v2", pid }),
+      ],
+      [
+        "wrong session",
+        JSON.stringify({
+          agent_type: "opencode",
+          session_id: "ses_other",
+          pid,
+        }),
+      ],
+      [
+        "wrong process",
+        JSON.stringify({
+          agent_type: "opencode",
+          session_id: "ses_v2",
+          pid: pid + 1,
+        }),
+      ],
+    ])(
+      "refuses a %s marker even before the version is resolved",
+      async (_name, content) => {
+        step(110, { type: "text", text: "old reply" });
+        idle(120, "succeeded");
+        writeFileSync(join(markersDir, "opencode-ses_v2.json"), content);
+        expect(await read(1)).toBeNull();
+      },
+    );
+
+    it("refuses a session id that would reach outside the markers dir", async () => {
+      // A marker that would pass every other check, sitting where the id's
+      // path segments lead.
+      const id = "x/../../escaped";
+      db.query(
+        "INSERT INTO session_v2 (id, directory, time_updated) VALUES (?, '/tmp/proj', 1)",
+      ).run(id);
+      row("assistant", 110, { content: [{ type: "text", text: "reply" }] }, id);
+      row("idle", 120, { outcome: "succeeded" }, id);
+      writeFileSync(
+        join(markersDir, `opencode-${id}.json`),
+        JSON.stringify({ agent_type: "opencode", session_id: id, pid }),
+      );
+      expect(
+        await readOpenCodeTranscript(
+          dbPath,
+          { cwd: "/tmp/proj", nativeSessionId: id, pid },
+          1,
+          markersDir,
+        ),
+      ).toBeNull();
+    });
+
+    it("requires a known process for a v2 transcript", async () => {
+      step(110, { type: "text", text: "old reply" });
+      idle(120, "succeeded");
+      expect(
+        await readOpenCodeTranscript(
+          dbPath,
+          { cwd: "/tmp/proj", nativeSessionId: "ses_v2" },
+          1,
+          markersDir,
+        ),
+      ).toBeNull();
+    });
+
+    it("joins a turn's text across its steps, skipping reasoning and tools", async () => {
+      user(100, "run it");
+      step(110, { type: "text", text: "I'll run it." }, { type: "reasoning", text: "thinking" }, { type: "tool" });
+      step(120, { type: "reasoning", text: "done" }, { type: "text", text: "It printed ok." });
+      idle(130, "succeeded");
+
+      const result = await read(1);
+      expect(result?.turns).toEqual([
+        { role: "assistant", text: "I'll run it.\n\nIt printed ok.", timestamp: new Date(120).toISOString() },
+      ]);
+    });
+
+    describe("a prompt steered into a running turn", () => {
+      beforeEach(() => {
+        user(100, "previous prompt");
+        step(110, { type: "text", text: "previous reply" });
+        idle(120, "succeeded");
+        user(200, "inspect it");
+        step(210, { type: "text", text: "I found the cause." }, { type: "tool" });
+        user(220, "also run the tests");
+      });
+
+      it("keeps text from before and after steering in one completed reply", async () => {
+        step(230, { type: "text", text: "The tests pass." });
+        idle(240, "succeeded");
+
+        expect((await read(1))?.turns).toEqual([
+          {
+            role: "assistant",
+            text: "I found the cause.\n\nThe tests pass.",
+            timestamp: new Date(230).toISOString(),
+          },
+        ]);
+      });
+
+      it("preserves the original and steered prompts when reading two turns", async () => {
+        user(225, "and check the build");
+        step(230, { type: "text", text: "The checks pass." });
+        idle(240, "succeeded");
+
+        expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "previous reply"],
+          ["user", "inspect it\n\nalso run the tests\n\nand check the build"],
+          ["assistant", "I found the cause.\n\nThe checks pass."],
+        ]);
+        expect((await read(2))?.turns[1]?.timestamp).toBe(new Date(200).toISOString());
+      });
+
+      it.each([
+        ["reasoning", [{ type: "reasoning", text: "internal reasoning" }]],
+        ["tools", [{ type: "tool" }]],
+        ["empty content", []],
+      ])("keeps the latest reply when only %s follows steering", async (_name, content) => {
+        step(230, ...content);
+        idle(240, "succeeded");
+
+        expect((await read(1))?.turns).toEqual([
+          {
+            role: "assistant",
+            text: "I found the cause.",
+            timestamp: new Date(230).toISOString(),
+          },
+        ]);
+      });
+
+      it.each(["failed", "interrupted"])("excludes the whole %s turn without borrowing its prompts", async (outcome) => {
+        step(230, { type: "text", text: "unfinished checks" });
+        idle(240, outcome);
+        user(300, "next prompt");
+        step(310, { type: "text", text: "next reply" });
+        idle(320, "succeeded");
+
+        expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "previous reply"],
+          ["user", "next prompt"],
+          ["assistant", "next reply"],
+        ]);
+      });
+
+      it("does not count an unfinished steered turn as completed", async () => {
+        step(230, { type: "text", text: "still running" });
+
+        expect((await read(1))?.turns.map((t) => t.text)).toEqual([
+          "previous reply",
+        ]);
+      });
+    });
+
+    it("skips turns that failed, were interrupted, or are still running", async () => {
+      user(100, "first");
+      step(110, { type: "text", text: "first reply" });
+      idle(120, "succeeded");
+      user(200, "failed one");
+      step(210, { type: "text", text: "partial" });
+      idle(220, "failed");
+      user(300, "interrupted one");
+      step(310, { type: "text", text: "about to run" });
+      idle(320, "interrupted");
+      user(400, "still running");
+      step(410, { type: "text", text: "streaming" });
+
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["first reply"]);
+    });
+
+    it("pairs prompts with replies in the between-prompt shape (2N-1)", async () => {
+      user(100, "q1");
+      step(110, { type: "text", text: "a1" });
+      idle(120, "succeeded");
+      user(200, "q2");
+      step(210, { type: "text", text: "a2" });
+      idle(220, "succeeded");
+
+      const result = await read(2);
+      expect(result?.turns.map((t) => [t.role, t.text])).toEqual([
+        ["assistant", "a1"],
+        ["user", "q2"],
+        ["assistant", "a2"],
+      ]);
+    });
+
+    describe("a turn started by a background job instead of a prompt", () => {
+      // A background subagent or shell finishing posts a `synthetic` row that
+      // resumes the session, so its turn has no user row of its own.
+      const synthetic = (time: number) =>
+        row("synthetic", time, {
+          text: '<subagent sessionID="ses_child" state="completed">\nfound 3 files\n</subagent>',
+        });
+
+      beforeEach(() => {
+        user(100, "explore the repo in the background");
+        step(110, { type: "text", text: "I started a subagent." });
+        idle(120, "succeeded");
+        synthetic(200);
+        step(210, { type: "text", text: "The subagent found 3 files." });
+        idle(220, "succeeded");
+      });
+
+      it("returns that turn's reply as the newest one", async () => {
+        const result = await read(1);
+        expect(result?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "The subagent found 3 files."],
+        ]);
+      });
+
+      it("shows no prompt between the two replies, since nobody typed one", async () => {
+        const result = await read(2);
+        expect(result?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "I started a subagent."],
+          ["assistant", "The subagent found 3 files."],
+        ]);
+      });
+
+      it("keeps a steered prompt and earlier text within a synthetic-started turn", async () => {
+        synthetic(300);
+        step(310, { type: "text", text: "I checked the directories too." });
+        user(320, "also summarize the findings");
+        step(330, { type: "text", text: "The files all use the same pattern." });
+        idle(340, "succeeded");
+
+        expect((await read(1))?.turns.map((t) => t.text)).toEqual([
+          "I checked the directories too.\n\nThe files all use the same pattern.",
+        ]);
+        // This second synthetic turn shares its idle boundary only with
+        // its own steering input, not the preceding background-job reply.
+        expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "The subagent found 3 files."],
+          ["user", "also summarize the findings"],
+          ["assistant", "I checked the directories too.\n\nThe files all use the same pattern."],
+        ]);
+      });
+    });
+
+    it("does not borrow a textless completed turn's prompt for a newer synthetic reply", async () => {
+      user(100, "first prompt");
+      step(110, { type: "text", text: "first reply" });
+      idle(120, "succeeded");
+      user(200, "unrelated prompt");
+      step(210, { type: "reasoning", text: "internal" });
+      idle(220, "succeeded");
+      row("synthetic", 300, { text: "<subagent/>" });
+      step(310, { type: "text", text: "background reply" });
+      idle(320, "succeeded");
+
+      expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+        ["assistant", "first reply"],
+        ["assistant", "background reply"],
+      ]);
+    });
+
+    it("does not merge text across a malformed idle boundary", async () => {
+      user(100, "unknown outcome");
+      step(110, { type: "text", text: "unverified reply" });
+      row("idle", 120, null);
+      user(200, "latest prompt");
+      step(210, { type: "text", text: "latest reply" });
+      idle(220, "succeeded");
+
+      expect((await read(2))?.turns.map((t) => t.text)).toEqual([
+        "latest reply",
+      ]);
+    });
+
+    it("keeps the readable text when a step carries a malformed content item", async () => {
+      user(100, "q");
+      step(110, null, "stray", { type: "text", text: "still here" });
+      idle(120, "succeeded");
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["still here"]);
+    });
+
+    it("stops at the newest turn of a longer session and still closes cleanly", async () => {
+      for (let i = 0; i < 50; i++) {
+        user(i * 100, `q${i}`);
+        // Rows outside a turn's shape are never fetched.
+        row("shell", i * 100 + 10, { output: "x".repeat(1000) });
+        step(i * 100 + 20, { type: "text", text: `a${i}` });
+        idle(i * 100 + 30, "succeeded");
+      }
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["a49"]);
+      // The early stop left the database closed and readable again.
+      expect((await read(2))?.turns.map((t) => t.text)).toEqual([
+        "a48",
+        "q49",
+        "a49",
+      ]);
+    });
+
+    it("returns a reply from a session that never had a user row", async () => {
+      row("synthetic", 100, { text: "<subagent/>" });
+      step(110, { type: "text", text: "only reply" });
+      idle(120, "succeeded");
+      const result = await read(1);
+      expect(result?.turns.map((t) => t.text)).toEqual(["only reply"]);
+    });
+
+    it("leaves a 1.x session in the same database to the 1.x tables", async () => {
+      insertSession("ses_v1", "/tmp/proj", 50);
+      seedExchange("ses_v1", 50, "v1 prompt", "v1 reply");
+      const result = await readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", nativeSessionId: "ses_v1" },
+        1,
+      );
+      expect(result?.turns[0]?.text).toBe("v1 reply");
+    });
   });
 
   it("returns null when no session matches the cwd", async () => {
