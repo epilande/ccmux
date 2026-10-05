@@ -460,8 +460,9 @@ export class VersionResolver {
       // installation on daemon PATH. Keep wrappers' script arguments intact;
       // their PID executable is a runtime whose version is not the agent's.
       // The probe is built here rather than by buildVersionProbeCommand:
-      // a replaced binary's `/proc/<pid>/exe` does not match processMatch,
-      // and that builder would fall back to `versionCommand` on PATH.
+      // a procfs probe path (`/proc/<pid>/exe`, basename `exe`) never
+      // matches processMatch, and that builder would fall back to
+      // `versionCommand` on PATH.
       probe = [nativeExecutable.probePath, "--version"];
     } else {
       probe = buildVersionProbeCommand(processCommand, agent);
@@ -552,7 +553,8 @@ export class VersionResolver {
   }
 
   /** A probed executable's stat identity, or null for a bare name or a file
-   *  that cannot be stat'd (the key then falls back to the path alone). */
+   *  that cannot be stat'd. A command probe's cache key then falls back to
+   *  the path alone; a native probe refuses to run without one. */
   private async fileIdentity(
     path: string | undefined,
   ): Promise<FileIdentity | null> {
