@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  ci:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -33,3 +33,15 @@ jobs:
           bash --version
           fish --version
       - run: bun test
+
+  # Branch protection requires a check named `ci`, and a matrix job reports one
+  # check per leg (`test (ubuntu-latest)`, ...), never a bare `ci`. This gate
+  # keeps that name stable however the matrix changes. `always()` is
+  # load-bearing: without it a failed leg SKIPS this job, and protection counts
+  # a skipped required check as passing.
+  ci:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test.result }}" = "success"
