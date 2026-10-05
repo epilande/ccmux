@@ -9109,6 +9109,31 @@ describe("POST /spawn with --pr and --issue", () => {
 });
 
 /**
+ * The `gh api graphql` body the PR list's CI query reads, giving PR #151
+ * (node id `PR_151`) one rollup state, or no checks at all for null.
+ */
+function rollupBody(state: string | null): string {
+  return JSON.stringify({
+    data: {
+      nodes: [
+        {
+          id: "PR_151",
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  statusCheckRollup: state === null ? null : { state },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  });
+}
+
+/**
  * `GET /prs`, end to end against a real repo and the same PATH-stubbed `gh`
  * the spawn tests use — which is why that stub had to learn to tell `pr list`
  * from `pr view`.
@@ -9117,15 +9142,13 @@ describe("GET /prs", () => {
   let root: string;
 
   const LIST_ROW = {
+    id: "PR_151",
     number: 151,
     title: "Worktrees panel: open-PR list",
     url: "https://github.com/o/r/pull/151",
     author: { login: "epilande" },
     isDraft: false,
     reviewDecision: "APPROVED",
-    statusCheckRollup: [
-      { __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
-    ],
     headRefName: "feat/pr-list-panel",
     headRefOid: "sha-151",
   };
@@ -9141,14 +9164,18 @@ describe("GET /prs", () => {
     return repo;
   }
 
-  /** A `gh` on PATH that answers `pr list` from `body`. */
+  /**
+   * A `gh` on PATH that answers `pr list` from `body`, and the CI query that
+   * follows it with a passing rollup for {@link LIST_ROW}.
+   */
   function withStubbedGh(body: unknown, exitCode = 0) {
     const bin = join(root, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "prs.json"), JSON.stringify(body));
+    writeFileSync(join(bin, "ci.json"), rollupBody("SUCCESS"));
     writeFileSync(
       join(bin, "gh"),
-      `#!/bin/sh\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
+      `#!/bin/sh\nif [ "$1" = "api" ]; then cat '${join(bin, "ci.json")}'; exit 0; fi\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
       { mode: 0o755 },
     );
     const previous = process.env.PATH;
@@ -9279,13 +9306,13 @@ describe("GET /prs caching", () => {
   let root: string;
 
   const ROW = {
+    id: "PR_151",
     number: 151,
     title: "Worktrees panel: open-PR list",
     url: "https://github.com/o/r/pull/151",
     author: { login: "epilande" },
     isDraft: false,
     reviewDecision: null,
-    statusCheckRollup: [],
     headRefName: "feat/pr-list-panel",
     headRefOid: "sha-151",
   };
@@ -9302,16 +9329,19 @@ describe("GET /prs caching", () => {
   }
 
   /**
-   * A `gh` that COUNTS its invocations in a file and can be made slow, so a
-   * concurrent miss has a window to arrive in.
+   * A `gh` that COUNTS its `pr list` invocations in a file and can be made
+   * slow, so a concurrent miss has a window to arrive in. The CI query each
+   * successful list is followed by answers at once and is not counted: it is
+   * part of the one fetch the cache deduplicates, not a second one.
    */
   function withCountingGh(sleepSeconds = 0, exitCode = 0) {
     const bin = join(root, "bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "prs.json"), JSON.stringify([ROW]));
+    writeFileSync(join(bin, "ci.json"), rollupBody(null));
     writeFileSync(
       join(bin, "gh"),
-      `#!/bin/sh\necho x >> '${join(bin, "calls")}'\nsleep ${sleepSeconds}\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
+      `#!/bin/sh\nif [ "$1" = "api" ]; then cat '${join(bin, "ci.json")}'; exit 0; fi\necho x >> '${join(bin, "calls")}'\nsleep ${sleepSeconds}\ncat '${join(bin, "prs.json")}'\nexit ${exitCode}\n`,
       { mode: 0o755 },
     );
     writeFileSync(join(bin, "calls"), "");
