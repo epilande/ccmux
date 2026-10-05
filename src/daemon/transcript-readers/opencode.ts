@@ -313,10 +313,11 @@ function contentParts(content: unknown): ParsedPart[] {
  * `outcome` is `succeeded` once it completes. A turn can also start with no
  * user row at all, from a `synthetic` row (a background subagent or shell
  * finishing), so a reply is emitted at the turn's boundary, not only at a
- * prompt. A turn that failed, was interrupted (a declined permission ends it
- * with no `idle` row at all), or is still running yields no assistant reply,
- * the analogue of 1.x's missing `step-finish`. Verified against rows written
- * by OpenCode 2.0.21.
+ * prompt. Steering adds user rows within that same turn, so those rows must
+ * not end collection. Failed/interrupted idle outcomes and a still-running
+ * turn without an idle row yield no assistant reply. Shutdown/resume has no
+ * intervening idle row because it continues the same turn. See OpenCode
+ * 2.0.21's `Session.Message.Idle` contract.
  */
 function* openCode2Candidates(
   db: Database,
@@ -337,21 +338,44 @@ function* openCode2Candidates(
   let completed = false;
   let replyTime = 0;
   let reply: ParsedPart[][] = [];
+  let promptTime = 0;
+  let prompts: ParsedPart[] = [];
 
-  /** The completed reply gathered since the newer boundary, if any. */
-  const pendingReply = (): TurnCandidate | null =>
-    completed && reply.length > 0
-      ? {
-          role: "assistant",
-          // Newest step first; reversed so the text reads in order.
-          ...collectText(reply.reverse().flat()),
-          time: replyTime,
-        }
-      : null;
+  /** One idle-bounded turn, with all of its user prompts kept together. */
+  function* pendingTurn(): Generator<TurnCandidate> {
+    if (!completed || reply.length === 0) return;
+    const turn: TurnCandidate = {
+      role: "assistant",
+      // Newest step first; reversed so the text reads in order.
+      ...collectText(reply.reverse().flat()),
+      time: replyTime,
+    };
+    yield turn;
+    // An empty reply is skipped by the fold. Its prompts must not drift
+    // onto another accepted reply that had no prompt of its own.
+    if (turn.text && prompts.length > 0) {
+      yield {
+        role: "user",
+        ...collectText(prompts.reverse()),
+        time: promptTime,
+      };
+    }
+  }
 
   for (const row of rows) {
-    // An unfinished turn's steps are never shown, so skip parsing them.
-    if (row.type === "assistant" && !completed) continue;
+    if (row.type === "idle") {
+      yield* pendingTurn();
+      // Even a malformed idle row is a boundary: never merge the older
+      // execution into the completed one we just emitted.
+      completed = false;
+      reply = [];
+      replyTime = 0;
+      prompts = [];
+      promptTime = 0;
+    } else if (!completed) {
+      // Failed/interrupted/unfinished turns cannot contribute text or prompts.
+      continue;
+    }
     let data: { text?: unknown; content?: unknown; outcome?: unknown };
     try {
       data = JSON.parse(row.data);
@@ -361,33 +385,18 @@ function* openCode2Candidates(
     if (!data || typeof data !== "object") continue;
 
     if (row.type === "idle") {
-      // The previous turn's end is this turn's start: a reply gathered with
-      // no user row in between belongs to a synthetic-started turn.
-      const turn = pendingReply();
-      if (turn) yield turn;
       completed = data.outcome === "succeeded";
-      reply = [];
-      replyTime = 0;
     } else if (row.type === "assistant") {
       reply.push(contentParts(data.content));
       replyTime = Math.max(replyTime, row.time_created);
     } else if (row.type === "user") {
-      const turn = pendingReply();
-      if (turn) yield turn;
-      completed = false;
-      reply = [];
-      replyTime = 0;
       const text = typeof data.text === "string" ? data.text : "";
-      yield {
-        role: "user",
-        ...collectText([{ type: "text", text }]),
-        time: row.time_created,
-      };
+      prompts.push({ type: "text", text });
+      // The earliest prompt timestamps the combined user entry.
+      promptTime = row.time_created;
     }
   }
-  // The oldest turn, when no user row precedes it.
-  const turn = pendingReply();
-  if (turn) yield turn;
+  yield* pendingTurn();
 }
 
 /**

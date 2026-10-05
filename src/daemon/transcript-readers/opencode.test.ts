@@ -485,14 +485,90 @@ describe("opencode reader", () => {
 
     it("joins a turn's text across its steps, skipping reasoning and tools", async () => {
       user(100, "run it");
-      step(110, { type: "reasoning", text: "thinking" }, { type: "tool" });
+      step(110, { type: "text", text: "I'll run it." }, { type: "reasoning", text: "thinking" }, { type: "tool" });
       step(120, { type: "reasoning", text: "done" }, { type: "text", text: "It printed ok." });
       idle(130, "succeeded");
 
       const result = await read(1);
       expect(result?.turns).toEqual([
-        { role: "assistant", text: "It printed ok.", timestamp: new Date(120).toISOString() },
+        { role: "assistant", text: "I'll run it.\n\nIt printed ok.", timestamp: new Date(120).toISOString() },
       ]);
+    });
+
+    describe("a prompt steered into a running turn", () => {
+      beforeEach(() => {
+        user(100, "previous prompt");
+        step(110, { type: "text", text: "previous reply" });
+        idle(120, "succeeded");
+        user(200, "inspect it");
+        step(210, { type: "text", text: "I found the cause." }, { type: "tool" });
+        user(220, "also run the tests");
+      });
+
+      it("keeps text from before and after steering in one completed reply", async () => {
+        step(230, { type: "text", text: "The tests pass." });
+        idle(240, "succeeded");
+
+        expect((await read(1))?.turns).toEqual([
+          {
+            role: "assistant",
+            text: "I found the cause.\n\nThe tests pass.",
+            timestamp: new Date(230).toISOString(),
+          },
+        ]);
+      });
+
+      it("preserves the original and steered prompts when reading two turns", async () => {
+        user(225, "and check the build");
+        step(230, { type: "text", text: "The checks pass." });
+        idle(240, "succeeded");
+
+        expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "previous reply"],
+          ["user", "inspect it\n\nalso run the tests\n\nand check the build"],
+          ["assistant", "I found the cause.\n\nThe checks pass."],
+        ]);
+        expect((await read(2))?.turns[1]?.timestamp).toBe(new Date(200).toISOString());
+      });
+
+      it.each([
+        ["reasoning", [{ type: "reasoning", text: "internal reasoning" }]],
+        ["tools", [{ type: "tool" }]],
+        ["empty content", []],
+      ])("keeps the latest reply when only %s follows steering", async (_name, content) => {
+        step(230, ...content);
+        idle(240, "succeeded");
+
+        expect((await read(1))?.turns).toEqual([
+          {
+            role: "assistant",
+            text: "I found the cause.",
+            timestamp: new Date(230).toISOString(),
+          },
+        ]);
+      });
+
+      it.each(["failed", "interrupted"])("excludes the whole %s turn without borrowing its prompts", async (outcome) => {
+        step(230, { type: "text", text: "unfinished checks" });
+        idle(240, outcome);
+        user(300, "next prompt");
+        step(310, { type: "text", text: "next reply" });
+        idle(320, "succeeded");
+
+        expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "previous reply"],
+          ["user", "next prompt"],
+          ["assistant", "next reply"],
+        ]);
+      });
+
+      it("does not count an unfinished steered turn as completed", async () => {
+        step(230, { type: "text", text: "still running" });
+
+        expect((await read(1))?.turns.map((t) => t.text)).toEqual([
+          "previous reply",
+        ]);
+      });
     });
 
     it("skips turns that failed, were interrupted, or are still running", async () => {
@@ -502,9 +578,9 @@ describe("opencode reader", () => {
       user(200, "failed one");
       step(210, { type: "text", text: "partial" });
       idle(220, "failed");
-      // A declined permission ends the turn with no idle row at all.
-      user(300, "declined one");
+      user(300, "interrupted one");
       step(310, { type: "text", text: "about to run" });
+      idle(320, "interrupted");
       user(400, "still running");
       step(410, { type: "text", text: "streaming" });
 
@@ -559,6 +635,55 @@ describe("opencode reader", () => {
           ["assistant", "The subagent found 3 files."],
         ]);
       });
+
+      it("keeps a steered prompt and earlier text within a synthetic-started turn", async () => {
+        synthetic(300);
+        step(310, { type: "text", text: "I checked the directories too." });
+        user(320, "also summarize the findings");
+        step(330, { type: "text", text: "The files all use the same pattern." });
+        idle(340, "succeeded");
+
+        expect((await read(1))?.turns.map((t) => t.text)).toEqual([
+          "I checked the directories too.\n\nThe files all use the same pattern.",
+        ]);
+        // This second synthetic turn shares its idle boundary only with
+        // its own steering input, not the preceding background-job reply.
+        expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+          ["assistant", "The subagent found 3 files."],
+          ["user", "also summarize the findings"],
+          ["assistant", "I checked the directories too.\n\nThe files all use the same pattern."],
+        ]);
+      });
+    });
+
+    it("does not borrow a textless completed turn's prompt for a newer synthetic reply", async () => {
+      user(100, "first prompt");
+      step(110, { type: "text", text: "first reply" });
+      idle(120, "succeeded");
+      user(200, "unrelated prompt");
+      step(210, { type: "reasoning", text: "internal" });
+      idle(220, "succeeded");
+      row("synthetic", 300, { text: "<subagent/>" });
+      step(310, { type: "text", text: "background reply" });
+      idle(320, "succeeded");
+
+      expect((await read(2))?.turns.map((t) => [t.role, t.text])).toEqual([
+        ["assistant", "first reply"],
+        ["assistant", "background reply"],
+      ]);
+    });
+
+    it("does not merge text across a malformed idle boundary", async () => {
+      user(100, "unknown outcome");
+      step(110, { type: "text", text: "unverified reply" });
+      row("idle", 120, null);
+      user(200, "latest prompt");
+      step(210, { type: "text", text: "latest reply" });
+      idle(220, "succeeded");
+
+      expect((await read(2))?.turns.map((t) => t.text)).toEqual([
+        "latest reply",
+      ]);
     });
 
     it("keeps the readable text when a step carries a malformed content item", async () => {
