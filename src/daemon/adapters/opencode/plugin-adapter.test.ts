@@ -221,10 +221,11 @@ describe("OpenCodePluginAdapter", () => {
       });
 
       it("installs the TUI plugin and no server plugin", async () => {
-        const { changed } = await adapter.install();
+        const { lines, changed } = await adapter.install();
         expect(changed).toBe(true);
         expect(existsSync(opencodeTuiPluginFile)).toBe(true);
         expect(existsSync(opencodePluginFile)).toBe(false);
+        expect(lines.some((l) => l.startsWith("Restart"))).toBe(true);
       });
 
       it("removes a plugin ccmux installed under 1.x, which 2.x rejects", async () => {
@@ -237,6 +238,9 @@ describe("OpenCodePluginAdapter", () => {
         expect(changed).toBe(true);
         expect(existsSync(opencodePluginFile)).toBe(false);
         expect(lines.some((l) => l.startsWith("Removed"))).toBe(true);
+        // The TUI plugin was already current, and 2.x never loaded the
+        // removed one, so nothing needs a restart.
+        expect(lines.some((l) => l.startsWith("Restart"))).toBe(false);
       });
 
       it("leaves a same-named file ccmux did not write", async () => {
@@ -357,7 +361,22 @@ describe("OpenCodePluginAdapter", () => {
       expect(await adapter.describeInstallAnomalies()).toEqual([]);
     });
 
+    it("flags a TUI-only install once OpenCode 1 is on PATH", async () => {
+      openCodeVersion = "2.0.21";
+      await adapter.install();
+      openCodeVersion = "1.18.34";
+      const warnings = await adapter.describeInstallAnomalies();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("OpenCode 1.18.34 loads");
+      expect(warnings[0]).toContain("ccmux setup --agent opencode");
+
+      // An unreadable version is not evidence of 1.x.
+      openCodeVersion = null;
+      expect(await adapter.describeInstallAnomalies()).toEqual([]);
+    });
+
     it("reports a stale TUI plugin", async () => {
+      openCodeVersion = "2.0.21";
       mkdirSync(opencodeTuiPluginDir, { recursive: true });
       writeFileSync(opencodeTuiPluginFile, "// ccmux-plugin v0.0.0-stale\n");
       const warnings = await adapter.describeInstallAnomalies();

@@ -227,16 +227,16 @@ export class OpenCodePluginAdapter implements HookAdapter {
   }
 
   async install(): Promise<HookAdapterOutcome> {
-    const outcomes = [installPluginFile(tuiPlugin())];
+    const tui = installPluginFile(tuiPlugin());
     const v2Version = await this.detectOpenCode2();
-    outcomes.push(
-      v2Version
-        ? retireServerPlugin(v2Version)
-        : installPluginFile(serverPlugin()),
-    );
-    const lines = outcomes.flatMap((o) => o.lines);
-    const changed = outcomes.some((o) => o.changed);
-    if (changed) {
+    const server = v2Version
+      ? retireServerPlugin(v2Version)
+      : installPluginFile(serverPlugin());
+    const lines = [...tui.lines, ...server.lines];
+    const changed = tui.changed || server.changed;
+    // Only a written plugin needs a restart. A retired one needs none:
+    // OpenCode 2 already refused it at startup.
+    if (tui.changed || (!v2Version && server.changed)) {
       lines.push(
         "Restart any running OpenCode sessions to pick up the plugin.",
       );
@@ -288,6 +288,19 @@ export class OpenCodePluginAdapter implements HookAdapter {
         warnings.push(
           `OpenCode: plugin at ${OPENCODE_PLUGIN_FILE} is installed, but OpenCode ${v2Version} rejects it at startup. ` +
             "Run `ccmux setup --agent opencode` to replace it.",
+        );
+      }
+    } else if (!server.exists) {
+      // The other direction: setup ran while 2.x was on PATH, so only the
+      // TUI plugin is installed, which OpenCode 1 never loads.
+      const tui = inspectInstalledPlugin(OPENCODE_TUI_PLUGIN_FILE);
+      const version = tui.owned
+        ? await this.readOpenCodeVersion().catch(() => null)
+        : null;
+      if (parseMajorVersion(version) === 1) {
+        warnings.push(
+          `OpenCode: only the OpenCode 2 plugin is installed, but OpenCode ${version} loads ${OPENCODE_PLUGIN_FILE}. ` +
+            "Run `ccmux setup --agent opencode` to install it.",
         );
       }
     }
