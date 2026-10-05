@@ -732,6 +732,16 @@ describe("parseMajorVersion", () => {
     expect(parseMajorVersion("")).toBeNull();
     expect(parseMajorVersion("opencode v2.0.21")).toBeNull();
   });
+
+  it("is null for a 0.0.0 placeholder, whichever major's preview it labels", () => {
+    expect(parseMajorVersion("0.0.0")).toBeNull();
+    expect(parseMajorVersion("0.0.0-beta-19507")).toBeNull(); // @opencode/cli (2.x)
+    expect(parseMajorVersion("v0.0.0-dev-20547")).toBeNull();
+    expect(parseMajorVersion("0.0.0-dev-202610030456")).toBeNull(); // opencode-ai (1.x)
+    // Only the placeholder: real 0.x releases and longer patch numbers parse.
+    expect(parseMajorVersion("0.5.0")).toBe(0);
+    expect(parseMajorVersion("0.0.01")).toBe(0);
+  });
 });
 
 describe("sessionNotificationActions", () => {
@@ -757,6 +767,21 @@ describe("sessionNotificationActions", () => {
     const actions = sessionNotificationActions(opencode, null);
     expect(actions?.approve).toBeUndefined();
     expect(actions?.deny).toBeUndefined();
+  });
+
+  it("fails closed on a 0.0.0 preview build, which may be 2.x code", () => {
+    // What `opencode --version` prints on `@opencode/cli@beta`, a 2.x build.
+    const v2Preview = sessionNotificationActions(opencode, "0.0.0-beta-19507");
+    expect(v2Preview?.approve).toBeUndefined();
+    expect(v2Preview?.deny).toBeUndefined();
+    // A 1.x preview loses its buttons too, on purpose: the version string
+    // cannot tell it apart from a 2.x one.
+    const v1Preview = sessionNotificationActions(
+      opencode,
+      "0.0.0-dev-202610030456",
+    );
+    expect(v1Preview?.approve).toBeUndefined();
+    expect(v1Preview?.deny).toBeUndefined();
   });
 
   it("does not mutate the agent's own map", () => {

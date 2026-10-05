@@ -1853,11 +1853,19 @@ export function findAgentForProcess(
 /**
  * The major version in a resolved agent version string (`Session.version`,
  * already stripped of any `v`), or null when it is absent or unparseable.
+ *
+ * `0.0.0` is null too. It is a placeholder, not a release: OpenCode stamps
+ * every preview build `0.0.0-<channel>-<build>` in both its 1.x package
+ * (`0.0.0-dev-202610030456`) and its 2.x one (`0.0.0-beta-19507`), so it
+ * says nothing about which major's code is running, and reading it as 0
+ * would pass a 2.x preview through a 1.x approval gate.
  */
 export function parseMajorVersion(
   version: string | null | undefined,
 ): number | null {
-  const match = version?.trim().match(/^v?(\d+)(?:\.|$)/i);
+  const trimmed = version?.trim();
+  if (!trimmed || /^v?0\.0\.0(?:$|[-+])/i.test(trimmed)) return null;
+  const match = trimmed.match(/^v?(\d+)(?:\.|$)/i);
   return match ? Number(match[1]) : null;
 }
 
