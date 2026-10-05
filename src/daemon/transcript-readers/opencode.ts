@@ -437,11 +437,17 @@ export async function readOpenCodeTranscript(
       // A TUI can release its marker to show a session another pane owns,
       // while the daemon still holds its previous native ID. Check the
       // file itself: the scan cache can still contain the released marker.
+      // The id comes from a marker or the database, so one carrying a path
+      // separator is refused rather than read from outside the markers dir.
       const file = `opencode-${sessionId}.json`;
       if (!session.pid || basename(file) !== file) return null;
       const marker = parseMarkerFile(
         readFileSync(join(markersDir, file), "utf-8"),
       );
+      // An exact pid, unlike the adapter's pane-by-ancestry lookup, because
+      // the two cannot differ: OpenCode is matched only by its executable
+      // name, and the process scan keeps the deepest match on a tty, which
+      // is the TUI process that writes the marker.
       if (
         marker?.agent_type !== "opencode" ||
         marker.session_id !== sessionId ||

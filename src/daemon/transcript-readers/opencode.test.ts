@@ -333,11 +333,16 @@ describe("opencode reader", () => {
       ).run();
     });
 
-    function row(type: string, time: number, data: unknown) {
+    function row(
+      type: string,
+      time: number,
+      data: unknown,
+      sessionId = "ses_v2",
+    ) {
       seq++;
       db.query(
-        "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, 'ses_v2', ?, ?, ?, ?, ?)",
-      ).run(`msg_${seq}`, type, seq, time, time, JSON.stringify(data));
+        "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).run(`msg_${seq}`, sessionId, type, seq, time, time, JSON.stringify(data));
     }
     const user = (time: number, text: string) => row("user", time, { text });
     const step = (time: number, ...content: unknown[]) =>
@@ -359,28 +364,13 @@ describe("opencode reader", () => {
       db.query(
         "INSERT INTO session_v2 VALUES ('ses_other', '/tmp/proj', 200)",
       ).run();
-      db.query(
-        "INSERT INTO session_message VALUES (?, 'ses_other', ?, ?, ?, ?, ?)",
-      ).run(
-        "other-assistant",
+      row(
         "assistant",
-        1,
         210,
-        210,
-        JSON.stringify({
-          content: [{ type: "text", text: "second pane reply" }],
-        }),
+        { content: [{ type: "text", text: "second pane reply" }] },
+        "ses_other",
       );
-      db.query(
-        "INSERT INTO session_message VALUES (?, 'ses_other', ?, ?, ?, ?, ?)",
-      ).run(
-        "other-idle",
-        "idle",
-        2,
-        220,
-        220,
-        JSON.stringify({ outcome: "succeeded" }),
-      );
+      row("idle", 220, { outcome: "succeeded" }, "ses_other");
       const otherPid = pid + 1;
       marker("ses_other", otherPid);
       const otherSession = {
@@ -456,6 +446,29 @@ describe("opencode reader", () => {
         expect(await read(1)).toBeNull();
       },
     );
+
+    it("refuses a session id that would reach outside the markers dir", async () => {
+      // A marker that would pass every other check, sitting where the id's
+      // path segments lead.
+      const id = "x/../../escaped";
+      db.query(
+        "INSERT INTO session_v2 (id, directory, time_updated) VALUES (?, '/tmp/proj', 1)",
+      ).run(id);
+      row("assistant", 110, { content: [{ type: "text", text: "reply" }] }, id);
+      row("idle", 120, { outcome: "succeeded" }, id);
+      writeFileSync(
+        join(markersDir, `opencode-${id}.json`),
+        JSON.stringify({ agent_type: "opencode", session_id: id, pid }),
+      );
+      expect(
+        await readOpenCodeTranscript(
+          dbPath,
+          { cwd: "/tmp/proj", nativeSessionId: id, pid },
+          1,
+          markersDir,
+        ),
+      ).toBeNull();
+    });
 
     it("requires a known process for a v2 transcript", async () => {
       step(110, { type: "text", text: "old reply" });
