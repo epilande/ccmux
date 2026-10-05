@@ -11,7 +11,8 @@
 // into the TUI process itself, which IS the pane's process, so its pid works
 // with the same pid -> pane lookup as the 1.x server plugin, and it knows
 // which session the pane is showing. OpenCode 1 ignores this location (it
-// only loads loose `plugin/*.js` files), so it is safe to install on both.
+// only globs loose `{plugin,plugins}/*.{js,ts}` files, never a subdirectory),
+// so it is safe to install on both.
 //
 // Markers keep the 1.x schema and file name (`opencode-<sessionID>.json`,
 // `pid` = this process), so the daemon's adapter, aggregation, link healing
@@ -23,7 +24,6 @@
 // keeps the daemon's terminal-pattern status for the same session.
 
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -100,6 +100,11 @@ export function makeTuiPlugin({
     /** Sessions deleted while this TUI ran: a route still naming one (before
      *  OpenCode navigates away) must not bring its marker back. */
     const deleted = new Set();
+    /** Set by cleanup: a seed or event refresh still pending must not
+     *  write a marker that nothing would remove. */
+    let disposed = false;
+    /** A refresh is failing; only the first of a run of failures logs. */
+    let failing = false;
 
     function release() {
       if (!owned) return;
@@ -141,11 +146,12 @@ export function makeTuiPlugin({
 
     function write(sessionId, fields) {
       const body = JSON.stringify(fields);
-      // Unchanged state needs no write, unless the file went missing.
+      // Unchanged state needs no write, unless the file went missing or
+      // names another TUI (one that won a simultaneous claim).
       if (
         owned === sessionId &&
         body === written &&
-        existsSync(markerPath(sessionId))
+        readMarker(sessionId)?.pid === pid
       ) {
         return;
       }
@@ -177,6 +183,7 @@ export function makeTuiPlugin({
     }
 
     function refresh() {
+      if (disposed) return;
       try {
         const root = currentRoot();
         if (root !== observed) {
@@ -184,10 +191,15 @@ export function makeTuiPlugin({
           observed = root;
           if (root) seed(root);
         }
-        if (!observed) return;
-        write(observed, describeSession(ctx, observed, lastPrompt));
+        if (observed) {
+          write(observed, describeSession(ctx, observed, lastPrompt));
+        }
+        failing = false;
       } catch (err) {
-        console.error("[ccmux-plugin] refresh failed", err);
+        // Polled twice a second: a lasting failure (an unwritable markers
+        // dir) logs once, not on every tick, until a refresh succeeds.
+        if (!failing) console.error("[ccmux-plugin] refresh failed", err);
+        failing = true;
       }
     }
 
@@ -203,6 +215,7 @@ export function makeTuiPlugin({
       }
       if (type === "session.deleted" && data.sessionID) {
         deleted.add(data.sessionID);
+        lastPrompt.delete(data.sessionID);
         if (data.sessionID === owned) {
           release();
           observed = null;
@@ -221,7 +234,10 @@ export function makeTuiPlugin({
     process.once("exit", release);
     refresh();
 
+    // OpenCode can dispose the plugin while the TUI keeps running.
     return () => {
+      if (disposed) return;
+      disposed = true;
       if (timer) clearInterval(timer);
       offListen();
       process.removeListener("exit", release);

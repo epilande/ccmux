@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -16,6 +16,12 @@ const OTHER_PID = 5151;
  */
 function makeCtx() {
   const listeners: Array<(e: { details: { type: string; data?: unknown } }) => void> = [];
+  // Seed syncs resolve at once unless a test holds them.
+  let holdSyncs = false;
+  const heldSyncs: Array<() => void> = [];
+  const sync = async () => {
+    if (holdSyncs) await new Promise<void>((resolve) => heldSyncs.push(resolve));
+  };
   const fake = {
     route: { type: "home" } as OpencodeRoute,
     status: new Map<string, "idle" | "running">(),
@@ -28,6 +34,13 @@ function makeCtx() {
     synced: [] as string[],
     emit(type: string, data: unknown = {}) {
       for (const listener of listeners) listener({ details: { type, data } });
+    },
+    /** Keep seed syncs pending until `releaseSyncs()`. */
+    holdSyncs() {
+      holdSyncs = true;
+    },
+    releaseSyncs() {
+      for (const resolve of heldSyncs.splice(0)) resolve();
     },
   };
   const ctx: OpencodeTuiContext = {
@@ -47,12 +60,14 @@ function makeCtx() {
           list: (id) => fake.permissions.get(id),
           sync: async (id) => {
             fake.synced.push(`permission:${id}`);
+            await sync();
           },
         },
         form: {
           list: (id) => fake.forms.get(id),
           sync: async (id) => {
             fake.synced.push(`form:${id}`);
+            await sync();
           },
         },
       },
@@ -345,6 +360,51 @@ describe("OpenCode 2 TUI plugin", () => {
     expect(marker("ses_a")).toBeNull();
   });
 
+  // OpenCode can dispose the plugin while the TUI keeps running, and the
+  // exit hook goes with it: a marker written after cleanup would stay
+  // until the process dies, keeping every other pane from claiming it.
+  it("writes nothing after cleanup when a seed resolves late", async () => {
+    const { fake, cleanup } = start();
+    fake.holdSyncs();
+    fake.route = { type: "session", sessionID: "ses_a" };
+    fake.emit("session.renamed", { sessionID: "ses_a" });
+    await settle();
+    expect(marker("ses_a")).not.toBeNull();
+
+    cleanup();
+    fake.releaseSyncs();
+    await settle();
+    expect(marker("ses_a")).toBeNull();
+  });
+
+  it("writes nothing after cleanup when an event refresh is still queued", async () => {
+    const { fake, cleanup } = start();
+    fake.route = { type: "session", sessionID: "ses_a" };
+    fake.emit("session.renamed", { sessionID: "ses_a" });
+    await settle();
+
+    fake.status.set("ses_a", "running");
+    fake.emit("session.execution.started", { sessionID: "ses_a" });
+    cleanup();
+    await settle();
+    expect(marker("ses_a")).toBeNull();
+  });
+
+  it("logs a failure that lasts across polls once", async () => {
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { fake } = start({ pollMs: 5 });
+      fake.route = { type: "session", sessionID: "ses_a" };
+      // A file where the markers dir should be: every write fails.
+      rmSync(markersDir, { recursive: true, force: true });
+      writeFileSync(markersDir, "");
+      await new Promise((r) => setTimeout(r, 40));
+      expect(error).toHaveBeenCalledTimes(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   describe("two panes showing the same session", () => {
     it("leaves a live TUI's marker alone", async () => {
       writeForeignMarker("ses_a", OTHER_PID);
@@ -403,6 +463,24 @@ describe("OpenCode 2 TUI plugin", () => {
       expect(marker("ses_a")?.pid).toBe(OTHER_PID);
       cleanup();
       expect(marker("ses_a")?.pid).toBe(OTHER_PID);
+    });
+
+    it("notices a lost simultaneous claim while its state holds steady", async () => {
+      const { fake } = start();
+      fake.route = { type: "session", sessionID: "ses_a" };
+      fake.emit("session.renamed", { sessionID: "ses_a" });
+      await settle();
+      // The other TUI's write landed last.
+      writeForeignMarker("ses_a", OTHER_PID);
+      fake.emit("session.renamed", { sessionID: "ses_a" });
+      await settle();
+      expect(marker("ses_a")?.pid).toBe(OTHER_PID);
+
+      // Without a state change, it still takes over once the winner exits.
+      alive.delete(OTHER_PID);
+      fake.emit("session.renamed", { sessionID: "ses_a" });
+      await settle();
+      expect(marker("ses_a")?.pid).toBe(PID);
     });
   });
 });
