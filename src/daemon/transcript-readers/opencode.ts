@@ -25,7 +25,9 @@
  *
  * Session mapping: one ccmux row can aggregate N server-side OpenCode
  * sessions (`ambiguousWait`). `session.nativeSessionId`, when present, picks
- * the exact one. When absent, this reader falls back to the `session` row
+ * the exact one. A 2.x session also requires its on-disk TUI marker to name
+ * the pane's current PID; a released or foreign marker returns no transcript.
+ * When the native id is absent, this reader falls back to the `session` row
  * (which carries `directory`, OpenCode's own cwd) whose most recent
  * ASSISTANT message is newest among every session sharing the ccmux row's
  * cwd — a heuristic, not a guarantee, and a known soft spot: an aggregated
@@ -35,11 +37,15 @@
  */
 
 import { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { parseMajorVersion } from "../../lib/agents";
-import { OPENCODE_DB_FILE } from "../../lib/config";
+import { MARKERS_DIR, OPENCODE_DB_FILE } from "../../lib/config";
+import { parseMarkerFile } from "../session-markers";
 import type {
   TranscriptReader,
   TranscriptResult,
+  TranscriptSession,
   TranscriptTurn,
 } from "../transcript-read";
 import { MAX_LINE_BYTES, capText } from "../transcript-read";
@@ -404,13 +410,13 @@ function isOpenCode2Session(db: Database, sessionId: string): boolean {
 }
 
 /**
- * Core implementation, taking the db path explicitly so tests can point it at
- * a fixture database instead of the real `OPENCODE_DB_FILE`.
+ * Core implementation with explicit database and marker paths for fixtures.
  */
 export async function readOpenCodeTranscript(
   dbPath: string,
-  session: { nativeSessionId?: string; cwd: string; version?: string | null },
+  session: Pick<TranscriptSession, "nativeSessionId" | "cwd" | "version" | "pid">,
   turns: number,
+  markersDir: string = MARKERS_DIR,
 ): Promise<TranscriptResult | null> {
   let db: Database;
   try {
@@ -426,14 +432,32 @@ export async function readOpenCodeTranscript(
       session.version,
     );
     if (!sessionId) return null;
+    const isV2 = isOpenCode2Session(db, sessionId);
+    if (isV2) {
+      // A TUI can release its marker to show a session another pane owns,
+      // while the daemon still holds its previous native ID. Check the
+      // file itself: the scan cache can still contain the released marker.
+      const file = `opencode-${sessionId}.json`;
+      if (!session.pid || basename(file) !== file) return null;
+      const marker = parseMarkerFile(
+        readFileSync(join(markersDir, file), "utf-8"),
+      );
+      if (
+        marker?.agent_type !== "opencode" ||
+        marker.session_id !== sessionId ||
+        marker.pid !== session.pid
+      ) {
+        return null;
+      }
+    }
     return foldTurns(
-      isOpenCode2Session(db, sessionId)
+      isV2
         ? openCode2Candidates(db, sessionId)
         : openCodeCandidates(db, sessionId),
       turns,
     );
   } catch {
-    return null; // a query against a live WAL writer failed
+    return null; // marker unavailable, or a query against a live WAL writer failed
   } finally {
     db.close();
   }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { readOpenCodeTranscript } from "./opencode";
@@ -302,8 +302,24 @@ describe("opencode reader", () => {
     // OpenCode 2's own tables, as 2.0.21 writes them: one `session_message`
     // row per user prompt, assistant step and turn-ending `idle`.
     let seq = 0;
+    let markersDir: string;
+    const pid = 12345;
+    function marker(sessionId: string, ownerPid: number) {
+      writeFileSync(
+        join(markersDir, `opencode-${sessionId}.json`),
+        JSON.stringify({
+          agent_type: "opencode",
+          session_id: sessionId,
+          pid: ownerPid,
+          timestamp: 1,
+        }),
+      );
+    }
     beforeEach(() => {
       seq = 0;
+      markersDir = join(dir, "markers");
+      mkdirSync(markersDir);
+      marker("ses_v2", pid);
       db.exec(`
         CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, time_updated INTEGER NOT NULL);
         CREATE TABLE session_message (
@@ -329,7 +345,130 @@ describe("opencode reader", () => {
     const idle = (time: number, outcome: string) =>
       row("idle", time, { outcome });
     const read = (turns: number) =>
-      readOpenCodeTranscript(dbPath, { cwd: "/tmp/proj", nativeSessionId: "ses_v2" }, turns);
+      readOpenCodeTranscript(
+        dbPath,
+        { cwd: "/tmp/proj", nativeSessionId: "ses_v2", pid },
+        turns,
+        markersDir,
+      );
+
+    it("refuses the old conversation after switching to another pane's owned session, then reads after takeover", async () => {
+      user(100, "first pane prompt");
+      step(110, { type: "text", text: "first pane reply" });
+      idle(120, "succeeded");
+      db.query(
+        "INSERT INTO session_v2 VALUES ('ses_other', '/tmp/proj', 200)",
+      ).run();
+      db.query(
+        "INSERT INTO session_message VALUES (?, 'ses_other', ?, ?, ?, ?, ?)",
+      ).run(
+        "other-assistant",
+        "assistant",
+        1,
+        210,
+        210,
+        JSON.stringify({
+          content: [{ type: "text", text: "second pane reply" }],
+        }),
+      );
+      db.query(
+        "INSERT INTO session_message VALUES (?, 'ses_other', ?, ?, ?, ?, ?)",
+      ).run(
+        "other-idle",
+        "idle",
+        2,
+        220,
+        220,
+        JSON.stringify({ outcome: "succeeded" }),
+      );
+      const otherPid = pid + 1;
+      marker("ses_other", otherPid);
+      const otherSession = {
+        cwd: "/tmp/proj",
+        nativeSessionId: "ses_other",
+        pid: otherPid,
+      };
+      expect((await read(1))?.turns[0]?.text).toBe("first pane reply");
+
+      // The TUI releases its old marker but cannot claim the destination's.
+      // The daemon may still carry the old native ID (and a stale cache).
+      unlinkSync(join(markersDir, "opencode-ses_v2.json"));
+      expect(await read(1)).toBeNull();
+      expect(
+        (await readOpenCodeTranscript(dbPath, otherSession, 1, markersDir))
+          ?.turns[0]?.text,
+      ).toBe("second pane reply");
+      expect(
+        await readOpenCodeTranscript(
+          dbPath,
+          { ...otherSession, pid },
+          1,
+          markersDir,
+        ),
+      ).toBeNull();
+
+      // Once the other pane releases ownership, this pane's new marker and
+      // native ID allow the correct transcript again.
+      marker("ses_other", pid);
+      expect(
+        (
+          await readOpenCodeTranscript(
+            dbPath,
+            { ...otherSession, pid },
+            1,
+            markersDir,
+          )
+        )?.turns[0]?.text,
+      ).toBe("second pane reply");
+      expect(
+        await readOpenCodeTranscript(dbPath, otherSession, 1, markersDir),
+      ).toBeNull();
+    });
+
+    it.each([
+      ["malformed", "{"],
+      [
+        "wrong agent",
+        JSON.stringify({ agent_type: "codex", session_id: "ses_v2", pid }),
+      ],
+      [
+        "wrong session",
+        JSON.stringify({
+          agent_type: "opencode",
+          session_id: "ses_other",
+          pid,
+        }),
+      ],
+      [
+        "wrong process",
+        JSON.stringify({
+          agent_type: "opencode",
+          session_id: "ses_v2",
+          pid: pid + 1,
+        }),
+      ],
+    ])(
+      "refuses a %s marker even before the version is resolved",
+      async (_name, content) => {
+        step(110, { type: "text", text: "old reply" });
+        idle(120, "succeeded");
+        writeFileSync(join(markersDir, "opencode-ses_v2.json"), content);
+        expect(await read(1)).toBeNull();
+      },
+    );
+
+    it("requires a known process for a v2 transcript", async () => {
+      step(110, { type: "text", text: "old reply" });
+      idle(120, "succeeded");
+      expect(
+        await readOpenCodeTranscript(
+          dbPath,
+          { cwd: "/tmp/proj", nativeSessionId: "ses_v2" },
+          1,
+          markersDir,
+        ),
+      ).toBeNull();
+    });
 
     it("joins a turn's text across its steps, skipping reasoning and tools", async () => {
       user(100, "run it");
