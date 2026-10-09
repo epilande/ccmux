@@ -737,8 +737,10 @@ ccmux config set worktree.nameTemplate 'task-{name}'
 
 These settings apply to every new worktree, whether created by a regular
 spawn, fork, PR or issue spawn, or **Move changes**. They do not rename or move
-worktrees that already exist, and they never change the git branch name. Issue
-worktrees are discovered from the `issue-<n>` / `issue-<n>-...` branch family;
+worktrees that already exist, and they never change the git branch name.
+An explicit name reopens the registered checkout holding that branch, even
+after changing the location or template. Issue worktrees are discovered from
+the `issue-<n>` / `issue-<n>-...` branch family;
 custom directory names do not change issue discovery. A legacy branchless
 checkout still uses the existing plain-directory fallback.
 

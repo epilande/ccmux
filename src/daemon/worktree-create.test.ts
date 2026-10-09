@@ -539,8 +539,86 @@ describe("createWorktree", () => {
     const second = await createWorktree(repo, { name: "Fix Sidebar" }, options);
     expect(second.ok).toBe(true);
     if (!second.ok) return;
-    expect(second.result.path).toBe(first.result.path);
+    expect(realpathSync(second.result.path)).toBe(
+      realpathSync(first.result.path),
+    );
     expect(second.result.created).toBe(false);
+  });
+
+  for (const [change, initialLayout, nextLayout] of [
+    [
+      "nested to sibling placement",
+      {},
+      { location: "sibling", nameTemplate: "{repo}-wt-{name}" },
+    ],
+    [
+      "sibling to nested placement",
+      { location: "sibling", nameTemplate: "{repo}-wt-{name}" },
+      {},
+    ],
+    [
+      "a directory template change",
+      { location: "sibling", nameTemplate: "{repo}-wt-{name}" },
+      { location: "sibling", nameTemplate: "task-{name}-end" },
+    ],
+  ] as const) {
+    it(`reopens an explicit checkout after ${change}`, async () => {
+      const repo = await makeRepo();
+      const first = await createWorktree(
+        repo,
+        { name: "shared" },
+        { layout: initialLayout },
+      );
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      writeFileSync(
+        join(first.result.path, "pending.txt"),
+        "unfinished work\n",
+      );
+
+      const reopened = await createWorktree(
+        repo,
+        { name: "shared" },
+        { layout: nextLayout },
+      );
+      if (!reopened.ok) throw new Error(reopened.error);
+      expect(realpathSync(reopened.result.path)).toBe(
+        realpathSync(first.result.path),
+      );
+      expect(reopened.result.name).toBe(first.result.name);
+      expect(reopened.result.branch).toBe("shared");
+      expect(reopened.result.created).toBe(false);
+      expect(reopened.result.branchCreated).toBe(false);
+      expect(
+        readFileSync(join(reopened.result.path, "pending.txt"), "utf8"),
+      ).toBe("unfinished work\n");
+      expect(existsSync(worktreePathFor(repo, "shared", nextLayout))).toBe(
+        false,
+      );
+    });
+  }
+
+  it("still numbers a derived branch collision after changing the layout", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(
+      repo,
+      { prompt: "fix sidebar" },
+      { layout: {} },
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const next = await createWorktree(
+      repo,
+      { prompt: "fix sidebar" },
+      {
+        layout: { location: "sibling", nameTemplate: "{repo}-wt-{name}" },
+      },
+    );
+    expect(next.ok).toBe(true);
+    if (!next.ok) return;
+    expect(next.result.created).toBe(true);
+    expect(next.result.branch).toBe("fix-sidebar-2");
+    expect(next.result.path).toBe(join(root, "repo-wt-fix-sidebar-2"));
   });
 
   it("numbers the name placeholder when either a sibling directory or branch is occupied", async () => {
@@ -696,7 +774,10 @@ describe("createWorktree", () => {
     // Nothing was cut for this request, so there is no base to report.
     expect(second.result.branchCreated).toBe(false);
     expect(second.result.base).toBeUndefined();
-    if (first.ok) expect(second.result.path).toBe(first.result.path);
+    if (first.ok)
+      expect(realpathSync(second.result.path)).toBe(
+        realpathSync(first.result.path),
+      );
   });
 
   // The branch reuse is intentional, but a reused branch can already carry

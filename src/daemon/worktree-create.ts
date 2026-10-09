@@ -892,12 +892,14 @@ export async function createWorktree(
       };
     };
 
-    // A `--pr` spawn names the branch itself. git will not check the same
-    // branch out in two worktrees, so if it is already here, OPEN that
-    // checkout rather than numbering a sibling that git would refuse.
-    if (request.branch !== undefined) {
+    // Explicit names and PR branch overrides identify an existing checkout,
+    // even when the configured directory layout has changed. Derived names
+    // still need a fresh branch unless the caller explicitly overrides it.
+    const existingBranch =
+      request.branch ?? (named.derived ? undefined : named.name);
+    if (existingBranch !== undefined) {
       for (const entry of await listWorktrees(mainRepoRoot, git)) {
-        if (entry.bare || entry.branch !== request.branch) continue;
+        if (entry.bare || entry.branch !== existingBranch) continue;
         const opened = await openIfPresent(entry.path, basename(entry.path));
         if (opened) return opened;
       }
