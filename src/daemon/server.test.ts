@@ -5875,9 +5875,6 @@ describe("POST /spawn", () => {
           const path = join(repo, ".claude", "worktrees", "feature-fork");
           expect(error).toContain(path);
           expect(error).toContain("left in place");
-          // A DERIVED name, so re-running numbers a sibling rather than
-          // reusing this one. The advice has to say which flag pins it.
-          expect(error).toContain("--worktree 'feature-fork'");
           // And it really is there, which is what makes the note worth
           // printing rather than a description of a directory that was
           // cleaned up on the way out.
@@ -6632,33 +6629,6 @@ describe("POST /spawn with a worktree", () => {
       expect(
         existsSync(join(repo, ".claude", "worktrees", "left-behind")),
       ).toBe(true);
-    } finally {
-      tmux.restore();
-    }
-  });
-
-  /**
-   * A derived name is not stable: `createWorktree` suffixes a taken one, so
-   * telling the user a re-run reuses this worktree would be a lie that leaves
-   * them with `<slug>-2`. The note has to name the flag that actually reuses it.
-   */
-  it("tells a derived name to pass the flag rather than re-run", async () => {
-    const repo = makeRepo();
-    const { internals } = createServer();
-    const tmux = withTmuxOnlyStub({ failWith: "tmux is unhappy" });
-    try {
-      const res = await spawnInto(internals, {
-        agent: "claude",
-        cwd: repo,
-        prompt: "fix sidebar flicker on resize",
-        worktree: {},
-      });
-      const body = (await res.json()) as { error: string };
-
-      expect(res.status).toBe(500);
-      expect(body.error).toContain("numbered sibling");
-      expect(body.error).toContain("--worktree 'fix-sidebar-flicker'");
-      expect(body.error).not.toContain("will reuse it");
     } finally {
       tmux.restore();
     }

@@ -10,6 +10,7 @@ import {
   resolvedHomeDir,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
+import { validateWorktreeConfig } from "../lib/worktree-layout";
 import { listTmuxClientTtys } from "../lib/tmux-client";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
@@ -4781,6 +4782,11 @@ export class DaemonServer {
     const worktreeValue =
       worktreeRequest.value ?? (sourceFlag ? {} : undefined);
     if (worktreeValue) {
+      const layout = preferences.worktree ?? {};
+      const layoutError = validateWorktreeConfig(preferences.worktree);
+      if (layoutError) {
+        return Response.json({ error: layoutError }, { status: 400, headers });
+      }
       const gitInfo = await this.getGitInfo(cwd);
       if (!gitInfo.mainRepoRoot) {
         return Response.json(
@@ -4912,7 +4918,8 @@ export class DaemonServer {
       // run's sibling worktrees out of the copy list and the counts. The
       // engine calls it too, and it is idempotent, so this is a cheap
       // `check-ignore` on the path that needs it earliest.
-      await ensureWorktreesExcluded(mainRepoRoot);
+      if (layout.location !== "sibling")
+        await ensureWorktreesExcluded(mainRepoRoot);
 
       /**
        * The creation engine, adapted to the move module's seam.
@@ -4929,10 +4936,14 @@ export class DaemonServer {
        * made and must be able to tell a fresh worktree from an opened one.
        */
       const createForMove: CreateWorktree = async (opts) => {
-        const created = await createWorktree(mainRepoRoot, {
-          ...opts,
-          prompt: prompt ?? undefined,
-        });
+        const created = await createWorktree(
+          mainRepoRoot,
+          {
+            ...opts,
+            prompt: prompt ?? undefined,
+          },
+          { layout },
+        );
         if (!created.ok) throw new Error(created.error);
         worktreeInfo = created.result;
         return {
@@ -4954,6 +4965,8 @@ export class DaemonServer {
           const occupied = await existingWorktreeFor(
             mainRepoRoot,
             creation.name,
+            undefined,
+            layout,
           );
           if (occupied) {
             return Response.json(
@@ -5016,36 +5029,41 @@ export class DaemonServer {
         };
       } else {
         const issueNumber = issueResult.value;
-        const created = await createWorktree(mainRepoRoot, {
-          ...creation,
-          // No prompt on the pr/issue paths, deliberately:
-          // `resolveWorktreeName` PREFERS a prompt over a derived name, so
-          // threading the seeded one through would silently rename the
-          // worktree after the PR's title and lose the `pr-<n>-` prefix that
-          // keeps it clear of Claude Code's own `pr-<n>` directories.
-          prompt: sourceFlag ? undefined : (prompt ?? undefined),
-          derivedName: sourceWorktreeName ?? derivedName,
-          // No base recorded on the PR path, deliberately: `creation.base` is
-          // the PR's own head sha, so the record would make the branch its
-          // own review base. `configurePRBranch` writes that key here with
-          // the branch the PR targets, and when it cannot, no key is what
-          // lets the picker's `D` fall back to its heuristic base.
-          ...(prBranch
-            ? {
-                branch: prBranch,
-                branchExists: prBranchExisted,
-                recordBase: false,
-              }
-            : {}),
-          // Under the lock, so a checkout that appeared while the picker
-          // sat open is still found: numbering `issue-<n>-<slug>-2` would
-          // break Enter's "already checked out → open it" guarantee.
-          ...(issueNumber !== undefined
-            ? {
-                reuseExisting: (trees) => pickIssueWorktree(issueNumber, trees),
-              }
-            : {}),
-        });
+        const created = await createWorktree(
+          mainRepoRoot,
+          {
+            ...creation,
+            // No prompt on the pr/issue paths, deliberately:
+            // `resolveWorktreeName` PREFERS a prompt over a derived name, so
+            // threading the seeded one through would silently rename the
+            // worktree after the PR's title and lose the `pr-<n>-` prefix that
+            // keeps it clear of Claude Code's own `pr-<n>` directories.
+            prompt: sourceFlag ? undefined : (prompt ?? undefined),
+            derivedName: sourceWorktreeName ?? derivedName,
+            // No base recorded on the PR path, deliberately: `creation.base` is
+            // the PR's own head sha, so the record would make the branch its
+            // own review base. `configurePRBranch` writes that key here with
+            // the branch the PR targets, and when it cannot, no key is what
+            // lets the picker's `D` fall back to its heuristic base.
+            ...(prBranch
+              ? {
+                  branch: prBranch,
+                  branchExists: prBranchExisted,
+                  recordBase: false,
+                }
+              : {}),
+            // Under the lock, so a checkout that appeared while the picker
+            // sat open is still found: numbering `issue-<n>-<slug>-2` would
+            // break Enter's "already checked out → open it" guarantee.
+            ...(issueNumber !== undefined
+              ? {
+                  reuseExisting: (trees) =>
+                    pickIssueWorktree(issueNumber, trees),
+                }
+              : {}),
+          },
+          { layout },
+        );
         if (!created.ok) {
           return Response.json(
             { error: created.error },
@@ -5113,7 +5131,7 @@ export class DaemonServer {
         const retry = moveInfo
           ? `re-running has nothing left to move, so start an agent there with --cwd '${worktreeInfo.path}' instead`
           : worktreeRequest.value?.name === undefined
-            ? `re-running will create a numbered sibling, pass --worktree '${worktreeInfo.name}' to reuse this one`
+            ? `re-running will create a numbered sibling, start an agent with --cwd '${worktreeInfo.path}' to reuse this one`
             : "re-running the same command will reuse it";
         notes.push(
           `the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry}`,

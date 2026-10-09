@@ -1,3 +1,4 @@
+import type { WorktreeConfig } from "./worktree-layout";
 import { mkdirSync, readFileSync } from "fs";
 import { dirname } from "path";
 import { PREFS_FILE } from "./config";
@@ -333,6 +334,8 @@ export interface Preferences {
    * may start with `~`. See `resolveClaudeProjectDirs`.
    */
   additionalClaudeConfigDirs?: string[];
+  /** Worktree directory placement and naming preferences. */
+  worktree?: WorktreeConfig;
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   /** Default prompt display mode (default "inline"). The runtime `p`-key

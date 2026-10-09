@@ -18,6 +18,10 @@ import {
   type Preferences,
   type RowConfig,
 } from "../lib/preferences";
+import {
+  isWorktreeNameTemplate,
+  VALID_WORKTREE_LOCATIONS,
+} from "../lib/worktree-layout";
 import { VALID_ICON_STYLES, type IconStyle } from "../lib/icons";
 import { BUILTIN_THEME_NAMES, DEFAULT_THEME_NAME } from "../tui/themes";
 import { resolveThemeVerbose } from "../tui/theme";
@@ -173,7 +177,7 @@ function isPromptLines(v: string): boolean {
 
 /**
  * Every key `config set`/`config get` accept by exact name: the flat
- * KNOWN_KEYS plus the dotted sidebar and notifications leaves. The
+ * KNOWN_KEYS plus the dotted sidebar, notifications, and worktree leaves. The
  * `columns.<row>.<side>` and `breakpoints.<name>` families are open-ended
  * and are left to the shell's own guesswork.
  */
@@ -189,6 +193,8 @@ export function completableConfigKeys(): string[] {
     "notifications.sound",
     "notifications.delayMs",
     "notifications.backend",
+    "worktree.location",
+    "worktree.nameTemplate",
     "notifications.command",
   ];
 }
@@ -207,6 +213,8 @@ export function configValueChoices(key: string): readonly string[] | null {
       return VALID_NOTIFICATION_BACKENDS;
     case "notifications.events":
       return VALID_NOTIFICATION_EVENTS;
+    case "worktree.location":
+      return VALID_WORKTREE_LOCATIONS;
     default:
       return null;
   }
@@ -310,7 +318,7 @@ export function createConfigCommand(): Command {
         if (!spec) {
           console.error(`Unknown key: ${key}`);
           console.error(
-            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>`,
+            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, worktree.<key>`,
           );
           process.exit(1);
         }
@@ -428,6 +436,45 @@ export function createConfigCommand(): Command {
         return;
       }
 
+      if (parts[0] === "worktree" && parts.length === 2) {
+        const worktreeKey = parts[1];
+        const prefs = await getPreferences();
+        const worktree: NonNullable<Preferences["worktree"]> = {
+          ...prefs.worktree,
+        };
+
+        if (worktreeKey === "location") {
+          if (
+            !(VALID_WORKTREE_LOCATIONS as readonly string[]).includes(value)
+          ) {
+            console.error(
+              `Invalid worktree.location: ${value} (valid: ${VALID_WORKTREE_LOCATIONS.join(", ")})`,
+            );
+            process.exit(1);
+          }
+          worktree.location = value as NonNullable<
+            Preferences["worktree"]
+          >["location"];
+        } else if (worktreeKey === "nameTemplate") {
+          if (!isWorktreeNameTemplate(value)) {
+            console.error(`Invalid worktree.nameTemplate: ${value}`);
+            console.error(
+              "  Must contain exactly one {name}, may contain {repo}, and use only ASCII letters, digits, _, and - outside placeholders",
+            );
+            process.exit(1);
+          }
+          worktree.nameTemplate = value;
+        } else {
+          console.error(`Unknown worktree key: ${worktreeKey}`);
+          console.error("Valid worktree keys: location, nameTemplate");
+          process.exit(1);
+        }
+
+        await setPreferences({ worktree });
+        console.log(`${key} = ${value}`);
+        return;
+      }
+
       if (parts[0] === "notifications" && parts.length === 2) {
         const notifKey = parts[1];
         const prefs = await getPreferences();
@@ -533,7 +580,7 @@ export function createConfigCommand(): Command {
 
       console.error(`Unknown key: ${key}`);
       console.error(
-        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>`,
+        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, worktree.<key>`,
       );
       process.exit(1);
     });

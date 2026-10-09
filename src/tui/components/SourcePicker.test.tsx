@@ -55,7 +55,7 @@ const worktreeRow = (overrides: Partial<WorktreeRow> = {}): WorktreeRow => ({
   name: "a",
   repoRoot: "/repo",
   repoName: "repo",
-  branch: "feat/a",
+  branch: overrides.name ?? "feat/a",
   tip: "sha-a",
   detached: false,
   isMain: false,

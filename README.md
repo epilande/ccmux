@@ -358,7 +358,9 @@ spawns is tellable apart; the name pins tmux's `automatic-rename` off for that
 window.
 
 `--worktree [name]` spawns the agent into a git worktree at
-`<main>/.claude/worktrees/<name>`, creating it first if it doesn't exist yet.
+`<main>/.claude/worktrees/<name>` by default, creating it first if it doesn't
+exist yet. [Worktree preferences](#worktree-placement-and-names) configure
+sibling placement and directory-name prefixes or templates.
 An explicit name is create-or-open: spawning into the same name again reuses
 that worktree rather than failing. Without a name, ccmux derives one from
 `--prompt`'s opening words; a derived name that collides with an existing
@@ -367,11 +369,12 @@ two different prompts landing in the same worktree would silently merge
 unrelated work. `--base <ref>` sets what the new branch is cut from,
 defaulting to the main checkout's current branch.
 
-Creating a worktree also adds `**/.claude/worktrees/` to the hosting repo's
+With the nested layout, creating a worktree also adds `**/.claude/worktrees/` to the hosting repo's
 `.git/info/exclude` (the same line Claude Code writes, and the same file —
 local to your clone, never `.gitignore`), so the worktrees don't show up as
 untracked work in the checkout that hosts them. It is added once, only if git
 isn't already ignoring that path, and nothing else in the file is touched.
+Sibling placement does not need this exclusion and leaves the file untouched.
 
 ### Spawning on a PR or an Issue
 
@@ -379,19 +382,22 @@ isn't already ignoring that path, and nothing else in the file is touched.
 spawns the agent into a worktree checked out on the PR's **own branch**, set
 up to track it the way `gh pr checkout` would, including a fork PR, whose
 branch is pointed at the fork's clone URL so `git push` updates the PR instead
-of failing. The worktree is named `pr-<n>-<head-ref>`, which deliberately
-never collides with the `pr-<n>` directories Claude Code creates for its own
-fetch-only PR checkouts. `--base` is refused here: the PR's head is the start
-point. ccmux records `origin/<base>` as the branch's review base, so <kbd>d</kbd>
-in the picker shows the PR's actual diff.
+of failing. By default its directory is named `pr-<n>-<head-ref>`, which
+deliberately never collides with the `pr-<n>` directories Claude Code creates
+for its own fetch-only PR checkouts. `worktree.nameTemplate` can customize the
+directory name without changing the PR branch. `--base` is refused here: the
+PR's head is the start point. ccmux records `origin/<base>` as the branch's
+review base, so <kbd>d</kbd> in the picker shows the PR's actual diff.
 
-`--issue <n>` is an ordinary spawn-from-base worktree named `issue-<n>-<title>`;
-`--base` works as usual.
+`--issue <n>` is an ordinary spawn-from-base worktree whose default directory
+name is `issue-<n>-<title>`; `--base` works as usual. The configured name
+template affects only the directory. Issue discovery matches the `issue-<n>`
+branch family rather than relying on that configurable name.
 
 Both seed the agent's opening prompt with the title and URL, and your own
 `--prompt` is appended after it. A PR whose branch is already checked out is
 opened rather than duplicated; a second `--issue` of the same number opens the
-existing `issue-<n>` worktree the same way. Both refuse rather than guess: a
+existing worktree for that issue branch. Both refuse rather than guess: a
 PR that is not open, an issue that is closed, and a same-named local branch
 that is not that PR (a branch counts as the PR's only when its `merge` _and_ `remote` config
 both already point at it, so a fork PR cannot ride in on a name collision with
@@ -707,6 +713,34 @@ ccmux config list
 | `tmuxSocket`                 | socket path (`/...`) or label                                                | unset              | tmux server to track (daemon restart required; see [Non-default tmux Server](#-non-default-tmux-server))                           |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
+| `worktree.location`           | `nested`, `sibling`                                                            | `nested`            | Place worktree directories under `<main>/.claude/worktrees/` or beside the main checkout                                         |
+| `worktree.nameTemplate`       | `{name}` plus optional `{repo}` placeholders                                  | `{name}`            | Format the worktree directory name only                                                                                           |
+
+### Worktree placement and names
+
+New worktrees are nested under `<main>/.claude/worktrees/` by default. Set
+`worktree.location` to `sibling` to place them beside the main checkout. The
+`worktree.nameTemplate` preference changes the **directory name only**; it
+defaults to `{name}`. `{repo}` is the main checkout basename, with each run
+outside ASCII letters, digits, `_`, and `-` replaced by `-`; `{name}` is the
+sanitized requested or derived worktree name. A collision number is part of
+`{name}`: `{repo}-wt-{name}-task` becomes `repo-wt-fix-2-task`, not
+`repo-wt-fix-task-2`. Templates must contain exactly one `{name}`;
+`{repo}` is optional and may appear more than once. Outside placeholders,
+only ASCII letters, digits, `_`, and `-` are allowed.
+
+```bash
+ccmux config set worktree.location sibling
+ccmux config set worktree.nameTemplate '{repo}-wt-{name}'
+ccmux config set worktree.nameTemplate 'task-{name}'
+```
+
+These settings apply to every new worktree, whether created by a regular
+spawn, fork, PR or issue spawn, or **Move changes**. They do not rename or move
+worktrees that already exist, and they never change the git branch name. Issue
+worktrees are discovered from the `issue-<n>` / `issue-<n>-...` branch family;
+custom directory names do not change issue discovery. A legacy branchless
+checkout still uses the existing plain-directory fallback.
 
 For how these search knobs interact, see [Search Mode](#search-mode).
 

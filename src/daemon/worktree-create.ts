@@ -2,11 +2,9 @@
  * Creating a worktree to spawn an agent into (issue #69).
  *
  * The counterpart to `worktree-prune.ts`: that module ends a worktree's life,
- * this one starts it. They share `worktree-git.ts` for plumbing and the same
- * placement convention, `<main>/.claude/worktrees/<name>`, which is where
- * Claude Code puts the worktrees it creates for itself. Matching it keeps the
- * whole population under one layout, so the prune scan, the picker's grouping
- * and any existing tooling see one kind of worktree rather than two.
+ * this one starts it. Placement defaults to `<main>/.claude/worktrees/<name>`;
+ * `worktree.location` and `worktree.nameTemplate` configure the directory,
+ * independently of the branch name and the shared git/file-setup policy.
  *
  * Naming is mechanical and always will be: a slug from an explicit name or
  * from the first words of the prompt. No model is consulted, deliberately,
@@ -55,6 +53,12 @@ import {
 } from "node:fs";
 import { cp, rmdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { getPreferences } from "../lib/preferences";
+import {
+  validateWorktreeConfig,
+  worktreeDirectoryName,
+  type WorktreeConfig,
+} from "../lib/worktree-layout";
 import {
   listWorktrees,
   normalizePath,
@@ -206,19 +210,24 @@ export function isIssueWorktreeName(name: string, number: number): boolean {
   return name === exact || name.startsWith(`${exact}-`);
 }
 
+/** Directory templates must not hide an issue's unchanged branch identity. */
+export function isIssueWorktree(
+  row: { name: string; branch?: string | null },
+  number: number,
+): boolean {
+  return isIssueWorktreeName(row.branch ?? row.name, number);
+}
+
 /**
  * The worktree a previous `--issue <n>` spawn cut, if any.
  *
  * The SHORTEST name wins — that is the first spawn — matching
  * `worktreeForIssue` in the source picker so Enter and `POST /spawn` agree.
  */
-export function pickIssueWorktree<T extends { name: string }>(
-  number: number,
-  worktrees: T[],
-): T | null {
-  const matches = worktrees.filter((row) =>
-    isIssueWorktreeName(row.name, number),
-  );
+export function pickIssueWorktree<
+  T extends { name: string; branch?: string | null },
+>(number: number, worktrees: T[]): T | null {
+  const matches = worktrees.filter((row) => isIssueWorktree(row, number));
   if (matches.length === 0) return null;
   const [first] = [...matches].sort(
     (a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name),
@@ -310,8 +319,16 @@ export function resolveWorktreeName(
 }
 
 /** Absolute path of the worktree a name resolves to. */
-export function worktreePathFor(mainRepoRoot: string, name: string): string {
-  return join(mainRepoRoot, WORKTREE_DIR, name);
+export function worktreePathFor(
+  mainRepoRoot: string,
+  name: string,
+  layout: WorktreeConfig = {},
+): string {
+  const parent =
+    layout.location === "sibling"
+      ? dirname(mainRepoRoot)
+      : join(mainRepoRoot, WORKTREE_DIR);
+  return join(parent, worktreeDirectoryName(mainRepoRoot, name, layout));
 }
 
 /**
@@ -389,6 +406,8 @@ export interface WorktreeCreation {
 
 export interface CreateWorktreeOptions {
   git?: GitRun;
+  /** Defaults to the live worktree preferences; injected by the spawn handler and tests. */
+  layout?: WorktreeConfig;
   /** Injectable for tests; defaults to the real filesystem work. */
   applyFileSetup?: (
     mainRepoRoot: string,
@@ -661,10 +680,11 @@ async function firstFreeDerivedName(
   slug: string,
   git: GitRun,
   branchOverridden: boolean,
+  layout: WorktreeConfig,
 ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
   for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS; attempt++) {
     const candidate = attempt === 1 ? slug : `${slug}-${attempt}`;
-    const path = worktreePathFor(mainRepoRoot, candidate);
+    const path = worktreePathFor(mainRepoRoot, candidate, layout);
     if (existsSync(path) || isSymlink(path)) continue;
     if (await isRegisteredWorktree(mainRepoRoot, path, git)) continue;
     if (
@@ -823,7 +843,7 @@ export async function createWorktree(
      * still found.
      */
     reuseExisting?: (
-      worktrees: { name: string; path: string }[],
+      worktrees: { name: string; path: string; branch: string | null }[],
     ) => { name: string; path: string } | null;
   },
   options: CreateWorktreeOptions = {},
@@ -832,6 +852,9 @@ export async function createWorktree(
 > {
   const git = options.git ?? runGit;
   const fileSetup = options.applyFileSetup ?? applyWorktreeFileSetup;
+  const layout = options.layout ?? (await getPreferences()).worktree;
+  const layoutError = validateWorktreeConfig(layout);
+  if (layoutError) return { ok: false, error: layoutError };
 
   const named = resolveWorktreeName(
     request.name,
@@ -845,7 +868,8 @@ export async function createWorktree(
     // repo is already invisible to git by the time it exists. Idempotent, so
     // running it on the open path too costs one `check-ignore` and heals a
     // repo whose worktrees predate this.
-    await ensureWorktreesExcluded(mainRepoRoot, git);
+    if (layout?.location !== "sibling")
+      await ensureWorktreesExcluded(mainRepoRoot, git);
 
     const openIfPresent = async (
       path: string,
@@ -882,7 +906,11 @@ export async function createWorktree(
     if (request.reuseExisting) {
       const listed = (await listWorktrees(mainRepoRoot, git))
         .filter((entry) => !entry.bare)
-        .map((entry) => ({ name: basename(entry.path), path: entry.path }));
+        .map((entry) => ({
+          name: basename(entry.path),
+          path: entry.path,
+          branch: entry.branch,
+        }));
       const hit = request.reuseExisting(listed);
       if (hit) {
         const opened = await openIfPresent(hit.path, hit.name);
@@ -898,12 +926,20 @@ export async function createWorktree(
           named.name,
           git,
           request.branch !== undefined,
+          layout ?? {},
         )
       : { ok: true as const, name: named.name };
     if (!resolved.ok) return resolved;
-    const name = resolved.name;
-    const branchName = request.branch ?? name;
-    const path = worktreePathFor(mainRepoRoot, name);
+    const slug = resolved.name;
+    const name = worktreeDirectoryName(mainRepoRoot, slug, layout);
+    const branchName = request.branch ?? slug;
+    const path = worktreePathFor(mainRepoRoot, slug, layout);
+    if (normalizePath(path) === normalizePath(mainRepoRoot)) {
+      return {
+        ok: false as const,
+        error: `Worktree path '${path}' is the main checkout; choose another name or worktree.nameTemplate`,
+      };
+    }
 
     // Registered with git already: open it, whatever is on disk.
     const registered = await isRegisteredWorktree(mainRepoRoot, path, git);
@@ -1004,7 +1040,7 @@ export async function createWorktree(
           (await localBranchExists(mainRepoRoot, branchName, git)))
         : named.derived
           ? false
-          : await localBranchExists(mainRepoRoot, name, git);
+          : await localBranchExists(mainRepoRoot, branchName, git);
     const args = reusingBranch
       ? ["worktree", "add", path, branchName]
       : ["worktree", "add", "-b", branchName, path, based.base];
@@ -1133,10 +1169,13 @@ export async function existingWorktreeFor(
   mainRepoRoot: string,
   name: string,
   git: GitRun = runGit,
+  layout?: WorktreeConfig,
 ): Promise<string | null> {
+  const config = layout ?? (await getPreferences()).worktree;
+  if (validateWorktreeConfig(config)) return null;
   const named = resolveWorktreeName(name, undefined);
   if (!named.ok) return null;
-  const path = worktreePathFor(mainRepoRoot, named.name);
+  const path = worktreePathFor(mainRepoRoot, named.name, config);
   return (await isRegisteredWorktree(mainRepoRoot, path, git)) ? path : null;
 }
 

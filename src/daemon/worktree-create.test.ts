@@ -519,6 +519,115 @@ describe("file setup", () => {
 });
 
 describe("createWorktree", () => {
+  it("creates and reopens a named sibling checkout without changing its branch", async () => {
+    const repo = await makeRepo();
+    const options = {
+      layout: {
+        location: "sibling" as const,
+        nameTemplate: "{repo}-wt-{name}",
+      },
+    };
+    const first = await createWorktree(repo, { name: "Fix Sidebar" }, options);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.result.path).toBe(join(root, "repo-wt-fix-sidebar"));
+    expect(first.result.name).toBe("repo-wt-fix-sidebar");
+    expect(await git(first.result.path, ["branch", "--show-current"])).toBe(
+      "fix-sidebar",
+    );
+    expect(await git(repo, ["status", "--porcelain"])).toBe("");
+    const second = await createWorktree(repo, { name: "Fix Sidebar" }, options);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.result.path).toBe(first.result.path);
+    expect(second.result.created).toBe(false);
+  });
+
+  it("numbers the name placeholder when either a sibling directory or branch is occupied", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(root, "repo-wt-fix-sidebar-end"));
+    writeFileSync(join(root, "repo-wt-fix-sidebar-end", "keep"), "mine");
+    await git(repo, ["branch", "fix-sidebar-2"]);
+    const out = await createWorktree(
+      repo,
+      { prompt: "fix sidebar" },
+      {
+        layout: { location: "sibling", nameTemplate: "{repo}-wt-{name}-end" },
+      },
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.path).toBe(join(root, "repo-wt-fix-sidebar-3-end"));
+    expect(await git(out.result.path, ["branch", "--show-current"])).toBe(
+      "fix-sidebar-3",
+    );
+    expect(
+      readFileSync(join(root, "repo-wt-fix-sidebar-end", "keep"), "utf8"),
+    ).toBe("mine");
+  });
+
+  it("applies a directory prefix without replacing an overridden PR branch", async () => {
+    const repo = await makeRepo();
+    const out = await createWorktree(
+      repo,
+      { derivedName: "pr-7-fix-sidebar", branch: "fix/sidebar" },
+      {
+        layout: { nameTemplate: "task-{name}" },
+      },
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.path).toBe(
+      join(repo, ".claude", "worktrees", "task-pr-7-fix-sidebar"),
+    );
+    expect(await git(out.result.path, ["branch", "--show-current"])).toBe(
+      "fix/sidebar",
+    );
+  });
+
+  it("refuses unsafe or ambiguous templates before touching the repo", async () => {
+    const repo = await makeRepo();
+    const excludePath = join(repo, ".git", "info", "exclude");
+    const exclude = readFileSync(excludePath, "utf8");
+    for (const nameTemplate of [
+      "../{name}",
+      "{name}/{repo}",
+      "fixed",
+      "{name}-{name}",
+      "{unknown}-{name}",
+    ]) {
+      const out = await createWorktree(
+        repo,
+        { name: "fix-sidebar" },
+        {
+          layout: { location: "sibling", nameTemplate },
+        },
+      );
+      expect(out.ok).toBe(false);
+      if (!out.ok) expect(out.error).toContain("worktree.nameTemplate");
+    }
+    expect(await git(repo, ["branch", "--list"])).toBe("* main");
+    expect(readFileSync(excludePath, "utf8")).toBe(exclude);
+    expect(readdirSync(root)).toEqual(["repo"]);
+  });
+
+  it("refuses a sibling name that would silently reopen the main checkout", async () => {
+    const repo = await makeRepo();
+    const out = await createWorktree(
+      repo,
+      { name: "repo" },
+      {
+        layout: { location: "sibling" },
+      },
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("main checkout");
+    expect(await git(repo, ["branch", "--show-current"])).toBe("main");
+    expect(await git(repo, ["worktree", "list", "--porcelain"])).not.toContain(
+      "refs/heads/repo",
+    );
+  });
+
   it("creates the worktree at the shared convention path, on a new branch", async () => {
     const repo = await makeRepo();
 
@@ -1394,6 +1503,33 @@ describe("createWorktree with a branch override", () => {
 });
 
 describe("createWorktree reuseExisting", () => {
+  it("reuses a formatted issue checkout after its title or template changes", async () => {
+    const repo = await makeRepo();
+    const first = await createWorktree(
+      repo,
+      { derivedName: "issue-144-old-title" },
+      {
+        layout: { location: "sibling", nameTemplate: "{repo}-wt-{name}" },
+      },
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = await createWorktree(
+      repo,
+      {
+        derivedName: "issue-144-new-title",
+        reuseExisting: (trees) => pickIssueWorktree(144, trees),
+      },
+      { layout: { nameTemplate: "task-{name}" } },
+    );
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(realpathSync(second.result.path)).toBe(
+      realpathSync(first.result.path),
+    );
+    expect(second.result.created).toBe(false);
+  });
+
   // The source picker's guarantee: a second `--issue` spawn opens the first
   // checkout rather than numbering `issue-<n>-<slug>-2`.
   it("opens the existing issue worktree instead of numbering a sibling", async () => {

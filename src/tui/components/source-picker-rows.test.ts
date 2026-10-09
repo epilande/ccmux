@@ -51,7 +51,7 @@ const worktree = (overrides: Partial<WorktreeRow> = {}): WorktreeRow => ({
   path: "/repo/wt/a",
   name: "a",
   repoRoot: "/repo",
-  branch: "feat/a",
+  branch: overrides.name ?? "feat/a",
   tip: "sha-a",
   detached: false,
   isMain: false,
@@ -113,6 +113,24 @@ describe("row keys", () => {
 });
 
 describe("worktreeForIssue", () => {
+  it("recognizes formatted directories by issue branch without claiming a literal template prefix", () => {
+    const rows = [
+      worktree({
+        name: "issue-14-repo-wt-issue-144-old-end",
+        branch: "issue-144-old",
+      }),
+      worktree({
+        name: "issue-14-repo-wt-issue-144-old-2-end",
+        branch: "issue-144-old-2",
+      }),
+    ];
+    const found = worktreeForIssue(144, rows);
+    expect(found?.row.path).toBe(rows[0]!.path);
+    expect(found?.row.name).toBe("issue-14-repo-wt-issue-144-old-end");
+    expect(found?.siblings).toBe(1);
+    expect(worktreeForIssue(14, rows)).toBeNull();
+  });
+
   it("finds the worktree a spawn cut for the issue", () => {
     const found = worktreeForIssue(144, [
       worktree({ name: "other" }),

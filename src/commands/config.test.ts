@@ -376,6 +376,57 @@ describe("config set notifications.*", () => {
   });
 });
 
+describe("config set worktree.*", () => {
+  it("sets nested values without replacing the other worktree setting", async () => {
+    store = { worktree: { nameTemplate: "task-{name}" } };
+    const restoreExit = withExitSentinel();
+    try {
+      expect(await runConfigSet("worktree.location", "sibling")).toBeNull();
+      expect(store.worktree).toEqual({
+        nameTemplate: "task-{name}",
+        location: "sibling",
+      });
+
+      expect(
+        await runConfigSet("worktree.nameTemplate", "{repo}-wt-{name}"),
+      ).toBeNull();
+      expect(store.worktree).toEqual({
+        nameTemplate: "{repo}-wt-{name}",
+        location: "sibling",
+      });
+    } finally {
+      restoreExit();
+    }
+  });
+
+  it("rejects invalid locations and name templates without changing preferences", async () => {
+    store = { worktree: { location: "nested", nameTemplate: "task-{name}" } };
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const invalidSettings: [string, string][] = [
+        ["worktree.location", "outside"],
+        ["worktree.nameTemplate", "{repo}"],
+        ["worktree.nameTemplate", "{name}-{name}"],
+        ["worktree.nameTemplate", "{name}/child"],
+        ["worktree.nameTemplate", "{name}.backup"],
+        ["worktree.nameTemplate", "{unknown}-{name}"],
+        ["worktree.nameTemplate", "{name"],
+      ];
+      for (const [key, value] of invalidSettings) {
+        expect((await runConfigSet(key, value))?.code).toBe(1);
+        expect(store.worktree).toEqual({
+          location: "nested",
+          nameTemplate: "task-{name}",
+        });
+      }
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
 describe("KNOWN_KEYS.tmuxSocket", () => {
   const spec = KNOWN_KEYS.tmuxSocket!;
 
@@ -445,12 +496,9 @@ describe("KNOWN_KEYS.reviewHandback", () => {
   });
 });
 
-// completableConfigKeys() is a hand-maintained literal array (KNOWN_KEYS plus
-// eight hardcoded dotted strings); the "set" action's acceptance of those
-// dotted keys is control flow (an if/else for sidebar.*, a switch for
-// notifications.*), not a shared data structure. Nothing else asserts the two
-// stay in sync, so a new notifications.<key> case can ship uncompletable with
-// every other test still green. This suite fails the moment they drift.
+// completableConfigKeys() is a hand-maintained list of KNOWN_KEYS and dotted
+// setting leaves. This suite ensures every offered key is accepted by config
+// set, so additions cannot silently become uncompletable.
 describe("completableConfigKeys() parity with config set", () => {
   // Signals `config set` prints only on the "I don't recognize this key"
   // paths (top-level, sidebar.<key>, notifications.<key>). A value-validation
@@ -460,6 +508,7 @@ describe("completableConfigKeys() parity with config set", () => {
     "Valid keys:",
     "Valid sidebar keys:",
     "Valid notifications keys:",
+    "Valid worktree keys:",
   ] as const;
 
   // A value `config set` should actually accept for each completable key, so
@@ -478,6 +527,8 @@ describe("completableConfigKeys() parity with config set", () => {
         return "50"; // integer 10-500
       case "command":
         return "claude"; // non-empty string
+      case "worktree.nameTemplate":
+        return "task-{name}";
       case "tmuxSocket":
         return "work"; // non-empty string
       case "additionalClaudeConfigDirs":

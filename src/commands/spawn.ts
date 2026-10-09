@@ -216,7 +216,7 @@ export function createSpawnCommand(): Command {
     .option("--detach", "Don't switch to the new pane after spawning")
     .option(
       "--worktree [name]",
-      "Spawn into a git worktree at <repo>/.claude/worktrees/<name>, creating it if needed (name derived from --prompt, or from the forked session's branch, when omitted)",
+      "Spawn into a git worktree using worktree.location/nameTemplate preferences, creating it if needed (name derived from --prompt, or from the forked session's branch, when omitted)",
     )
     .option(
       "--base <ref>",
