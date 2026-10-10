@@ -6638,6 +6638,26 @@ describe("POST /spawn with a worktree", () => {
    * the error has to say it is there. Otherwise the user is left wondering
    * whether to clean it up by hand.
    */
+  it("tells an explicitly named failed spawn that re-running reuses its checkout", async () => {
+    const repo = makeRepo();
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub({ failWith: "no space left for a window" });
+    try {
+      const failed = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "kept" },
+      });
+      expect(failed.status).toBe(500);
+      const body = (await failed.json()) as { error: string };
+      expect(body.error).toContain("left in place");
+      expect(body.error).toContain("re-running the same command will reuse it");
+      expect(body.error).not.toContain("numbered sibling");
+    } finally {
+      tmux.restore();
+    }
+  });
+
   it("retries a failed derived spawn using its surviving checkout without creating a sibling", async () => {
     const repo = makeRepo();
     const prefs = spyOn(preferences, "getPreferences").mockResolvedValue({
@@ -6654,6 +6674,9 @@ describe("POST /spawn with a worktree", () => {
       });
       expect(failed.status).toBe(500);
       const body = (await failed.json()) as { error: string };
+      expect(body.error).toContain("left in place");
+      expect(body.error).toContain("re-running will create a numbered sibling");
+      expect(body.error).not.toContain("will reuse it");
       const destination = body.error.match(/--cwd '([^']+)'/)?.[1];
       expect(destination).toBeDefined();
       if (!destination) return;
