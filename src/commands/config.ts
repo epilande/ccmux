@@ -192,8 +192,8 @@ export function completableConfigKeys(): string[] {
     "notifications.sound",
     "notifications.delayMs",
     "notifications.backend",
-    "worktree.path",
     "notifications.command",
+    "worktree.path",
   ];
 }
 

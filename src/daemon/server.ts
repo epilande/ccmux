@@ -7,6 +7,7 @@ import {
   MAX_SEND_PASTE_CHARS,
   MAX_SEND_TEXT_CHARS,
   isCcmuxPane,
+  PREFS_FILE,
   resolvedHomeDir,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
@@ -4790,7 +4791,10 @@ export class DaemonServer {
       const layout = preferences.worktree ?? {};
       const layoutError = validateWorktreeConfig(preferences.worktree);
       if (layoutError) {
-        return Response.json({ error: layoutError }, { status: 400, headers });
+        return Response.json(
+          { error: `${layoutError} (fix it in ${PREFS_FILE})` },
+          { status: 400, headers },
+        );
       }
       const gitInfo = await this.getGitInfo(cwd);
       if (!gitInfo.mainRepoRoot) {
