@@ -445,7 +445,7 @@ export function createConfigCommand(): Command {
           if (!isWorktreePathTemplate(value)) {
             console.error(`Invalid worktree.path: ${value}`);
             console.error(
-              `  Must contain exactly one {name} in the final segment; the default is ${DEFAULT_WORKTREE_PATH}`,
+              `  Must contain exactly one {name} in the final segment, with a parent below the main checkout root and no .git segment; the default is ${DEFAULT_WORKTREE_PATH}`,
             );
             process.exit(1);
           }

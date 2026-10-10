@@ -408,6 +408,25 @@ describe("config set worktree.path", () => {
     }
   });
 
+  it("accepts parents outside the root, nested, home-relative and absolute", async () => {
+    const restoreExit = withExitSentinel();
+    try {
+      for (const value of [
+        "../{name}",
+        "{repo}/{name}",
+        ".worktrees/{name}",
+        "~/worktrees/{repo}/{name}",
+        "/tmp/worktrees/{name}",
+      ]) {
+        store = {};
+        expect(await runConfigSet("worktree.path", value)).toBeNull();
+        expect(store).toEqual({ worktree: { path: value } });
+      }
+    } finally {
+      restoreExit();
+    }
+  });
+
   it("rejects invalid templates and legacy keys without changing preferences", async () => {
     store = {
       showPreview: true,
@@ -422,6 +441,13 @@ describe("config set worktree.path", () => {
         ["worktree.path", "{name}/src"],
         ["worktree.path", "../{branch}"],
         ["worktree.path", "{name"],
+        // Parent at the main checkout root, which spawn would refuse anyway.
+        ["worktree.path", "{name}"],
+        ["worktree.path", "{repo}-{name}"],
+        ["worktree.path", "./{name}"],
+        ["worktree.path", "wt/../{name}"],
+        // Inside git metadata.
+        ["worktree.path", ".git/wt/{name}"],
         ["worktree.location", "sibling"],
         ["worktree.nameTemplate", "task-{name}"],
       ];

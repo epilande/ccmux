@@ -5,6 +5,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  normalize,
   relative,
   resolve,
   sep,
@@ -52,7 +53,14 @@ export function isWorktreePathTemplate(value: unknown): value is string {
     name === value.lastIndexOf("{name}") &&
     basename(value).includes("{name}") &&
     !/[{}]/.test(value.replace(/\{(?:name|repo)\}/g, "")) &&
-    (!value.startsWith("~") || value.startsWith("~/"))
+    (!value.startsWith("~") || value.startsWith("~/")) &&
+    // Refused at spawn anyway, but knowable from the text alone, so `config
+    // set` can reject it instead of every later spawn: a parent at the main
+    // checkout root would exclude the whole repository.
+    (isAbsolute(value) ||
+      value.startsWith("~/") ||
+      normalize(dirname(value)) !== ".") &&
+    !value.split("/").includes(".git")
   );
 }
 
@@ -63,7 +71,7 @@ export function validateWorktreeConfig(config: unknown): string | null {
     return "worktree must be an object";
   const { path } = config as WorktreeConfig;
   if (path !== undefined && !isWorktreePathTemplate(path)) {
-    return "worktree.path requires exactly one {name} in the final path segment, optional {repo}, and no unknown placeholders or control characters";
+    return "worktree.path requires exactly one {name} in the final path segment, optional {repo}, a parent directory below the main checkout root, no .git segment, and no unknown placeholders or control characters";
   }
   return null;
 }
