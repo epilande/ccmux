@@ -1752,6 +1752,61 @@ describe("createWorktree with a branch override", () => {
 });
 
 describe("createWorktree reuseExisting", () => {
+  it("reuses main when it already holds the issue, without creating an isolated duplicate", async () => {
+    const repo = await makeRepo();
+    await git(repo, ["branch", "-m", "issue-144-fix"]);
+    writeFileSync(join(repo, "pending.txt"), "existing main work\n");
+    const excludePath = join(repo, ".git", "info", "exclude");
+    const exclude = readFileSync(excludePath, "utf8");
+    const opened = await createWorktree(repo, {
+      derivedName: "issue-144-new-title",
+      reuseExisting: (rows) => pickIssueWorktree(144, rows),
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    expect(opened.result.path).toBe(repo);
+    expect(opened.result.created).toBe(false);
+    expect(opened.result.branch).toBe("issue-144-fix");
+    expect(existsSync(worktreePathFor(repo, "issue-144-new-title"))).toBe(
+      false,
+    );
+    expect(readFileSync(join(repo, "pending.txt"), "utf8")).toBe(
+      "existing main work\n",
+    );
+    expect(readFileSync(excludePath, "utf8")).toBe(exclude);
+    expect(await git(repo, ["branch", "--list"])).toBe("* issue-144-fix");
+  });
+
+  it("keeps the logical reopened name when only the template parent changes", async () => {
+    const repo = await makeRepo();
+    const initial = await createWorktree(
+      repo,
+      { name: "shared" },
+      {
+        layout: { path: ".claude/worktrees/task-{name}-end" },
+      },
+    );
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    writeFileSync(join(initial.result.path, "pending.txt"), "existing work\n");
+    const current = { path: "../task-{name}-end" };
+    const opened = await createWorktree(
+      repo,
+      { name: "shared" },
+      { layout: current },
+    );
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    expect(opened.result.path).toBe(initial.result.path);
+    expect(opened.result.created).toBe(false);
+    expect(opened.result.name).toBe("shared");
+    expect(opened.result.branch).toBe("shared");
+    expect(readFileSync(join(opened.result.path, "pending.txt"), "utf8")).toBe(
+      "existing work\n",
+    );
+    expect(existsSync(worktreePathFor(repo, "shared", current))).toBe(false);
+  });
+
   it("reuses a formatted issue checkout after its title or template changes", async () => {
     const repo = await makeRepo();
     const first = await createWorktree(

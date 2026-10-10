@@ -768,6 +768,8 @@ checked out in a registered worktree is reused across path layouts. Issue
 worktrees are identified from their `issue-<n>` / `issue-<n>-...` branch; branch
 identity also decides between issue candidates, with directory name used only
 as the fallback for a branchless legacy checkout.
+Name extraction compares the directory basename, not its parent path: changing
+only the parent keeps the logical name when the basename pattern still matches.
 
 These settings apply to regular, fork, PR and issue spawns, and **Move changes**.
 If a resolved worktree parent is inside the main checkout, ccmux adds an
