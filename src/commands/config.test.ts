@@ -55,6 +55,16 @@ async function runConfigSet(
   }
 }
 
+async function runConfigGet(key: string): Promise<ExitError | null> {
+  try {
+    await createConfigCommand().parseAsync(["get", key], { from: "user" });
+    return null;
+  } catch (err) {
+    if (err instanceof ExitError) return err;
+    throw err;
+  }
+}
+
 describe("getNestedValue", () => {
   const prefs: Preferences = {
     showPreview: true,
@@ -376,49 +386,66 @@ describe("config set notifications.*", () => {
   });
 });
 
-describe("config set worktree.*", () => {
-  it("sets nested values without replacing the other worktree setting", async () => {
-    store = { worktree: { nameTemplate: "task-{name}" } };
+describe("config set worktree.path", () => {
+  it("sets the path template without replacing unrelated preferences", async () => {
+    store = {
+      showPreview: true,
+      notifications: { enabled: true },
+      worktree: { path: ".claude/worktrees/{name}" },
+    };
     const restoreExit = withExitSentinel();
     try {
-      expect(await runConfigSet("worktree.location", "sibling")).toBeNull();
-      expect(store.worktree).toEqual({
-        nameTemplate: "task-{name}",
-        location: "sibling",
-      });
-
       expect(
-        await runConfigSet("worktree.nameTemplate", "{repo}-wt-{name}"),
+        await runConfigSet("worktree.path", "../{repo}.worktrees/{name}"),
       ).toBeNull();
-      expect(store.worktree).toEqual({
-        nameTemplate: "{repo}-wt-{name}",
-        location: "sibling",
+      expect(store).toEqual({
+        showPreview: true,
+        notifications: { enabled: true },
+        worktree: { path: "../{repo}.worktrees/{name}" },
       });
     } finally {
       restoreExit();
     }
   });
 
-  it("rejects invalid locations and name templates without changing preferences", async () => {
-    store = { worktree: { location: "nested", nameTemplate: "task-{name}" } };
+  it("rejects invalid templates and legacy keys without changing preferences", async () => {
+    store = {
+      showPreview: true,
+      worktree: { path: ".claude/worktrees/{name}" },
+    };
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
     const restoreExit = withExitSentinel();
     try {
       const invalidSettings: [string, string][] = [
-        ["worktree.location", "outside"],
-        ["worktree.nameTemplate", "{repo}"],
-        ["worktree.nameTemplate", "{name}-{name}"],
-        ["worktree.nameTemplate", "{name}/child"],
-        ["worktree.nameTemplate", "{name}.backup"],
-        ["worktree.nameTemplate", "{unknown}-{name}"],
-        ["worktree.nameTemplate", "{name"],
+        ["worktree.path", "../{repo}"],
+        ["worktree.path", "{repo}-{name}-{name}"],
+        ["worktree.path", "{name}/src"],
+        ["worktree.path", "../{branch}"],
+        ["worktree.path", "{name"],
+        ["worktree.location", "sibling"],
+        ["worktree.nameTemplate", "task-{name}"],
       ];
       for (const [key, value] of invalidSettings) {
         expect((await runConfigSet(key, value))?.code).toBe(1);
-        expect(store.worktree).toEqual({
-          location: "nested",
-          nameTemplate: "task-{name}",
+        expect(store).toEqual({
+          showPreview: true,
+          worktree: { path: ".claude/worktrees/{name}" },
         });
+      }
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe("config get rejects obsolete worktree keys", () => {
+  it("refuses keys that are no longer supported", async () => {
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      for (const key of ["worktree.location", "worktree.nameTemplate"]) {
+        expect((await runConfigGet(key))?.code).toBe(1);
       }
     } finally {
       restoreExit();
@@ -527,8 +554,8 @@ describe("completableConfigKeys() parity with config set", () => {
         return "50"; // integer 10-500
       case "command":
         return "claude"; // non-empty string
-      case "worktree.nameTemplate":
-        return "task-{name}";
+      case "worktree.path":
+        return "../{repo}-wt-{name}";
       case "tmuxSocket":
         return "work"; // non-empty string
       case "additionalClaudeConfigDirs":

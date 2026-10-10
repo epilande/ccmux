@@ -51,7 +51,7 @@ const worktree = (overrides: Partial<WorktreeRow> = {}): WorktreeRow => ({
   path: "/repo/wt/a",
   name: "a",
   repoRoot: "/repo",
-  branch: overrides.name ?? "feat/a",
+  branch: "feat/a",
   tip: "sha-a",
   detached: false,
   isMain: false,
@@ -134,7 +134,10 @@ describe("worktreeForIssue", () => {
   it("finds the worktree a spawn cut for the issue", () => {
     const found = worktreeForIssue(144, [
       worktree({ name: "other" }),
-      worktree({ name: "issue-144-notifications" }),
+      worktree({
+        name: "issue-144-notifications",
+        branch: "issue-144-notifications",
+      }),
     ]);
     expect(found?.row.name).toBe("issue-144-notifications");
     expect(found?.siblings).toBe(0);
@@ -142,7 +145,9 @@ describe("worktreeForIssue", () => {
 
   it("matches the bare name as well as the family", () => {
     expect(
-      worktreeForIssue(144, [worktree({ name: "issue-144" })])?.row.name,
+      worktreeForIssue(144, [
+        worktree({ name: "issue-144", branch: "issue-144" }),
+      ])?.row.name,
     ).toBe("issue-144");
   });
 
@@ -153,9 +158,36 @@ describe("worktreeForIssue", () => {
    */
   it("refuses a longer number that merely starts with this one", () => {
     expect(
-      worktreeForIssue(14, [worktree({ name: "issue-144-foo" })]),
+      worktreeForIssue(14, [
+        worktree({ name: "issue-144-foo", branch: "issue-144-foo" }),
+      ]),
     ).toBeNull();
-    expect(worktreeForIssue(1, [worktree({ name: "issue-14" })])).toBeNull();
+    expect(
+      worktreeForIssue(1, [worktree({ name: "issue-14", branch: "issue-14" })]),
+    ).toBeNull();
+  });
+
+  it("falls back to the directory name only for a missing branch", () => {
+    expect(
+      worktreeForIssue(144, [
+        worktree({
+          name: "issue-144-legacy",
+          branch: null,
+          detached: true,
+        }),
+      ])?.row.name,
+    ).toBe("issue-144-legacy");
+  });
+
+  it("prefers a non-null branch over a matching directory name", () => {
+    expect(
+      worktreeForIssue(144, [
+        worktree({
+          name: "issue-144-legacy",
+          branch: "feature/unrelated",
+        }),
+      ]),
+    ).toBeNull();
   });
 
   // A second spawn on the same issue used to derive `-2` rather than opening
@@ -164,9 +196,18 @@ describe("worktreeForIssue", () => {
   // choosing one of two live checkouts must be visible.
   it("takes the shortest name and counts the siblings", () => {
     const found = worktreeForIssue(144, [
-      worktree({ name: "issue-144-notifications-2" }),
-      worktree({ name: "issue-144-notifications" }),
-      worktree({ name: "issue-144-notifications-3" }),
+      worktree({
+        name: "issue-144-notifications-2",
+        branch: "issue-144-notifications-2",
+      }),
+      worktree({
+        name: "issue-144-notifications",
+        branch: "issue-144-notifications",
+      }),
+      worktree({
+        name: "issue-144-notifications-3",
+        branch: "issue-144-notifications-3",
+      }),
     ]);
     expect(found?.row.name).toBe("issue-144-notifications");
     expect(found?.siblings).toBe(2);
@@ -174,8 +215,8 @@ describe("worktreeForIssue", () => {
 
   it("is stable when two names are the same length", () => {
     const found = worktreeForIssue(144, [
-      worktree({ name: "issue-144-b" }),
-      worktree({ name: "issue-144-a" }),
+      worktree({ name: "issue-144-b", branch: "issue-144-b" }),
+      worktree({ name: "issue-144-a", branch: "issue-144-a" }),
     ]);
     expect(found?.row.name).toBe("issue-144-a");
   });
@@ -192,7 +233,11 @@ describe("buildSourceRepos", () => {
       issues: [issue()],
       worktrees: [
         worktree({ name: "parking", tip: "sha-156", path: "/repo/wt/parking" }),
-        worktree({ name: "issue-144-notifications", path: "/repo/wt/i144" }),
+        worktree({
+          name: "issue-144-notifications",
+          branch: "issue-144-notifications",
+          path: "/repo/wt/i144",
+        }),
       ],
     });
 
@@ -384,8 +429,14 @@ describe("row presentation", () => {
       build({
         issues: [issue()],
         worktrees: [
-          worktree({ name: "issue-144-notifications" }),
-          worktree({ name: "issue-144-notifications-2" }),
+          worktree({
+            name: "issue-144-notifications",
+            branch: "issue-144-notifications",
+          }),
+          worktree({
+            name: "issue-144-notifications-2",
+            branch: "issue-144-notifications-2",
+          }),
         ],
       }),
     );
@@ -399,7 +450,12 @@ describe("row presentation", () => {
     const [row] = pickerRows(
       build({
         issues: [issue()],
-        worktrees: [worktree({ name: "issue-144-notifications" })],
+        worktrees: [
+          worktree({
+            name: "issue-144-notifications",
+            branch: "issue-144-notifications",
+          }),
+        ],
       }),
     );
     expect(sourceDetailPhrases(row!).map((phrase) => phrase.text)).toContain(

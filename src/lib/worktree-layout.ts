@@ -1,47 +1,155 @@
-import { basename } from "node:path";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
-export const VALID_WORKTREE_LOCATIONS = ["nested", "sibling"] as const;
+export const DEFAULT_WORKTREE_PATH = ".claude/worktrees/{name}";
 
 export interface WorktreeConfig {
-  location?: (typeof VALID_WORKTREE_LOCATIONS)[number];
-  /** Directory template; branch names are unaffected. */
-  nameTemplate?: string;
+  /** Main-checkout-relative, home-relative, or absolute directory template. */
+  path?: string;
 }
 
-/** Exactly one name placeholder, optional repo placeholders, safe literal text. */
-export function isWorktreeNameTemplate(value: unknown): value is string {
+/** A logical name occurs once in the final component; all other tokens are known. */
+export function isWorktreePathTemplate(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    /[\x00-\x1f\x7f]/.test(value)
+  )
+    return false;
+  const name = value.indexOf("{name}");
   return (
-    typeof value === "string" &&
-    value.split("{name}").length === 2 &&
-    /^[A-Za-z0-9_-]*$/.test(value.replace(/\{(?:name|repo)\}/g, ""))
+    name >= 0 &&
+    name === value.lastIndexOf("{name}") &&
+    basename(value).includes("{name}") &&
+    !/[{}]/.test(value.replace(/\{(?:name|repo)\}/g, "")) &&
+    (!value.startsWith("~") || value.startsWith("~/"))
   );
 }
 
-/** Reject hand-edited invalid JSON before a spawn can change git or the filesystem. */
+/** Hand-edited preferences are checked before any repository mutation. */
 export function validateWorktreeConfig(config: unknown): string | null {
   if (config === undefined) return null;
-  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+  if (config === null || typeof config !== "object" || Array.isArray(config))
     return "worktree must be an object";
-  }
-  const { location, nameTemplate } = config as WorktreeConfig;
-  if (location !== undefined && !VALID_WORKTREE_LOCATIONS.includes(location)) {
-    return "worktree.location must be nested or sibling";
-  }
-  if (nameTemplate !== undefined && !isWorktreeNameTemplate(nameTemplate)) {
-    return "worktree.nameTemplate must contain exactly one {name}, optional {repo}, and only letters, digits, underscores or hyphens";
+  const { path } = config as WorktreeConfig;
+  if (path !== undefined && !isWorktreePathTemplate(path)) {
+    return "worktree.path requires exactly one {name} in the final path segment, optional {repo}, and no unknown placeholders or control characters";
   }
   return null;
 }
 
-/** Repo names may contain spaces or punctuation; keep the result a single safe component. */
-export function worktreeDirectoryName(
+/** Resolve existing ancestors too: a symlink must not bypass the .git/root guards. */
+function physicalPath(path: string): string {
+  let ancestor = resolve(path);
+  let suffix = "";
+  for (;;) {
+    try {
+      return resolve(realpathSync.native(ancestor), suffix);
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return resolve(path);
+      suffix = join(basename(ancestor), suffix);
+      ancestor = parent;
+    }
+  }
+}
+
+/** Literal, rooted ignores for custom parents; retain Claude's default pattern exactly. */
+export function worktreeExcludePattern(
+  mainRepoRoot: string,
+  path: string,
+): string | null {
+  const root = physicalPath(mainRepoRoot);
+  const parent = physicalPath(dirname(path));
+  const inside = relative(root, parent);
+  if (
+    !inside ||
+    inside === ".." ||
+    inside.startsWith(`..${sep}`) ||
+    isAbsolute(inside)
+  )
+    return null;
+  const posix = inside.split(sep).join("/");
+  if (posix === ".claude/worktrees") return "**/.claude/worktrees/";
+  return `/${posix.replace(/[\\*?\[\]#! ]/g, "\\$&")}/`;
+}
+
+/** One shared resolution/validation contract for spawning and Move changes preflight. */
+export function resolveWorktreePath(
   mainRepoRoot: string,
   name: string,
   config: WorktreeConfig = {},
-): string {
+):
+  | { ok: true; path: string; parent: string; excludePattern: string | null }
+  | { ok: false; error: string } {
+  const invalid = validateWorktreeConfig(config);
+  if (invalid) return { ok: false, error: invalid };
   const repo = basename(mainRepoRoot).replace(/[^A-Za-z0-9_-]+/g, "-");
-  return (config.nameTemplate ?? "{name}").replace(
+  const rendered = (config.path ?? DEFAULT_WORKTREE_PATH).replace(
     /\{(name|repo)\}/g,
     (_, key: string) => (key === "name" ? name : repo),
   );
+  const expanded = rendered.startsWith("~/")
+    ? join(homedir(), rendered.slice(2))
+    : rendered;
+  const path = physicalPath(resolve(mainRepoRoot, expanded));
+  const root = physicalPath(mainRepoRoot);
+  const parent = dirname(path);
+  if (path === root)
+    return {
+      ok: false,
+      error: `Worktree path '${path}' is the main checkout; choose another name or worktree.path`,
+    };
+  if (parent === root)
+    return {
+      ok: false,
+      error:
+        "worktree.path must not put its parent at the main checkout root, because the exclude would cover the repository",
+    };
+  if (path.split(sep).includes(".git") || /[\x00-\x1f\x7f]/.test(path))
+    return {
+      ok: false,
+      error:
+        "worktree.path must not resolve inside .git or contain control characters",
+    };
+  return {
+    ok: true,
+    path,
+    parent,
+    excludePattern: worktreeExcludePattern(root, path),
+  };
+}
+
+/** Reopened checkouts may use an older template; never guess when the current one differs. */
+export function worktreeNameForPath(
+  mainRepoRoot: string,
+  path: string,
+  config: WorktreeConfig = {},
+): string {
+  const repo = basename(mainRepoRoot).replace(/[^A-Za-z0-9_-]+/g, "-");
+  const template = basename(
+    (config.path ?? DEFAULT_WORKTREE_PATH).replace(/\{repo\}/g, repo),
+  );
+  const index = template.indexOf("{name}");
+  const prefix = template.slice(0, index);
+  const suffix = template.slice(index + "{name}".length);
+  const directory = basename(path);
+  if (
+    index >= 0 &&
+    directory.startsWith(prefix) &&
+    directory.endsWith(suffix) &&
+    directory.length > prefix.length + suffix.length
+  ) {
+    return directory.slice(prefix.length, directory.length - suffix.length);
+  }
+  return directory;
 }

@@ -334,7 +334,7 @@ export interface Preferences {
    * may start with `~`. See `resolveClaudeProjectDirs`.
    */
   additionalClaudeConfigDirs?: string[];
-  /** Worktree directory placement and naming preferences. */
+  /** Worktree directory path template; branch names are unaffected. */
   worktree?: WorktreeConfig;
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;

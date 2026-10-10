@@ -10,7 +10,10 @@ import {
   resolvedHomeDir,
 } from "../lib/config";
 import { getPreferences } from "../lib/preferences";
-import { validateWorktreeConfig } from "../lib/worktree-layout";
+import {
+  resolveWorktreePath,
+  validateWorktreeConfig,
+} from "../lib/worktree-layout";
 import { listTmuxClientTtys } from "../lib/tmux-client";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
@@ -70,6 +73,7 @@ import {
   existingWorktreeFor,
   pickIssueWorktree,
   readCheckoutHead,
+  resolveWorktreeName,
   slugForFork,
   slugForIssue,
   slugForPR,
@@ -4854,6 +4858,42 @@ export class DaemonServer {
         }
       }
 
+      const named = resolveWorktreeName(
+        creation.name,
+        sourceFlag ? undefined : (prompt ?? undefined),
+        sourceWorktreeName ?? derivedName,
+      );
+      if (!named.ok)
+        return Response.json({ error: named.error }, { status: 400, headers });
+      const destination = resolveWorktreePath(mainRepoRoot, named.name, layout);
+      if (!destination.ok)
+        return Response.json(
+          { error: destination.error },
+          { status: 400, headers },
+        );
+      if (withChanges && creation.name !== undefined) {
+        const occupied = await existingWorktreeFor(
+          mainRepoRoot,
+          creation.name,
+          undefined,
+          layout,
+        );
+        if (!occupied.ok)
+          return Response.json(
+            { error: occupied.error, reason: "create-failed" },
+            { status: 400, headers },
+          );
+        if (occupied.worktree) {
+          return Response.json(
+            {
+              error: `Worktree '${creation.name}' already exists at ${occupied.worktree.path}; moving changes needs a fresh worktree (pick another name, or leave the name empty to derive one from the prompt).`,
+              reason: "create-failed",
+            },
+            { status: 400, headers },
+          );
+        }
+      }
+
       // A `--pr` spawn checks out the PR's OWN head ref, so its branch is
       // decided here rather than by the worktree's name. Two steps, in this
       // order:
@@ -4918,8 +4958,12 @@ export class DaemonServer {
       // run's sibling worktrees out of the copy list and the counts. The
       // engine calls it too, and it is idempotent, so this is a cheap
       // `check-ignore` on the path that needs it earliest.
-      if (layout.location !== "sibling")
-        await ensureWorktreesExcluded(mainRepoRoot);
+      if (withChanges)
+        await ensureWorktreesExcluded(
+          mainRepoRoot,
+          undefined,
+          destination.path,
+        );
 
       /**
        * The creation engine, adapted to the move module's seam.
@@ -4956,30 +5000,9 @@ export class DaemonServer {
       };
 
       if (withChanges) {
-        // Refused here rather than inside the move, because here nothing has
-        // happened yet: no stash, no worktree, no half-finished anything.
-        // The move itself refuses an opened worktree too (it has to — this
-        // check can lose a race with a concurrent spawn), but by then the
-        // user's changes have been through a stash and back.
-        if (creation.name !== undefined) {
-          const occupied = await existingWorktreeFor(
-            mainRepoRoot,
-            creation.name,
-            undefined,
-            layout,
-          );
-          if (occupied) {
-            return Response.json(
-              {
-                error:
-                  `Worktree '${creation.name}' already exists at ${occupied}; moving changes needs a fresh worktree ` +
-                  `(pick another name, or leave the name empty to derive one from the prompt).`,
-                reason: "create-failed",
-              },
-              { status: 400, headers },
-            );
-          }
-        }
+        // The preflight above refuses known occupied names before setup. The
+        // move repeats the guard after creation because another spawn may
+        // claim the branch in between; that refusal restores the stash.
         // Routed THROUGH the move, never beside it: the module owns the
         // ordering that keeps the work recoverable (stash, create, apply,
         // drop) and the rollback for every failure in it, so creating the
@@ -5128,10 +5151,11 @@ export class DaemonServer {
         );
       }
       if (worktreeInfo?.created) {
+        const cwdArgument = `'${worktreeInfo.path.replace(/'/g, `'\\''`)}'`;
         const retry = moveInfo
-          ? `re-running has nothing left to move, so start an agent there with --cwd '${worktreeInfo.path}' instead`
+          ? `re-running has nothing left to move, so start an agent there with --cwd ${cwdArgument} instead`
           : worktreeRequest.value?.name === undefined
-            ? `re-running will create a numbered sibling, start an agent with --cwd '${worktreeInfo.path}' to reuse this one`
+            ? `re-running will create a numbered sibling, start an agent with --cwd ${cwdArgument} to reuse this one`
             : "re-running the same command will reuse it";
         notes.push(
           `the worktree '${worktreeInfo.name}' was created at ${worktreeInfo.path} and left in place; ${retry}`,

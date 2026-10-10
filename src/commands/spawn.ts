@@ -21,6 +21,7 @@ import {
 import { isSameTmuxServer } from "../lib/tmux-server";
 import { resolveCurrentTmuxClientTty } from "../lib/tmux-client";
 import { BUILTIN_AGENTS } from "../lib/agents";
+import { DEFAULT_WORKTREE_PATH } from "../lib/worktree-layout";
 
 interface SpawnResponse {
   success: boolean;
@@ -216,7 +217,7 @@ export function createSpawnCommand(): Command {
     .option("--detach", "Don't switch to the new pane after spawning")
     .option(
       "--worktree [name]",
-      "Spawn into a git worktree using worktree.location/nameTemplate preferences, creating it if needed (name derived from --prompt, or from the forked session's branch, when omitted)",
+      `Spawn into a git worktree (default path: ${DEFAULT_WORKTREE_PATH}; name derived from --prompt or the forked session's branch when omitted)`,
     )
     .option(
       "--base <ref>",

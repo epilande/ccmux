@@ -7900,6 +7900,130 @@ describe("App worktrees panel (W)", () => {
     }
   });
 
+  it("does not let a main-checkout PR claim a session in a nested worktree", async () => {
+    const childPath = "/code/myapp/custom/deep/layout/child";
+    const deepestPath = `${childPath}/nested/grandchild`;
+    const main = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp",
+      name: "main checkout",
+      branch: "main",
+      isMain: true,
+      tip: "sha-7",
+    };
+    const child = { ...WORKTREE_ROW, path: childPath, name: "child" };
+    const deepest = { ...WORKTREE_ROW, path: deepestPath, name: "grandchild" };
+    const { restore, frame } = await openPanel(
+      [main, child, deepest],
+      { cwd: `${deepestPath}/src`, tmuxPane: "%42" },
+      [],
+      [
+        {
+          number: 7,
+          title: "seven",
+          url: "https://github.com/o/r/pull/7",
+          author: "epilande",
+          isDraft: false,
+          reviewDecision: null,
+          ciStatus: null,
+          headRefName: "feat/seven",
+          headRefOid: "sha-7",
+        },
+      ],
+    );
+    try {
+      setup.mockInput.pressKey("l");
+      expect(await frame()).toContain("checked out in main checkout");
+      setup.mockInput.pressEnter();
+
+      expect(await frame()).toContain("New session in worktree");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("revalidates source-picker activation against refreshed repo roots", async () => {
+    const childPath = "/code/myapp/custom/deep/layout/child";
+    const deepestPath = `${childPath}/nested/grandchild`;
+    const main = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp",
+      name: "main checkout",
+      branch: "main",
+      isMain: true,
+      tip: "sha-7",
+    };
+    const child = { ...WORKTREE_ROW, path: childPath, name: "child" };
+    const deepest = { ...WORKTREE_ROW, path: deepestPath, name: "grandchild" };
+    const { restore, frame } = await openPanel(
+      [main, child, deepest],
+      { cwd: `${deepestPath}/src`, tmuxPane: "%42" },
+      [],
+      [
+        {
+          number: 7,
+          title: "seven",
+          url: "https://github.com/o/r/pull/7",
+          author: "epilande",
+          isDraft: false,
+          reviewDecision: null,
+          ciStatus: null,
+          headRefName: "feat/seven",
+          headRefOid: "sha-7",
+        },
+      ],
+    );
+    try {
+      setup.mockInput.pressKey("q");
+      await frame();
+      setup.mockInput.pressKey("n", { shift: true });
+      expect(await frame()).toContain("#7 seven");
+      setup.mockInput.pressEnter();
+
+      expect(await frame()).toContain("New session in worktree");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+  it("does not confuse a same-prefix sibling with the selected worktree", async () => {
+    const targetPath = "/code/myapp/custom/feature";
+    const siblingPath = `${targetPath}-two`;
+    const { restore, frame } = await openPanel(
+      [
+        { ...WORKTREE_ROW, path: targetPath, name: "feature" },
+        { ...WORKTREE_ROW, path: siblingPath, name: "feature-two" },
+      ],
+      { cwd: `${siblingPath}/src`, tmuxPane: "%42" },
+    );
+    try {
+      setup.mockInput.pressEnter();
+      expect(await frame()).toContain("New session in worktree");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("still lets a worktree hold sessions in unregistered descendants", async () => {
+    const targetPath = "/code/myapp/custom/feature";
+    const { restore: restoreExit } = withExitSpy();
+    const { restore, frame } = await openPanel(
+      [{ ...WORKTREE_ROW, path: targetPath, name: "feature" }],
+      { cwd: `${targetPath}/unregistered/manual/deeper`, tmuxPane: "%42" },
+    );
+    try {
+      setup.mockInput.pressEnter();
+      const shown = await frame();
+      expect(switchToPaneSpy).toHaveBeenCalledWith("%42");
+      expect(shown).not.toContain("New session in worktree");
+    } finally {
+      restoreExit();
+      restore();
+    }
+  });
+
   /**
    * The other side of `381680b`. The panel's `effects` prop is required, so a
    * PANEL test cannot reach the real `open` or `pbcopy` by forgetting; App

@@ -357,24 +357,28 @@ window is named after the worktree when the spawn has one (`fix-flicker`,
 spawns is tellable apart; the name pins tmux's `automatic-rename` off for that
 window.
 
-`--worktree [name]` spawns the agent into a git worktree at
-`<main>/.claude/worktrees/<name>` by default, creating it first if it doesn't
-exist yet. [Worktree preferences](#worktree-placement-and-names) configure
-sibling placement and directory-name prefixes or templates.
-An explicit name is create-or-open: spawning into the same name again reuses
-that worktree rather than failing. Without a name, ccmux derives one from
-`--prompt`'s opening words; a derived name that collides with an existing
-worktree gets a numeric suffix (`-2`, `-3`, ...) instead of reusing it, since
-two different prompts landing in the same worktree would silently merge
-unrelated work. `--base <ref>` sets what the new branch is cut from,
-defaulting to the main checkout's current branch.
+`--worktree [name]` spawns the agent into a git worktree at the configured
+`worktree.path` (default: `<main>/.claude/worktrees/<name>`), creating it first
+if it does not exist yet. [Worktree paths and names](#worktree-paths-and-names)
+explains the path template, safety rules, and exclusion behavior.
+An explicit name is create-or-open: spawning into the same branch again reuses
+its registered worktree, including one created under an earlier path layout.
+Without a name, ccmux derives one from `--prompt`'s opening words; a derived
+name that collides with an existing worktree gets a numeric suffix (`-2`,
+`-3`, ...) instead of reusing it, since two different prompts landing in the
+same worktree would silently merge unrelated work. `--base <ref>` sets what
+the new branch is cut from, defaulting to the main checkout's current branch.
 
-With the nested layout, creating a worktree also adds `**/.claude/worktrees/` to the hosting repo's
-`.git/info/exclude` (the same line Claude Code writes, and the same file —
-local to your clone, never `.gitignore`), so the worktrees don't show up as
-untracked work in the checkout that hosts them. It is added once, only if git
-isn't already ignoring that path, and nothing else in the file is touched.
-Sibling placement does not need this exclusion and leaves the file untouched.
+An explicit name whose branch is checked out in the main checkout is refused:
+use `--cwd` to start an agent there, or switch the main checkout to another
+branch first. PR and issue reuse may still open the main checkout when it
+already holds that source.
+
+When the resolved worktree parent is inside the main checkout, ccmux adds an
+exclude for that parent to the hosting repo's `.git/info/exclude` (the same
+file Claude Code writes, local to your clone, never `.gitignore`). The default
+path keeps the exact `**/.claude/worktrees/` pattern. Paths outside the main
+checkout need no exclusion and leave the file untouched.
 
 ### Spawning on a PR or an Issue
 
@@ -382,17 +386,19 @@ Sibling placement does not need this exclusion and leaves the file untouched.
 spawns the agent into a worktree checked out on the PR's **own branch**, set
 up to track it the way `gh pr checkout` would, including a fork PR, whose
 branch is pointed at the fork's clone URL so `git push` updates the PR instead
-of failing. By default its directory is named `pr-<n>-<head-ref>`, which
+of failing. By default its logical name is `pr-<n>-<head-ref>`, which
 deliberately never collides with the `pr-<n>` directories Claude Code creates
-for its own fetch-only PR checkouts. `worktree.nameTemplate` can customize the
-directory name without changing the PR branch. `--base` is refused here: the
-PR's head is the start point. ccmux records `origin/<base>` as the branch's
-review base, so <kbd>d</kbd> in the picker shows the PR's actual diff.
+for its own fetch-only PR checkouts. `worktree.path` controls only the
+directory; it does not change the PR branch, and the tmux window uses the
+logical worktree name rather than a path-derived basename. `--base` is
+refused here: the PR's head is the start point. ccmux records `origin/<base>`
+as the branch's review base, so <kbd>d</kbd> in the picker shows the PR's
+actual diff.
 
-`--issue <n>` is an ordinary spawn-from-base worktree whose default directory
-name is `issue-<n>-<title>`; `--base` works as usual. The configured name
-template affects only the directory. Issue discovery matches the `issue-<n>`
-branch family rather than relying on that configurable name.
+`--issue <n>` is an ordinary spawn-from-base worktree whose default logical
+name is `issue-<n>-<title>`; `--base` works as usual. The configured path
+affects only the directory. Issue discovery matches the `issue-<n>` branch
+family rather than relying on that configurable path.
 
 Both seed the agent's opening prompt with the title and URL, and your own
 `--prompt` is appended after it. A PR whose branch is already checked out is
@@ -713,37 +719,61 @@ ccmux config list
 | `tmuxSocket`                 | socket path (`/...`) or label                                                | unset              | tmux server to track (daemon restart required; see [Non-default tmux Server](#-non-default-tmux-server))                           |
 | `sidebar.width`              | `10`–`80`                                                                    | `30`               | Sidebar pane width in columns                                                                                                      |
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
-| `worktree.location`           | `nested`, `sibling`                                                            | `nested`            | Place worktree directories under `<main>/.claude/worktrees/` or beside the main checkout                                         |
-| `worktree.nameTemplate`       | `{name}` plus optional `{repo}` placeholders                                  | `{name}`            | Format the worktree directory name only                                                                                           |
+| `worktree.path`              | Path template with `{name}` and optional `{repo}`                                 | `.claude/worktrees/{name}` | Worktree directory template; relative to main checkout, `~/` to home, or absolute |
 
-### Worktree placement and names
+### Worktree paths and names
 
-New worktrees are nested under `<main>/.claude/worktrees/` by default. Set
-`worktree.location` to `sibling` to place them beside the main checkout. The
-`worktree.nameTemplate` preference changes the **directory name only**; it
-defaults to `{name}`. `{repo}` is the main checkout basename, with each run
-outside ASCII letters, digits, `_`, and `-` replaced by `-`; `{name}` is the
-sanitized requested or derived worktree name. A collision number is part of
-`{name}`: `{repo}-wt-{name}-task` becomes `repo-wt-fix-2-task`, not
-`repo-wt-fix-task-2`. Templates must contain exactly one `{name}`;
-`{repo}` is optional and may appear more than once. Outside placeholders,
-only ASCII letters, digits, `_`, and `-` are allowed.
+`worktree.path` defaults to `.claude/worktrees/{name}`. Relative templates
+resolve from the main checkout; a leading `~/` expands from the user's home
+directory, and absolute paths are allowed. `{repo}` expands to the sanitized
+basename of the main checkout (the same safe-component rule used by ccmux's
+worktree directory naming); `{name}` is the logical worktree name. The template
+must contain exactly one `{name}`, in the final path segment. `{repo}` is
+optional and may be repeated.
 
 ```bash
-ccmux config set worktree.location sibling
-ccmux config set worktree.nameTemplate '{repo}-wt-{name}'
-ccmux config set worktree.nameTemplate 'task-{name}'
+ccmux config set worktree.path '.claude/worktrees/{name}'
+ccmux config set worktree.path '../{repo}.{name}'
+ccmux config set worktree.path '../{repo}.worktrees/{name}'
+ccmux config set worktree.path '~/worktrees/{repo}/{name}'
+# Optional sibling style:
+ccmux config set worktree.path '../{repo}-wt-{name}'
 ```
 
-These settings apply to every new worktree, whether created by a regular
-spawn, fork, PR or issue spawn, or **Move changes**. They do not rename or move
-worktrees that already exist, and they never change the git branch name.
-An explicit name reopens the registered checkout holding that branch, even
-after changing the location or template. Issue worktrees are discovered from
-the `issue-<n>` / `issue-<n>-...` branch family;
-custom directory names do not change issue discovery. A legacy branchless
-checkout still uses the existing plain-directory fallback.
+With the main checkout at `/code/app` and the name `fix-sidebar`, the first
+four templates resolve to `/code/app/.claude/worktrees/fix-sidebar`,
+`/code/app.fix-sidebar`, `/code/app.worktrees/fix-sidebar`, and
+`~/worktrees/app/fix-sidebar`, respectively (`~` stands for the user's home
+directory).
 
+Templates with missing or repeated `{name}`, `{name}` outside the final path
+segment, unknown or unmatched placeholders, control characters, or unsupported
+`~user` expansion are refused. A resolved worktree may not be the main
+checkout, be inside `.git`, or have the main checkout itself as its parent;
+the last case would make the exclusion cover the whole repository. For
+example, `../{repo}` has no `{name}`, `{name}/src` puts it outside the final
+segment, `{name}` has the main checkout as its parent, `.git/wt/{name}` is
+inside git metadata, and `../{branch}` uses an unknown placeholder. The target
+is also refused if it resolves to the main checkout, such as `../{name}` with
+name `app`.
+
+The configured path controls directory placement only: branches and tmux
+window names keep the logical worktree name, not a `{repo}`-decorated basename.
+Collision numbers are added to `{name}` (`{repo}-wt-{name}-task` becomes
+`repo-wt-fix-2-task`, not `repo-wt-fix-task-2`). On reopen, ccmux strips the
+current template's literal prefix and suffix from the directory name when they
+match; otherwise it falls back to the directory basename. Changing the
+template never relocates or renames an existing worktree, and a branch already
+checked out in a registered worktree is reused across path layouts. Issue
+worktrees are identified from their `issue-<n>` / `issue-<n>-...` branch; branch
+identity also decides between issue candidates, with directory name used only
+as the fallback for a branchless legacy checkout.
+
+These settings apply to regular, fork, PR and issue spawns, and **Move changes**.
+If a resolved worktree parent is inside the main checkout, ccmux adds an
+exclusion for that parent to the hosting repo's `.git/info/exclude`; the
+default still writes exactly `**/.claude/worktrees/`. A parent outside the main
+checkout needs no exclusion. Neither case edits `.gitignore`.
 For how these search knobs interact, see [Search Mode](#search-mode).
 
 ### 📊 Column Configuration
