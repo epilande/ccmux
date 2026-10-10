@@ -75,15 +75,6 @@ import {
 } from "./worktree-git";
 import type { WorktreeEntry } from "./worktree-git";
 
-/**
- * The line written into the hosting repo's `.git/info/exclude`, matching what
- * Claude Code writes for its own worktrees.
- *
- * Slash-separated regardless of platform: this is a gitignore pattern, not a
- * path, and git does not accept a backslash separator.
- */
-export const WORKTREE_EXCLUDE_PATTERN = "**/.claude/worktrees/";
-
 /** How many words of a prompt a derived slug may use. */
 const SLUG_WORDS = 3;
 /** Hard cap on a derived slug, so a prompt of long words stays usable. */
