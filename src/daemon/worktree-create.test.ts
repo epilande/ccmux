@@ -1499,6 +1499,29 @@ describe("slugForPR / slugForIssue", () => {
 });
 
 describe("pickIssueWorktree", () => {
+  it("preserves the first equal-identity match in a frozen input snapshot", () => {
+    const first = Object.freeze({
+      name: "decorated-first",
+      branch: "issue-144-fix",
+      path: "/first",
+    });
+    const second = Object.freeze({
+      name: "short",
+      branch: "issue-144-fix",
+      path: "/second",
+    });
+    const rows = Object.freeze([
+      Object.freeze({
+        name: "issue-144-other",
+        branch: "feature/unrelated",
+        path: "/other",
+      }),
+      first,
+      second,
+    ]);
+    expect(pickIssueWorktree(144, rows)).toBe(first);
+  });
+
   it("orders issue matches by branch identity rather than directory length", () => {
     const rows = [
       { name: "app", branch: "issue-144-a-long-title", path: "/main" },

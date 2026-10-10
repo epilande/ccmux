@@ -17,6 +17,24 @@ export interface WorktreeConfig {
   path?: string;
 }
 
+export type WorktreePathResolution =
+  | { ok: true; path: string; parent: string; excludePattern: string | null }
+  | { ok: false; error: string };
+
+/** Pure interpolation; null preserves the name hole for reopened-name decoding. */
+function renderWorktreeTemplate(
+  mainRepoRoot: string,
+  name: string | null,
+  config: WorktreeConfig,
+): string {
+  const repo = basename(mainRepoRoot).replace(/[^A-Za-z0-9_-]+/g, "-");
+  const template = config.path ?? DEFAULT_WORKTREE_PATH;
+  if (name === null) return template.replace(/\{repo\}/g, repo);
+  return template.replace(/\{(name|repo)\}/g, (_, key: string) =>
+    key === "name" ? name : repo,
+  );
+}
+
 /** A logical name occurs once in the final component; all other tokens are known. */
 export function isWorktreePathTemplate(value: unknown): value is string {
   if (
@@ -63,13 +81,8 @@ function physicalPath(path: string): string {
   }
 }
 
-/** Literal, rooted ignores for custom parents; retain Claude's default pattern exactly. */
-export function worktreeExcludePattern(
-  mainRepoRoot: string,
-  path: string,
-): string | null {
-  const root = physicalPath(mainRepoRoot);
-  const parent = physicalPath(dirname(path));
+/** Pure policy over already-canonical root/parent values. */
+function excludePatternForParent(root: string, parent: string): string | null {
   const inside = relative(root, parent);
   if (
     !inside ||
@@ -83,26 +96,21 @@ export function worktreeExcludePattern(
   return `/${posix.replace(/[\\*?\[\]#! ]/g, "\\$&")}/`;
 }
 
-/** One shared resolution/validation contract for spawning and Move changes preflight. */
-export function resolveWorktreePath(
+/** Effectful adapter: take a filesystem snapshot, then derive its ignore policy. */
+export function worktreeExcludePattern(
   mainRepoRoot: string,
-  name: string,
-  config: WorktreeConfig = {},
-):
-  | { ok: true; path: string; parent: string; excludePattern: string | null }
-  | { ok: false; error: string } {
-  const invalid = validateWorktreeConfig(config);
-  if (invalid) return { ok: false, error: invalid };
-  const repo = basename(mainRepoRoot).replace(/[^A-Za-z0-9_-]+/g, "-");
-  const rendered = (config.path ?? DEFAULT_WORKTREE_PATH).replace(
-    /\{(name|repo)\}/g,
-    (_, key: string) => (key === "name" ? name : repo),
-  );
-  const expanded = rendered.startsWith("~/")
-    ? join(homedir(), rendered.slice(2))
-    : rendered;
-  const path = physicalPath(resolve(mainRepoRoot, expanded));
+  path: string,
+): string | null {
   const root = physicalPath(mainRepoRoot);
+  const parent = physicalPath(dirname(path));
+  return excludePatternForParent(root, parent);
+}
+
+/** Pure guards and metadata derivation; no ambient state or filesystem access. */
+function validateResolvedPath(
+  root: string,
+  path: string,
+): WorktreePathResolution {
   const parent = dirname(path);
   if (path === root)
     return {
@@ -125,8 +133,25 @@ export function resolveWorktreePath(
     ok: true,
     path,
     parent,
-    excludePattern: worktreeExcludePattern(root, path),
+    excludePattern: excludePatternForParent(root, parent),
   };
+}
+
+/** One shared resolution/validation contract for spawning and Move changes preflight. */
+export function resolveWorktreePath(
+  mainRepoRoot: string,
+  name: string,
+  config: WorktreeConfig = {},
+): WorktreePathResolution {
+  const invalid = validateWorktreeConfig(config);
+  if (invalid) return { ok: false, error: invalid };
+  const rendered = renderWorktreeTemplate(mainRepoRoot, name, config);
+  const expanded = rendered.startsWith("~/")
+    ? join(homedir(), rendered.slice(2))
+    : rendered;
+  const path = physicalPath(resolve(mainRepoRoot, expanded));
+  const root = physicalPath(mainRepoRoot);
+  return validateResolvedPath(root, path);
 }
 
 /** Reopened checkouts may use an older template; never guess when the current one differs. */
@@ -135,10 +160,7 @@ export function worktreeNameForPath(
   path: string,
   config: WorktreeConfig = {},
 ): string {
-  const repo = basename(mainRepoRoot).replace(/[^A-Za-z0-9_-]+/g, "-");
-  const template = basename(
-    (config.path ?? DEFAULT_WORKTREE_PATH).replace(/\{repo\}/g, repo),
-  );
+  const template = basename(renderWorktreeTemplate(mainRepoRoot, null, config));
   const index = template.indexOf("{name}");
   const prefix = template.slice(0, index);
   const suffix = template.slice(index + "{name}".length);

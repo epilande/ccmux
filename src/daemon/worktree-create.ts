@@ -231,15 +231,23 @@ export function isIssueWorktree(
  */
 export function pickIssueWorktree<
   T extends { name: string; branch?: string | null },
->(number: number, worktrees: T[]): T | null {
-  const matches = worktrees.filter((row) => isIssueWorktree(row, number));
-  if (matches.length === 0) return null;
-  const [first] = [...matches].sort((a, b) => {
-    const left = a.branch ?? a.name;
-    const right = b.branch ?? b.name;
-    return left.length - right.length || left.localeCompare(right);
-  });
-  return first ?? null;
+>(number: number, worktrees: readonly T[]): T | null {
+  // A single pure fold: local accumulation never mutates the caller's rows.
+  let first: T | null = null;
+  let firstKey = "";
+  for (const row of worktrees) {
+    if (!isIssueWorktree(row, number)) continue;
+    const key = row.branch ?? row.name;
+    if (
+      first === null ||
+      key.length < firstKey.length ||
+      (key.length === firstKey.length && key.localeCompare(firstKey) < 0)
+    ) {
+      first = row;
+      firstKey = key;
+    }
+  }
+  return first;
 }
 
 /**
@@ -1181,16 +1189,15 @@ async function findExistingCheckout(
   git: GitRun,
 ): Promise<ExistingCheckout> {
   const entries = await listWorktrees(mainRepoRoot, git);
-  const worktree =
-    entries.find((entry) => !entry.bare && entry.branch === branch) ??
-    (targetPath === null
-      ? null
-      : entries.find(
-          (entry) =>
-            !entry.bare &&
-            normalizePath(entry.path) === normalizePath(targetPath),
-        )) ??
-    null;
+  let worktree =
+    entries.find((entry) => !entry.bare && entry.branch === branch) ?? null;
+  if (worktree === null && targetPath !== null) {
+    const target = normalizePath(targetPath);
+    worktree =
+      entries.find(
+        (entry) => !entry.bare && normalizePath(entry.path) === target,
+      ) ?? null;
+  }
   if (worktree?.isMain && !allowMain) {
     return {
       ok: false,
