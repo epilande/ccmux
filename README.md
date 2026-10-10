@@ -721,6 +721,8 @@ ccmux config list
 | `sidebar.position`           | `left`, `right`                                                              | `left`             | Which side of the window to place the sidebar                                                                                      |
 | `worktree.path`              | Path template with `{name}` and optional `{repo}`                                 | `.claude/worktrees/{name}` | Worktree directory template; relative to main checkout, `~/` to home, or absolute |
 
+For how these search knobs interact, see [Search Mode](#search-mode).
+
 ### Worktree paths and names
 
 `worktree.path` defaults to `.claude/worktrees/{name}`. Relative templates
@@ -732,12 +734,10 @@ must contain exactly one `{name}`, in the final path segment. `{repo}` is
 optional and may be repeated.
 
 ```bash
-ccmux config set worktree.path '.claude/worktrees/{name}'
-ccmux config set worktree.path '../{repo}.{name}'
-ccmux config set worktree.path '../{repo}.worktrees/{name}'
-ccmux config set worktree.path '~/worktrees/{repo}/{name}'
-# Optional sibling style:
-ccmux config set worktree.path '../{repo}-wt-{name}'
+ccmux config set worktree.path '.claude/worktrees/{name}'    # default, inside the repo
+ccmux config set worktree.path '../{repo}.{name}'            # beside the repo
+ccmux config set worktree.path '../{repo}.worktrees/{name}'  # beside the repo, grouped
+ccmux config set worktree.path '~/worktrees/{repo}/{name}'   # one central directory
 ```
 
 With the main checkout at `/code/app` and the name `fix-sidebar`, the first
@@ -762,8 +762,8 @@ name `app`.
 
 The configured path controls directory placement only: branches and tmux
 window names keep the logical worktree name, not a `{repo}`-decorated basename.
-Collision numbers are added to `{name}` (`{repo}-wt-{name}-task` becomes
-`repo-wt-fix-2-task`, not `repo-wt-fix-task-2`). On reopen, ccmux strips the
+Collision numbers are added to `{name}` (`../{repo}-wt-{name}-task` becomes
+`app-wt-fix-2-task`, not `app-wt-fix-task-2`). On reopen, ccmux strips the
 current template's literal prefix and suffix from the directory name when they
 match; otherwise it falls back to the directory basename. Changing the
 template never relocates or renames an existing worktree, and a branch already
@@ -779,7 +779,6 @@ If a resolved worktree parent is inside the main checkout, ccmux adds an
 exclusion for that parent to the hosting repo's `.git/info/exclude`; the
 default still writes exactly `**/.claude/worktrees/`. A parent outside the main
 checkout needs no exclusion. Neither case edits `.gitignore`.
-For how these search knobs interact, see [Search Mode](#search-mode).
 
 ### 📊 Column Configuration
 
