@@ -55,6 +55,16 @@ async function runConfigSet(
   }
 }
 
+async function runConfigGet(key: string): Promise<ExitError | null> {
+  try {
+    await createConfigCommand().parseAsync(["get", key], { from: "user" });
+    return null;
+  } catch (err) {
+    if (err instanceof ExitError) return err;
+    throw err;
+  }
+}
+
 describe("getNestedValue", () => {
   const prefs: Preferences = {
     showPreview: true,
@@ -376,6 +386,74 @@ describe("config set notifications.*", () => {
   });
 });
 
+describe("config set worktree.path", () => {
+  it("sets the path template without replacing unrelated preferences", async () => {
+    store = {
+      showPreview: true,
+      notifications: { enabled: true },
+      worktree: { path: ".claude/worktrees/{name}" },
+    };
+    const restoreExit = withExitSentinel();
+    try {
+      expect(
+        await runConfigSet("worktree.path", "../{repo}.worktrees/{name}"),
+      ).toBeNull();
+      expect(store).toEqual({
+        showPreview: true,
+        notifications: { enabled: true },
+        worktree: { path: "../{repo}.worktrees/{name}" },
+      });
+    } finally {
+      restoreExit();
+    }
+  });
+
+  it("rejects invalid templates and legacy keys without changing preferences", async () => {
+    store = {
+      showPreview: true,
+      worktree: { path: ".claude/worktrees/{name}" },
+    };
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      const invalidSettings: [string, string][] = [
+        ["worktree.path", "../{repo}"],
+        ["worktree.path", "{repo}-{name}-{name}"],
+        ["worktree.path", "{name}/src"],
+        ["worktree.path", "../{branch}"],
+        ["worktree.path", "{name"],
+        ["worktree.location", "sibling"],
+        ["worktree.nameTemplate", "task-{name}"],
+      ];
+      for (const [key, value] of invalidSettings) {
+        expect((await runConfigSet(key, value))?.code).toBe(1);
+        expect(store).toEqual({
+          showPreview: true,
+          worktree: { path: ".claude/worktrees/{name}" },
+        });
+      }
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe("config get rejects obsolete worktree keys", () => {
+  it("refuses keys that are no longer supported", async () => {
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    const restoreExit = withExitSentinel();
+    try {
+      for (const key of ["worktree.location", "worktree.nameTemplate"]) {
+        expect((await runConfigGet(key))?.code).toBe(1);
+      }
+    } finally {
+      restoreExit();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
 describe("KNOWN_KEYS.tmuxSocket", () => {
   const spec = KNOWN_KEYS.tmuxSocket!;
 
@@ -445,12 +523,9 @@ describe("KNOWN_KEYS.reviewHandback", () => {
   });
 });
 
-// completableConfigKeys() is a hand-maintained literal array (KNOWN_KEYS plus
-// eight hardcoded dotted strings); the "set" action's acceptance of those
-// dotted keys is control flow (an if/else for sidebar.*, a switch for
-// notifications.*), not a shared data structure. Nothing else asserts the two
-// stay in sync, so a new notifications.<key> case can ship uncompletable with
-// every other test still green. This suite fails the moment they drift.
+// completableConfigKeys() is a hand-maintained list of KNOWN_KEYS and dotted
+// setting leaves. This suite ensures every offered key is accepted by config
+// set, so additions cannot silently become uncompletable.
 describe("completableConfigKeys() parity with config set", () => {
   // Signals `config set` prints only on the "I don't recognize this key"
   // paths (top-level, sidebar.<key>, notifications.<key>). A value-validation
@@ -460,6 +535,7 @@ describe("completableConfigKeys() parity with config set", () => {
     "Valid keys:",
     "Valid sidebar keys:",
     "Valid notifications keys:",
+    "Valid worktree keys:",
   ] as const;
 
   // A value `config set` should actually accept for each completable key, so
@@ -478,6 +554,8 @@ describe("completableConfigKeys() parity with config set", () => {
         return "50"; // integer 10-500
       case "command":
         return "claude"; // non-empty string
+      case "worktree.path":
+        return "../{repo}-wt-{name}";
       case "tmuxSocket":
         return "work"; // non-empty string
       case "additionalClaudeConfigDirs":

@@ -2,11 +2,9 @@
  * Creating a worktree to spawn an agent into (issue #69).
  *
  * The counterpart to `worktree-prune.ts`: that module ends a worktree's life,
- * this one starts it. They share `worktree-git.ts` for plumbing and the same
- * placement convention, `<main>/.claude/worktrees/<name>`, which is where
- * Claude Code puts the worktrees it creates for itself. Matching it keeps the
- * whole population under one layout, so the prune scan, the picker's grouping
- * and any existing tooling see one kind of worktree rather than two.
+ * this one starts it. The default matches Claude Code so existing prune and
+ * grouping workflows keep working; custom paths use the same Git registry
+ * and file-setup policy rather than introducing a second kind of checkout.
  *
  * Naming is mechanical and always will be: a slug from an explicit name or
  * from the first words of the prompt. No model is consulted, deliberately,
@@ -54,7 +52,20 @@ import {
   symlinkSync,
 } from "node:fs";
 import { cp, rmdir } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative as relativePath,
+  resolve,
+} from "node:path";
+import {
+  resolveWorktreePath,
+  worktreeExcludePattern,
+  worktreeNameForPath,
+  type WorktreeConfig,
+} from "../lib/worktree-layout";
 import {
   listWorktrees,
   normalizePath,
@@ -62,9 +73,7 @@ import {
   runGit,
   type GitRun,
 } from "./worktree-git";
-
-/** Where worktrees live, relative to the main checkout. */
-export const WORKTREE_DIR = join(".claude", "worktrees");
+import type { WorktreeEntry } from "./worktree-git";
 
 /**
  * The line written into the hosting repo's `.git/info/exclude`, matching what
@@ -206,24 +215,39 @@ export function isIssueWorktreeName(name: string, number: number): boolean {
   return name === exact || name.startsWith(`${exact}-`);
 }
 
+/** Directory templates must not hide an issue's unchanged branch identity. */
+export function isIssueWorktree(
+  row: { name: string; branch?: string | null },
+  number: number,
+): boolean {
+  return isIssueWorktreeName(row.branch ?? row.name, number);
+}
+
 /**
  * The worktree a previous `--issue <n>` spawn cut, if any.
  *
- * The SHORTEST name wins — that is the first spawn — matching
+ * The shortest effective identity (`branch ?? name`) wins, matching
  * `worktreeForIssue` in the source picker so Enter and `POST /spawn` agree.
  */
-export function pickIssueWorktree<T extends { name: string }>(
-  number: number,
-  worktrees: T[],
-): T | null {
-  const matches = worktrees.filter((row) =>
-    isIssueWorktreeName(row.name, number),
-  );
-  if (matches.length === 0) return null;
-  const [first] = [...matches].sort(
-    (a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name),
-  );
-  return first ?? null;
+export function pickIssueWorktree<
+  T extends { name: string; branch?: string | null },
+>(number: number, worktrees: readonly T[]): T | null {
+  // A single pure fold: local accumulation never mutates the caller's rows.
+  let first: T | null = null;
+  let firstKey = "";
+  for (const row of worktrees) {
+    if (!isIssueWorktree(row, number)) continue;
+    const key = row.branch ?? row.name;
+    if (
+      first === null ||
+      key.length < firstKey.length ||
+      (key.length === firstKey.length && key.localeCompare(firstKey) < 0)
+    ) {
+      first = row;
+      firstKey = key;
+    }
+  }
+  return first;
 }
 
 /**
@@ -310,8 +334,14 @@ export function resolveWorktreeName(
 }
 
 /** Absolute path of the worktree a name resolves to. */
-export function worktreePathFor(mainRepoRoot: string, name: string): string {
-  return join(mainRepoRoot, WORKTREE_DIR, name);
+export function worktreePathFor(
+  mainRepoRoot: string,
+  name: string,
+  layout: WorktreeConfig = {},
+): string {
+  const resolved = resolveWorktreePath(mainRepoRoot, name, layout);
+  if (!resolved.ok) throw new Error(resolved.error);
+  return resolved.path;
 }
 
 /**
@@ -389,6 +419,8 @@ export interface WorktreeCreation {
 
 export interface CreateWorktreeOptions {
   git?: GitRun;
+  /** Captured by the server; direct engine callers use deterministic defaults. */
+  layout?: WorktreeConfig;
   /** Injectable for tests; defaults to the real filesystem work. */
   applyFileSetup?: (
     mainRepoRoot: string,
@@ -661,10 +693,11 @@ async function firstFreeDerivedName(
   slug: string,
   git: GitRun,
   branchOverridden: boolean,
+  layout: WorktreeConfig,
 ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
   for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS; attempt++) {
     const candidate = attempt === 1 ? slug : `${slug}-${attempt}`;
-    const path = worktreePathFor(mainRepoRoot, candidate);
+    const path = worktreePathFor(mainRepoRoot, candidate, layout);
     if (existsSync(path) || isSymlink(path)) continue;
     if (await isRegisteredWorktree(mainRepoRoot, path, git)) continue;
     if (
@@ -823,7 +856,7 @@ export async function createWorktree(
      * still found.
      */
     reuseExisting?: (
-      worktrees: { name: string; path: string }[],
+      worktrees: { name: string; path: string; branch: string | null }[],
     ) => { name: string; path: string } | null;
   },
   options: CreateWorktreeOptions = {},
@@ -832,6 +865,7 @@ export async function createWorktree(
 > {
   const git = options.git ?? runGit;
   const fileSetup = options.applyFileSetup ?? applyWorktreeFileSetup;
+  const layout = options.layout ?? {};
 
   const named = resolveWorktreeName(
     request.name,
@@ -839,21 +873,17 @@ export async function createWorktree(
     request.derivedName,
   );
   if (!named.ok) return named;
+  const destination = resolveWorktreePath(mainRepoRoot, named.name, layout);
+  if (!destination.ok) return destination;
 
   return withRepoLock(mainRepoRoot, async () => {
-    // Before anything looks at the directory, so the very first worktree in a
-    // repo is already invisible to git by the time it exists. Idempotent, so
-    // running it on the open path too costs one `check-ignore` and heals a
-    // repo whose worktrees predate this.
-    await ensureWorktreesExcluded(mainRepoRoot, git);
-
     const openIfPresent = async (
       path: string,
-      name: string,
     ): Promise<{ ok: true; result: WorktreeCreation } | null> => {
       if (!existsSync(path)) return null;
       if (!(await isRegisteredWorktree(mainRepoRoot, path, git))) return null;
       const branch = await currentBranch(path, git);
+      const name = worktreeNameForPath(mainRepoRoot, path, layout);
       return {
         ok: true as const,
         result: {
@@ -868,24 +898,46 @@ export async function createWorktree(
       };
     };
 
-    // A `--pr` spawn names the branch itself. git will not check the same
-    // branch out in two worktrees, so if it is already here, OPEN that
-    // checkout rather than numbering a sibling that git would refuse.
-    if (request.branch !== undefined) {
-      for (const entry of await listWorktrees(mainRepoRoot, git)) {
-        if (entry.bare || entry.branch !== request.branch) continue;
-        const opened = await openIfPresent(entry.path, basename(entry.path));
+    // Git cannot check out a branch twice. Reopen linked explicit-name and PR
+    // checkouts across layout changes, but only PR overrides may open main.
+    const existingBranch =
+      request.branch ?? (named.derived ? undefined : named.name);
+    if (existingBranch !== undefined) {
+      const existing = await findExistingCheckout(
+        mainRepoRoot,
+        existingBranch,
+        named.derived ? null : destination.path,
+        request.branch !== undefined,
+        git,
+      );
+      if (!existing.ok) return existing;
+      if (existing.worktree) {
+        await ensureWorktreesExcluded(
+          mainRepoRoot,
+          git,
+          existing.worktree.path,
+        );
+        const opened = await openIfPresent(existing.worktree.path);
         if (opened) return opened;
+        return {
+          ok: false as const,
+          error: `Worktree '${existingBranch}' is registered but its directory is missing; run 'git worktree prune' first`,
+        };
       }
     }
 
     if (request.reuseExisting) {
       const listed = (await listWorktrees(mainRepoRoot, git))
         .filter((entry) => !entry.bare)
-        .map((entry) => ({ name: basename(entry.path), path: entry.path }));
+        .map((entry) => ({
+          name: basename(entry.path),
+          path: entry.path,
+          branch: entry.branch,
+        }));
       const hit = request.reuseExisting(listed);
       if (hit) {
-        const opened = await openIfPresent(hit.path, hit.name);
+        await ensureWorktreesExcluded(mainRepoRoot, git, hit.path);
+        const opened = await openIfPresent(hit.path);
         if (opened) return opened;
       }
     }
@@ -898,12 +950,17 @@ export async function createWorktree(
           named.name,
           git,
           request.branch !== undefined,
+          layout ?? {},
         )
       : { ok: true as const, name: named.name };
     if (!resolved.ok) return resolved;
-    const name = resolved.name;
-    const branchName = request.branch ?? name;
-    const path = worktreePathFor(mainRepoRoot, name);
+    const slug = resolved.name;
+    const name = slug;
+    const branchName = request.branch ?? slug;
+    const resolvedPath = resolveWorktreePath(mainRepoRoot, slug, layout);
+    if (!resolvedPath.ok) return resolvedPath;
+    const path = resolvedPath.path;
+    await ensureWorktreesExcluded(mainRepoRoot, git, path);
 
     // Registered with git already: open it, whatever is on disk.
     const registered = await isRegisteredWorktree(mainRepoRoot, path, git);
@@ -915,12 +972,13 @@ export async function createWorktree(
         };
       }
       const branch = await currentBranch(path, git);
+      const reopenedName = worktreeNameForPath(mainRepoRoot, path, layout);
       return {
         ok: true as const,
         result: {
           path,
-          name,
-          branch: branch ?? name,
+          name: reopenedName,
+          branch: branch ?? reopenedName,
           created: false,
           branchCreated: false,
           symlinked: [],
@@ -1004,7 +1062,7 @@ export async function createWorktree(
           (await localBranchExists(mainRepoRoot, branchName, git)))
         : named.derived
           ? false
-          : await localBranchExists(mainRepoRoot, name, git);
+          : await localBranchExists(mainRepoRoot, branchName, git);
     const args = reusingBranch
       ? ["worktree", "add", path, branchName]
       : ["worktree", "add", "-b", branchName, path, based.base];
@@ -1078,11 +1136,14 @@ export async function createWorktree(
 export async function ensureWorktreesExcluded(
   mainRepoRoot: string,
   git: GitRun = runGit,
+  destination: string = worktreePathFor(mainRepoRoot, "exclude-probe"),
 ): Promise<boolean> {
+  const pattern = worktreeExcludePattern(mainRepoRoot, destination);
+  if (!pattern) return false;
   const ignored = await git(mainRepoRoot, [
     "check-ignore",
     "-q",
-    `${WORKTREE_DIR}/`,
+    `${relativePath(normalizePath(mainRepoRoot), dirname(destination))}/`,
   ]);
   // 0 = already ignored, nothing to do. 1 = not ignored. Anything else (128,
   // 127) means we could not ask, and writing on a guess is how a tool ends up
@@ -1108,36 +1169,62 @@ export async function ensureWorktreesExcluded(
     // them back untouched.
     const separator = existing === "" || existing.endsWith("\n") ? "" : "\n";
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, `${separator}${WORKTREE_EXCLUDE_PATTERN}\n`);
+    appendFileSync(path, `${separator}${pattern}\n`);
     return true;
   } catch {
     return false;
   }
 }
 
-/**
- * The path an EXPLICIT worktree name already occupies, or null.
- *
- * Exists for the one caller that must not get create-or-open:
- * `--with-changes` moves uncommitted work into the worktree and rolls the
- * worktree back if anything goes wrong, so it needs a checkout nothing else
- * owns. Asking here, before a single file has been touched, turns "that name
- * is taken" into an argument error rather than something discovered halfway
- * through a move.
- *
- * A name the engine would reject outright answers null: reporting it as
- * occupied would be wrong, and {@link createWorktree} says why it is bad far
- * better than this can.
- */
+type ExistingCheckout =
+  | { ok: true; worktree: WorktreeEntry | null }
+  | { ok: false; error: string };
+
+/** Both ordinary creation and Move changes preflight must make this same decision. */
+async function findExistingCheckout(
+  mainRepoRoot: string,
+  branch: string,
+  targetPath: string | null,
+  allowMain: boolean,
+  git: GitRun,
+): Promise<ExistingCheckout> {
+  const entries = await listWorktrees(mainRepoRoot, git);
+  let worktree =
+    entries.find((entry) => !entry.bare && entry.branch === branch) ?? null;
+  if (worktree === null && targetPath !== null) {
+    const target = normalizePath(targetPath);
+    worktree =
+      entries.find(
+        (entry) => !entry.bare && normalizePath(entry.path) === target,
+      ) ?? null;
+  }
+  if (worktree?.isMain && !allowMain) {
+    return {
+      ok: false,
+      error: `'${branch}' is checked out in the main checkout (${worktree.path}); switch it to another branch, or start an agent there with --cwd`,
+    };
+  }
+  return { ok: true, worktree };
+}
+
+/** Detect occupied destinations, including old-layout branches, before any stash. */
 export async function existingWorktreeFor(
   mainRepoRoot: string,
   name: string,
   git: GitRun = runGit,
-): Promise<string | null> {
+  layout: WorktreeConfig = {},
+): Promise<ExistingCheckout> {
   const named = resolveWorktreeName(name, undefined);
-  if (!named.ok) return null;
-  const path = worktreePathFor(mainRepoRoot, named.name);
-  return (await isRegisteredWorktree(mainRepoRoot, path, git)) ? path : null;
+  if (!named.ok) return named;
+  const destination = resolveWorktreePath(mainRepoRoot, named.name, layout);
+  if (!destination.ok) return destination;
+  return findExistingCheckout(
+    mainRepoRoot,
+    named.name,
+    destination.path,
+    false,
+    git,
+  );
 }
 
 /**

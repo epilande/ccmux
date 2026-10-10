@@ -20,7 +20,7 @@ import type {
   WorktreeRow,
 } from "../../daemon/worktree-list";
 import {
-  isIssueWorktreeName,
+  isIssueWorktree,
   pickIssueWorktree,
 } from "../../daemon/worktree-create";
 import { theme } from "../theme";
@@ -104,11 +104,9 @@ export interface SourceRepo {
  * The worktree a previous spawn cut for issue `number`, and how many others
  * exist for the same issue.
  *
- * By NAME, which is safe here and is not safe for a PR. The name is ccmux's
- * own: `slugForIssue` derives `issue-<n>` or `issue-<n>-<slug>`, so a match
- * proves this tool made that directory for that issue. A PR's branch name is
- * chosen by whoever opened it, which is why `checkoutHolding` insists on a
- * SHA instead.
+ * The unchanged issue branch is authoritative even when a directory template
+ * adds a prefix or suffix. A detached legacy checkout falls back to its name.
+ * PRs still require a SHA, since their branch names are chosen by the author.
  *
  * The prefix is family-EXACT and never a bare `startsWith`: `issue-14` would
  * otherwise claim `issue-144-foo`. The separator is part of the prefix, the
@@ -127,7 +125,7 @@ export function worktreeForIssue(
   const first = pickIssueWorktree(number, worktrees);
   if (!first) return null;
   const siblings =
-    worktrees.filter((row) => isIssueWorktreeName(row.name, number)).length - 1;
+    worktrees.filter((row) => isIssueWorktree(row, number)).length - 1;
   return { row: first, siblings };
 }
 

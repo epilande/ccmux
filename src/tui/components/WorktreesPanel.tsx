@@ -13,6 +13,7 @@ import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { MouseButton } from "@opentui/core";
 import { basename, resolve, sep } from "node:path";
 import { getDaemonUrl } from "../../lib/config";
+import { normalizePath } from "../../daemon/worktree-git";
 import type {
   PRState,
   PruneCandidate,
@@ -329,6 +330,9 @@ interface WorktreesPanelProps {
     existingWorktree: string | null;
     panelRepo: string | null;
     panelScope: string | null;
+    /** Registered paths from this destination's repo, used to resolve
+     *  ownership when one checkout is nested inside another. */
+    sameRepoRegisteredRoots: readonly string[];
     /**
      * The row's KEY, when it is not the worktree path App would infer.
      *
@@ -418,62 +422,40 @@ export function partitionSelection(
 }
 
 /**
- * Whether `candidate` is the worktree at `worktreePath` or a directory inside
- * it.
+ * Whether `candidate` belongs to `worktreePath`, rather than a registered
+ * checkout nested below it. A session may `cd` anywhere inside its checkout,
+ * so containment includes the root itself and descendant directories.
  *
- * The panel's rows carry the sessions the daemon reported when the list was
- * FETCHED, and Enter acts seconds later. Re-deciding "is this worktree
- * occupied" at Enter time means asking the live session list, and a session's
- * directory is only a path — an agent that has `cd`-ed into a subdirectory is
- * still in that worktree, so this is a prefix test and not equality.
+ * The separator is part of the prefix: `/wt/feature-two` is a sibling, not
+ * a child of `/wt/feature`. Registered paths are supplied by the worktree
+ * snapshot for this same repo. The deepest registered root containing the
+ * candidate owns it, regardless of where the layout placed that checkout.
+ * Unregistered descendants remain part of the containing worktree.
  *
- * The separator is part of the prefix on purpose: a plain `startsWith` makes
- * `/wt/feature-two` look like it lives inside `/wt/feature`.
- *
- * A descendant that crosses into a NESTED checkout is not held: ccmux's own
- * worktrees live under the main checkout at `.claude/worktrees/<name>`, so a
- * main checkout on a PR's head would otherwise claim a session working in a
- * different branch. The boundary is the path convention rather than an fs
- * walk for `.git` files, so one nested by hand elsewhere stays claimable.
- *
- * Compares resolved paths, not real ones. Both sides come from the same
- * daemon (git's worktree list and the pane scan), so they agree in practice;
- * a symlinked checkout reached by two different absolute paths would not
- * match, and would fall through to the spawn dialog.
+ * Canonicalize existing paths so symlinked pane/session directories compare
+ * with Git's real paths. Missing paths retain lexical resolution.
  */
 export function worktreeHoldsPath(
   worktreePath: string,
   candidate: string,
+  sameRepoRegisteredRoots: readonly string[],
 ): boolean {
   if (!candidate) return false;
-  const root = resolve(worktreePath);
-  const path = resolve(candidate);
-  if (path === root) return true;
-  if (!path.startsWith(root + sep)) return false;
-  return !crossesNestedCheckout(path.slice(root.length + sep.length));
-}
+  const root = resolve(normalizePath(worktreePath));
+  const path = resolve(normalizePath(candidate));
+  if (path !== root && !path.startsWith(root + sep)) return false;
 
-/**
- * The parent every nested checkout lives under, as SEGMENTS. Restated from
- * the `**\/.claude/worktrees/` `ensureWorktreesExcluded` writes, which the
- * TUI cannot import without dragging daemon dependencies along.
- */
-const NESTED_CHECKOUT_SEGMENTS = [".claude", "worktrees"];
-
-/** Whether a root's descendant passes through one: the two segments
- *  consecutive at any depth, with something BEYOND them, since the container
- *  itself belongs to the tree that holds it. */
-function crossesNestedCheckout(relative: string): boolean {
-  const segments = relative.split(sep);
-  for (let i = 0; i + 2 < segments.length; i += 1) {
+  let deepest = root;
+  for (const registered of sameRepoRegisteredRoots) {
+    const registeredRoot = resolve(normalizePath(registered));
     if (
-      segments[i] === NESTED_CHECKOUT_SEGMENTS[0] &&
-      segments[i + 1] === NESTED_CHECKOUT_SEGMENTS[1]
+      registeredRoot.length > deepest.length &&
+      (path === registeredRoot || path.startsWith(registeredRoot + sep))
     ) {
-      return true;
+      deepest = registeredRoot;
     }
   }
-  return false;
+  return deepest === root;
 }
 
 /**
@@ -2833,6 +2815,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    * directory to itself, because a second session in the same worktree is
    * deliberately not a thing this panel offers.
    */
+  function registeredPaths(repoRoot: string): string[] {
+    return (
+      repos()
+        .find((repo) => repo.repoRoot === repoRoot)
+        ?.worktrees.map((row) => row.path) ?? []
+    );
+  }
+
   function activateRow(entry: PanelRow): void {
     const origin = { panelRepo: props.repo, panelScope: repoFilter() };
     if (entry.kind === "pr") {
@@ -2844,6 +2834,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         props.onSpawn({
           cwd: entry.checkedOutPath,
           existingWorktree: entry.checkedOutPath,
+          sameRepoRegisteredRoots: registeredPaths(entry.repoRoot),
           // The PR row's own key, not the worktree's path. The destination
           // is the worktree; the ROW is this PR, and a cancelled dialog has
           // to come back to it — in the PR view, which `initialView` derives
@@ -2882,11 +2873,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // The opening repo AND the live filter travel with the action: Tab's
     // rescope is panel-local, so a return that read the store instead would
     // land on the narrow view the user had already widened away from.
-    props.onSpawn(
-      entry.row.isMain
-        ? { cwd: entry.row.repoRoot, existingWorktree: null, ...origin }
-        : { cwd: entry.row.path, existingWorktree: entry.row.path, ...origin },
-    );
+    props.onSpawn({
+      cwd: entry.row.isMain ? entry.row.repoRoot : entry.row.path,
+      existingWorktree: entry.row.isMain ? null : entry.row.path,
+      sameRepoRegisteredRoots: registeredPaths(entry.row.repoRoot),
+      ...origin,
+    });
   }
 
   function copyPath(path: string): void {

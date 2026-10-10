@@ -73,6 +73,8 @@ import {
   rmSync,
 } from "fs";
 import { createWorktree } from "./worktree-create";
+import * as preferences from "../lib/preferences";
+import { runGit } from "./worktree-git";
 import * as worktreeList from "./worktree-list";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
@@ -5875,9 +5877,6 @@ describe("POST /spawn", () => {
           const path = join(repo, ".claude", "worktrees", "feature-fork");
           expect(error).toContain(path);
           expect(error).toContain("left in place");
-          // A DERIVED name, so re-running numbers a sibling rather than
-          // reusing this one. The advice has to say which flag pins it.
-          expect(error).toContain("--worktree 'feature-fork'");
           // And it really is there, which is what makes the note worth
           // printing rather than a description of a directory that was
           // cleaned up on the way out.
@@ -6514,6 +6513,33 @@ describe("POST /spawn with a worktree", () => {
     if (root) rmSync(root, { recursive: true, force: true });
   });
 
+  for (const path of ["{name}", ".git/wt/{name}", "{name}/src"]) {
+    it(`refuses unsafe path ${path} before setup`, async () => {
+      const repo = makeRepo();
+      const excludePath = join(repo, ".git", "info", "exclude");
+      const before = readFileSync(excludePath, "utf8");
+      const prefs = spyOn(preferences, "getPreferences").mockResolvedValue({
+        worktree: { path },
+      });
+      const { internals } = createServer();
+      const tmux = withTmuxOnlyStub();
+      try {
+        const response = await spawnInto(internals, {
+          agent: "claude",
+          cwd: repo,
+          worktree: { name: "unsafe" },
+        });
+        expect(response.status).toBe(400);
+        expect(localBranches(repo).trim()).toBe("main");
+        expect(readFileSync(excludePath, "utf8")).toBe(before);
+        expect(existsSync(join(repo, ".git", "wt"))).toBe(false);
+      } finally {
+        prefs.mockRestore();
+        tmux.restore();
+      }
+    });
+  }
+
   it("creates the worktree and spawns the pane in it", async () => {
     const repo = makeRepo();
     const { internals } = createServer();
@@ -6612,54 +6638,43 @@ describe("POST /spawn with a worktree", () => {
    * the error has to say it is there. Otherwise the user is left wondering
    * whether to clean it up by hand.
    */
-  it("says the worktree survives when a later step fails", async () => {
+  it("retries a failed derived spawn using its surviving checkout without creating a sibling", async () => {
     const repo = makeRepo();
+    const prefs = spyOn(preferences, "getPreferences").mockResolvedValue({
+      worktree: { path: "../space trees/{repo}.{name}" },
+    });
     const { internals } = createServer();
-    const tmux = withTmuxOnlyStub({ failWith: "no space left for a window" });
+    let tmux = withTmuxOnlyStub({ failWith: "no space left for a window" });
     try {
-      const res = await spawnInto(internals, {
+      const failed = await spawnInto(internals, {
         agent: "claude",
         cwd: repo,
-        worktree: { name: "left-behind" },
-      });
-      const body = (await res.json()) as { error: string };
-
-      expect(res.status).toBe(500);
-      expect(body.error).toContain("no space left for a window");
-      expect(body.error).toContain("left-behind");
-      expect(body.error).toContain("will reuse it");
-      // And it really is on disk, as the message claims.
-      expect(
-        existsSync(join(repo, ".claude", "worktrees", "left-behind")),
-      ).toBe(true);
-    } finally {
-      tmux.restore();
-    }
-  });
-
-  /**
-   * A derived name is not stable: `createWorktree` suffixes a taken one, so
-   * telling the user a re-run reuses this worktree would be a lie that leaves
-   * them with `<slug>-2`. The note has to name the flag that actually reuses it.
-   */
-  it("tells a derived name to pass the flag rather than re-run", async () => {
-    const repo = makeRepo();
-    const { internals } = createServer();
-    const tmux = withTmuxOnlyStub({ failWith: "tmux is unhappy" });
-    try {
-      const res = await spawnInto(internals, {
-        agent: "claude",
-        cwd: repo,
-        prompt: "fix sidebar flicker on resize",
+        prompt: "fix sidebar flicker",
         worktree: {},
       });
-      const body = (await res.json()) as { error: string };
-
-      expect(res.status).toBe(500);
-      expect(body.error).toContain("numbered sibling");
-      expect(body.error).toContain("--worktree 'fix-sidebar-flicker'");
-      expect(body.error).not.toContain("will reuse it");
+      expect(failed.status).toBe(500);
+      const body = (await failed.json()) as { error: string };
+      const destination = body.error.match(/--cwd '([^']+)'/)?.[1];
+      expect(destination).toBeDefined();
+      if (!destination) return;
+      writeFileSync(join(destination, "PENDING.txt"), "unfinished work\n");
+      const branches = localBranches(repo);
+      tmux.restore();
+      tmux = withTmuxOnlyStub();
+      const retry = await spawnInto(internals, {
+        agent: "claude",
+        cwd: destination,
+      });
+      expect(retry.status).toBe(200);
+      expect(localBranches(repo)).toBe(branches);
+      expect(readFileSync(join(destination, "PENDING.txt"), "utf8")).toBe(
+        "unfinished work\n",
+      );
+      expect(
+        (await runGit(destination, ["branch", "--show-current"])).stdout.trim(),
+      ).toBe("fix-sidebar-flicker");
     } finally {
+      prefs.mockRestore();
       tmux.restore();
     }
   });
@@ -7156,6 +7171,47 @@ describe("POST /spawn moving changes into a worktree", () => {
       tmux.restore();
     }
   });
+
+  for (const collision of ["taken", "main"]) {
+    it(`refuses ${collision} before stashing after a layout change`, async () => {
+      const repo = makeDirtyRepo();
+      if (collision === "taken")
+        runFixtureGit(
+          repo,
+          "worktree",
+          "add",
+          "-b",
+          "taken",
+          join(repo, ".claude", "worktrees", "taken"),
+        );
+      runFixtureGit(repo, "stash", "push", "-m", "existing user stash");
+      writeFileSync(join(repo, "tracked.txt"), "new pending change\n");
+      const stack = stashList(repo);
+      const source = readFileSync(join(repo, "tracked.txt"), "utf8");
+      const excludePath = join(repo, ".git", "info", "exclude");
+      const exclude = readFileSync(excludePath, "utf8");
+      const prefs = spyOn(preferences, "getPreferences").mockResolvedValue({
+        worktree: { path: "../{repo}.{name}" },
+      });
+      const { internals } = createServer();
+      const tmux = withTmuxOnlyStub();
+      try {
+        const response = await spawnInto(internals, {
+          agent: "claude",
+          cwd: repo,
+          worktree: { name: collision, withChanges: true },
+        });
+        expect(response.status).toBe(400);
+        expect(stashList(repo)).toBe(stack);
+        expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe(source);
+        expect(readFileSync(excludePath, "utf8")).toBe(exclude);
+        expect(existsSync(join(root, `repo.${collision}`))).toBe(false);
+      } finally {
+        prefs.mockRestore();
+        tmux.restore();
+      }
+    });
+  }
 
   it("rejects an untracked mode with no move to apply it to", async () => {
     const repo = makeDirtyRepo();
@@ -8351,6 +8407,34 @@ describe("POST /spawn with --pr and --issue", () => {
 
   afterEach(() => {
     if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("rejects an invalid rendered PR path before fetching or changing refs", async () => {
+    const repo = makeRepo();
+    const refs = (await runGit(repo, ["show-ref"])).stdout;
+    const excludePath = join(repo, ".git", "info", "exclude");
+    const exclude = readFileSync(excludePath, "utf8");
+    const prefs = spyOn(preferences, "getPreferences").mockResolvedValue({
+      worktree: { path: ".git/wt/{name}" },
+    });
+    const { internals } = createServer();
+    const restoreTmux = withTmuxOnlyStub();
+    const restoreEnv = withStubbedEnv();
+    try {
+      const response = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        pr: 7,
+      });
+      expect(response.status).toBe(400);
+      expect((await runGit(repo, ["show-ref"])).stdout).toBe(refs);
+      expect(readFileSync(excludePath, "utf8")).toBe(exclude);
+      expect(existsSync(join(repo, ".git", "wt"))).toBe(false);
+    } finally {
+      prefs.mockRestore();
+      restoreTmux();
+      restoreEnv();
+    }
   });
 
   it("checks the PR head out on its own branch, in a pr-<n>- worktree", async () => {

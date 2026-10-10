@@ -18,6 +18,10 @@ import {
   type Preferences,
   type RowConfig,
 } from "../lib/preferences";
+import {
+  DEFAULT_WORKTREE_PATH,
+  isWorktreePathTemplate,
+} from "../lib/worktree-layout";
 import { VALID_ICON_STYLES, type IconStyle } from "../lib/icons";
 import { BUILTIN_THEME_NAMES, DEFAULT_THEME_NAME } from "../tui/themes";
 import { resolveThemeVerbose } from "../tui/theme";
@@ -172,10 +176,9 @@ function isPromptLines(v: string): boolean {
 }
 
 /**
- * Every key `config set`/`config get` accept by exact name: the flat
- * KNOWN_KEYS plus the dotted sidebar and notifications leaves. The
- * `columns.<row>.<side>` and `breakpoints.<name>` families are open-ended
- * and are left to the shell's own guesswork.
+ * Every `config set` key and completion key: the flat KNOWN_KEYS plus dotted
+ * sidebar, notifications, and worktree leaves. The `columns.<row>.<side>` and
+ * `breakpoints.<name>` families are open-ended and left to shell guesswork.
  */
 export function completableConfigKeys(): string[] {
   return [
@@ -189,6 +192,7 @@ export function completableConfigKeys(): string[] {
     "notifications.sound",
     "notifications.delayMs",
     "notifications.backend",
+    "worktree.path",
     "notifications.command",
   ];
 }
@@ -207,6 +211,8 @@ export function configValueChoices(key: string): readonly string[] | null {
       return VALID_NOTIFICATION_BACKENDS;
     case "notifications.events":
       return VALID_NOTIFICATION_EVENTS;
+    case "worktree.path":
+      return null;
     default:
       return null;
   }
@@ -310,7 +316,7 @@ export function createConfigCommand(): Command {
         if (!spec) {
           console.error(`Unknown key: ${key}`);
           console.error(
-            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>`,
+            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, worktree.path`,
           );
           process.exit(1);
         }
@@ -428,6 +434,33 @@ export function createConfigCommand(): Command {
         return;
       }
 
+      if (parts[0] === "worktree" && parts.length === 2) {
+        const worktreeKey = parts[1];
+        const prefs = await getPreferences();
+        const worktree: NonNullable<Preferences["worktree"]> = {
+          ...prefs.worktree,
+        };
+
+        if (worktreeKey === "path") {
+          if (!isWorktreePathTemplate(value)) {
+            console.error(`Invalid worktree.path: ${value}`);
+            console.error(
+              `  Must contain exactly one {name} in the final segment; the default is ${DEFAULT_WORKTREE_PATH}`,
+            );
+            process.exit(1);
+          }
+          worktree.path = value;
+        } else {
+          console.error(`Unknown worktree key: ${worktreeKey}`);
+          console.error("Valid worktree keys: path");
+          process.exit(1);
+        }
+
+        await setPreferences({ worktree });
+        console.log(`${key} = ${value}`);
+        return;
+      }
+
       if (parts[0] === "notifications" && parts.length === 2) {
         const notifKey = parts[1];
         const prefs = await getPreferences();
@@ -533,7 +566,7 @@ export function createConfigCommand(): Command {
 
       console.error(`Unknown key: ${key}`);
       console.error(
-        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>`,
+        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, worktree.path`,
       );
       process.exit(1);
     });
@@ -543,8 +576,17 @@ export function createConfigCommand(): Command {
     .description("Get a preference value")
     .argument("<key>", "Preference key")
     .action(async (key: string) => {
-      const prefs = await getPreferences();
       const parts = key.split(".");
+      if (
+        parts[0] === "worktree" &&
+        parts.length > 1 &&
+        (parts.length !== 2 || parts[1] !== "path")
+      ) {
+        console.error(`Unknown worktree key: ${parts.slice(1).join(".")}`);
+        console.error("Valid worktree keys: path");
+        process.exit(1);
+      }
+      const prefs = await getPreferences();
       const value = getNestedValue(prefs, parts);
       if (value === undefined) {
         console.log(`${key}: (not set)`);
