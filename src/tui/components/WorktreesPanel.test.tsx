@@ -3,6 +3,15 @@ import { testRender } from "@opentui/solid";
 import { RGBA, type CapturedFrame, type CapturedSpan } from "@opentui/core";
 import { createMockKeys, createMockMouse } from "@opentui/core/testing";
 import { deliverEscape } from "./test-helpers";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   PruneCandidate,
   PruneOutcome,
@@ -3140,6 +3149,31 @@ describe("visual scrolling", () => {
 });
 
 describe("worktreeHoldsPath", () => {
+  it("treats symlink aliases of candidates, targets, and registered children as the same checkout", () => {
+    const directory = realpathSync(
+      mkdtempSync(join(tmpdir(), "ccmux-owner-alias-")),
+    );
+    const parent = join(directory, "repo");
+    const child = join(parent, ".worktrees", "child");
+    const alias = join(directory, "alias");
+    mkdirSync(join(child, "src"), { recursive: true });
+    symlinkSync(parent, alias, "dir");
+    const childAlias = join(alias, ".worktrees", "child");
+    try {
+      expect(
+        worktreeHoldsPath(child, join(childAlias, "src"), [parent, child]),
+      ).toBe(true);
+      expect(
+        worktreeHoldsPath(childAlias, join(child, "src"), [parent, child]),
+      ).toBe(true);
+      expect(
+        worktreeHoldsPath(parent, join(child, "src"), [parent, childAlias]),
+      ).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("holds its registered root and descendants", () => {
     const root = "/repo/checkouts/feature";
     const roots = ["/repo", root];

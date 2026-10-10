@@ -13,6 +13,7 @@ import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { MouseButton } from "@opentui/core";
 import { basename, resolve, sep } from "node:path";
 import { getDaemonUrl } from "../../lib/config";
+import { normalizePath } from "../../daemon/worktree-git";
 import type {
   PRState,
   PruneCandidate,
@@ -431,10 +432,8 @@ export function partitionSelection(
  * candidate owns it, regardless of where the layout placed that checkout.
  * Unregistered descendants remain part of the containing worktree.
  *
- * Compares resolved paths, not real ones. Both sides come from the same
- * daemon (git's worktree list and the pane scan), so they agree in practice;
- * a symlinked checkout reached by two different absolute paths would not
- * match, and would fall through to the spawn dialog.
+ * Canonicalize existing paths so symlinked pane/session directories compare
+ * with Git's real paths. Missing paths retain lexical resolution.
  */
 export function worktreeHoldsPath(
   worktreePath: string,
@@ -442,13 +441,13 @@ export function worktreeHoldsPath(
   sameRepoRegisteredRoots: readonly string[],
 ): boolean {
   if (!candidate) return false;
-  const root = resolve(worktreePath);
-  const path = resolve(candidate);
+  const root = resolve(normalizePath(worktreePath));
+  const path = resolve(normalizePath(candidate));
   if (path !== root && !path.startsWith(root + sep)) return false;
 
   let deepest = root;
   for (const registered of sameRepoRegisteredRoots) {
-    const registeredRoot = resolve(registered);
+    const registeredRoot = resolve(normalizePath(registered));
     if (
       registeredRoot.length > deepest.length &&
       (path === registeredRoot || path.startsWith(registeredRoot + sep))
