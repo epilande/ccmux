@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   applyWorktreeFileSetup,
   createWorktree,
+  ensureWorktreesExcluded,
   readCheckoutHead,
   existingWorktreeFor,
   resolveWorktreeIncludes,
@@ -661,6 +662,75 @@ describe("createWorktree", () => {
     expect(readFileSync(join(repo, ".git", "info", "exclude"), "utf8")).toBe(
       before,
     );
+  });
+
+  it("refuses an in-repo parent that already holds tracked files", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, "src"));
+    writeFileSync(join(repo, "src", "index.ts"), "export {};\n");
+    await git(repo, ["add", "src/index.ts"]);
+    await git(repo, ["commit", "-m", "src"]);
+    const excludePath = join(repo, ".git", "info", "exclude");
+    const before = readFileSync(excludePath, "utf8");
+    const out = await createWorktree(
+      repo,
+      { name: "hidden" },
+      { layout: { path: "src/{name}" } },
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error).toContain("tracked files");
+    expect(existsSync(join(repo, "src", "hidden"))).toBe(false);
+    // Nothing excluded, so a new file under src/ stays visible to git.
+    expect(readFileSync(excludePath, "utf8")).toBe(before);
+    writeFileSync(join(repo, "src", "new.ts"), "export {};\n");
+    expect(await git(repo, ["status", "--porcelain"])).toBe("?? src/new.ts");
+    expect(await git(repo, ["branch", "--list"])).toBe("* main");
+  });
+
+  it("leaves the default parent exempt from the tracked-files refusal", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, ".claude", "worktrees"), { recursive: true });
+    writeFileSync(join(repo, ".claude", "worktrees", ".keep"), "");
+    await git(repo, ["add", ".claude/worktrees/.keep"]);
+    await git(repo, ["commit", "-m", "keep"]);
+    const out = await createWorktree(repo, { name: "kept" });
+    expect(out.ok).toBe(true);
+  });
+
+  it("does not append the exclude again for a parent that holds tracked files", async () => {
+    const repo = await makeRepo();
+    mkdirSync(join(repo, "src"));
+    writeFileSync(join(repo, "src", "index.ts"), "export {};\n");
+    await git(repo, ["add", "src/index.ts"]);
+    await git(repo, ["commit", "-m", "src"]);
+    // Without `--no-index`, check-ignore answers from the index for a tracked
+    // directory and reports it as not ignored, so every call appended again.
+    expect(
+      await ensureWorktreesExcluded(repo, runGit, join(repo, "src", "a")),
+    ).toBe(true);
+    expect(
+      await ensureWorktreesExcluded(repo, runGit, join(repo, "src", "b")),
+    ).toBe(false);
+    const lines = readFileSync(join(repo, ".git", "info", "exclude"), "utf8")
+      .split("\n")
+      .filter((line) => line === "/src/");
+    expect(lines).toHaveLength(1);
+  });
+
+  it("skips a numbered derived name that would resolve to the main checkout", async () => {
+    // `../{name}` puts candidate `fix-2` at the main checkout itself, so the
+    // search must step over it rather than throw inside the repo lock.
+    const repo = await makeRepo("fix-2");
+    await git(repo, ["branch", "fix"]);
+    const out = await createWorktree(
+      repo,
+      { prompt: "fix" },
+      { layout: { path: "../{name}" } },
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.result.path).toBe(join(root, "fix-3"));
+    expect(out.result.branch).toBe("fix-3");
   });
 
   it("creates and reopens a named sibling checkout without changing its branch", async () => {

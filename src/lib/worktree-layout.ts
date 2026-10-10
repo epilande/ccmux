@@ -12,6 +12,9 @@ import {
 
 export const DEFAULT_WORKTREE_PATH = ".claude/worktrees/{name}";
 
+/** The exclude for the default parent, matching what Claude Code writes for its own worktrees. */
+export const DEFAULT_WORKTREE_EXCLUDE_PATTERN = "**/.claude/worktrees/";
+
 export interface WorktreeConfig {
   /** Main-checkout-relative, home-relative, or absolute directory template. */
   path?: string;
@@ -92,7 +95,7 @@ function excludePatternForParent(root: string, parent: string): string | null {
   )
     return null;
   const posix = inside.split(sep).join("/");
-  if (posix === ".claude/worktrees") return "**/.claude/worktrees/";
+  if (posix === ".claude/worktrees") return DEFAULT_WORKTREE_EXCLUDE_PATTERN;
   return `/${posix.replace(/[\\*?\[\]#! ]/g, "\\$&")}/`;
 }
 

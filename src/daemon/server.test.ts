@@ -7213,6 +7213,41 @@ describe("POST /spawn moving changes into a worktree", () => {
     });
   }
 
+  it("refuses a Move into a parent that holds tracked files before stashing", async () => {
+    const repo = makeDirtyRepo();
+    mkdirSync(join(repo, "src"));
+    writeFileSync(join(repo, "src", "index.ts"), "export {};\n");
+    runFixtureGit(repo, "add", "src/index.ts");
+    runFixtureGit(repo, "commit", "-m", "src");
+    const excludePath = join(repo, ".git", "info", "exclude");
+    const exclude = readFileSync(excludePath, "utf8");
+    const prefs = spyOn(preferences, "getPreferences").mockResolvedValue({
+      worktree: { path: "src/{name}" },
+    });
+    const { internals } = createServer();
+    const tmux = withTmuxOnlyStub();
+    try {
+      const res = await spawnInto(internals, {
+        agent: "claude",
+        cwd: repo,
+        worktree: { name: "moved", withChanges: true },
+      });
+      const body = (await res.json()) as { error: string };
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("tracked files");
+      // Refused while the source was untouched: no pane, no stash, no
+      // exclude line, and the pending edit is still in place.
+      expect(tmux.argv).toEqual([]);
+      expect(stashList(repo)).toBe("");
+      expect(dirtyPaths(repo)).toContain("M tracked.txt");
+      expect(readFileSync(excludePath, "utf8")).toBe(exclude);
+      expect(existsSync(join(repo, "src", "moved"))).toBe(false);
+    } finally {
+      prefs.mockRestore();
+      tmux.restore();
+    }
+  });
+
   it("rejects an untracked mode with no move to apply it to", async () => {
     const repo = makeDirtyRepo();
     const { internals } = createServer();

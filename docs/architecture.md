@@ -260,7 +260,12 @@ Worktree creation (`worktree-create.ts`, the counterpart to this module) is what
 
 `worktree-layout.ts` is the single owner of the path-template contract used by
 creation and Move preflight: it validates templates, resolves the physical
-directory and parent, and derives the matching exclude. The default is
+directory and parent, and derives the matching exclude. That exclude covers
+the whole parent and is shared by every worktree of the repo, so
+`trackedWorktreeParentError` (in `worktree-create.ts`, since it needs git)
+refuses a custom in-repo parent that already holds tracked files, in both the
+engine and the spawn handler's Move preflight; the default parent is exempt.
+The default is
 `.claude/worktrees/{name}`; relative paths use the main checkout, `~/` uses the
 home directory, and absolute paths are accepted. `{name}` appears exactly
 once in the final path segment, while `{repo}` is optional. The path controls

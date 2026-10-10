@@ -61,6 +61,7 @@ import {
   resolve,
 } from "node:path";
 import {
+  DEFAULT_WORKTREE_EXCLUDE_PATTERN,
   resolveWorktreePath,
   worktreeExcludePattern,
   worktreeNameForPath,
@@ -688,7 +689,12 @@ async function firstFreeDerivedName(
 ): Promise<{ ok: true; name: string } | { ok: false; error: string }> {
   for (let attempt = 1; attempt <= MAX_NAME_ATTEMPTS; attempt++) {
     const candidate = attempt === 1 ? slug : `${slug}-${attempt}`;
-    const path = worktreePathFor(mainRepoRoot, candidate, layout);
+    // A numbered candidate can resolve somewhere the layout refuses (the
+    // main checkout itself, under a sibling template), which is a name to
+    // skip, not a failure to throw inside the repo lock.
+    const resolved = resolveWorktreePath(mainRepoRoot, candidate, layout);
+    if (!resolved.ok) continue;
+    const path = resolved.path;
     if (existsSync(path) || isSymlink(path)) continue;
     if (await isRegisteredWorktree(mainRepoRoot, path, git)) continue;
     if (
@@ -866,6 +872,12 @@ export async function createWorktree(
   if (!named.ok) return named;
   const destination = resolveWorktreePath(mainRepoRoot, named.name, layout);
   if (!destination.ok) return destination;
+  const trackedParent = await trackedWorktreeParentError(
+    mainRepoRoot,
+    destination,
+    git,
+  );
+  if (trackedParent) return { ok: false, error: trackedParent };
 
   return withRepoLock(mainRepoRoot, async () => {
     const openIfPresent = async (
@@ -1131,9 +1143,12 @@ export async function ensureWorktreesExcluded(
 ): Promise<boolean> {
   const pattern = worktreeExcludePattern(mainRepoRoot, destination);
   if (!pattern) return false;
+  // `--no-index`, or a parent that holds tracked files reads as "not
+  // ignored" whatever the exclude file says, and every spawn appends again.
   const ignored = await git(mainRepoRoot, [
     "check-ignore",
     "-q",
+    "--no-index",
     `${relativePath(normalizePath(mainRepoRoot), dirname(destination))}/`,
   ]);
   // 0 = already ignored, nothing to do. 1 = not ignored. Anything else (128,
@@ -1165,6 +1180,47 @@ export async function ensureWorktreesExcluded(
   } catch {
     return false;
   }
+}
+
+/**
+ * Refuse an in-repo worktree parent that already holds tracked files.
+ *
+ * The exclude covers the WHOLE parent directory, and `info/exclude` is shared
+ * by every worktree of the repo. A parent like `src/` would therefore hide
+ * every NEW file under it from `git status` and `git add`, in the main
+ * checkout and in each agent's worktree alike, so an agent's new files would
+ * silently drop out of its commits and prune would see them as ignored rather
+ * than as work. A dedicated directory has nothing tracked to hide.
+ *
+ * The default parent keeps its old behavior exactly: it is Claude Code's own
+ * directory, and its pattern has always been written unconditionally. A
+ * parent outside the main checkout writes no exclude at all. A failed
+ * `ls-files` refuses nothing, the same best-effort stance as the exclude.
+ */
+export async function trackedWorktreeParentError(
+  mainRepoRoot: string,
+  destination: { parent: string; excludePattern: string | null },
+  git: GitRun = runGit,
+): Promise<string | null> {
+  const { parent, excludePattern } = destination;
+  if (
+    excludePattern === null ||
+    excludePattern === DEFAULT_WORKTREE_EXCLUDE_PATTERN
+  )
+    return null;
+  const inside = relativePath(normalizePath(mainRepoRoot), parent);
+  const tracked = await git(mainRepoRoot, [
+    "ls-files",
+    "-z",
+    "--",
+    `:(literal)${inside}/`,
+  ]);
+  if (tracked.exitCode !== 0 || tracked.stdout === "") return null;
+  return (
+    `worktree.path puts worktrees in '${inside}/', which already holds tracked ` +
+    `files; excluding it would hide new files there from git. Choose a ` +
+    `dedicated directory instead, such as '.worktrees/{name}'`
+  );
 }
 
 type ExistingCheckout =

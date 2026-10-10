@@ -77,6 +77,7 @@ import {
   slugForFork,
   slugForIssue,
   slugForPR,
+  trackedWorktreeParentError,
   type WorktreeCreation,
 } from "./worktree-create";
 import {
@@ -4869,6 +4870,17 @@ export class DaemonServer {
       if (!destination.ok)
         return Response.json(
           { error: destination.error },
+          { status: 400, headers },
+        );
+      // Before any stash: Move changes must refuse this the same way the
+      // engine does, while the source checkout is still untouched.
+      const trackedParent = await trackedWorktreeParentError(
+        mainRepoRoot,
+        destination,
+      );
+      if (trackedParent)
+        return Response.json(
+          { error: trackedParent },
           { status: 400, headers },
         );
       if (withChanges && creation.name !== undefined) {

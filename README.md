@@ -750,7 +750,10 @@ Templates with missing or repeated `{name}`, `{name}` outside the final path
 segment, unknown or unmatched placeholders, control characters, or unsupported
 `~user` expansion are refused. A resolved worktree may not be the main
 checkout, be inside `.git`, or have the main checkout itself as its parent;
-the last case would make the exclusion cover the whole repository. For
+the last case would make the exclusion cover the whole repository. A custom
+parent inside the main checkout must also be a dedicated directory: one that
+already holds tracked files (`src/{name}`, `.claude/{name}`) is refused at
+spawn, because excluding it would hide new files there from git. For
 example, `../{repo}` has no `{name}`, `{name}/src` puts it outside the final
 segment, `{name}` has the main checkout as its parent, `.git/wt/{name}` is
 inside git metadata, and `../{branch}` uses an unknown placeholder. The target
