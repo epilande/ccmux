@@ -484,10 +484,7 @@ export class Daemon {
     // the constructor wires before this line.
     this.server.start();
     this.notifier.start();
-    this.statusBar = new StatusBar(
-      this.sessionManager,
-      preferences.statusBar ?? {},
-    );
+    this.statusBar = new StatusBar(this.sessionManager, preferences);
     this.statusBar.start();
 
     // Migrate/discover existing sessions before starting watcher

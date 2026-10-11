@@ -258,9 +258,9 @@ set -g window-status-format '#I:#W#{@ccmux_mark}'
 set -g window-status-current-format '#I:#W#{@ccmux_mark}'
 ```
 
-`@ccmux_status` shows waiting and unread counts, for example `⚠2 ●1`, and is empty when neither needs attention. The global options `@ccmux_waiting`, `@ccmux_unread`, and `@ccmux_working` expose raw counts for custom formats. Each window's `@ccmux_mark` shows its most urgent state: waiting (`⚠`) before unread (`●`). Background sessions count globally but have no window mark. Focusing a pane clears unread through the existing attention tracking.
+`@ccmux_status` shows waiting and unread counts, for example `■2 ●1`, and is empty when neither needs attention. The global options `@ccmux_waiting`, `@ccmux_unread`, and `@ccmux_working` expose raw counts for custom formats. Each window's `@ccmux_mark` shows its most urgent state: waiting (`■`) before unread (`●`). Background sessions count globally but have no window mark. Focusing a pane clears unread through the existing attention tracking.
 
-Icons and foreground colors apply to both the segment and window marks:
+Icons follow the existing `iconStyle` preference (`dot`, `emoji`, `nerdfont`, or `none`), using the shared generic waiting and unread icons. With `none`, counts remain visible and window marks are hidden. Explicit icon overrides take precedence, including over `none`. Icons and foreground colors apply to both the segment and window marks:
 
 ```bash
 ccmux config set statusBar.waitingIcon '!'
@@ -270,7 +270,7 @@ ccmux config set statusBar.unreadColor '#a6e3a1'
 ccmux daemon restart
 ```
 
-Colors default to empty (inherit your tmux style); accepted colors are ANSI names such as `yellow` or `brightred`, `colour0`–`colour255`, `#rrggbb`, and `default`. Icons are plain text. All `statusBar` settings require a daemon restart. Updates follow session changes, write only changed values, and use the configured tmux socket. A normal daemon stop unsets the options and marks; pane moves are picked up on the next daemon scan.
+Colors default to empty (inherit your tmux style); accepted colors are ANSI names such as `yellow` or `brightred`, `colour0`–`colour255`, `#rrggbb`, and `default`. Icons are plain text. All `statusBar` settings, and changes to `iconStyle` for this daemon-owned surface, require a daemon restart. Updates follow session changes, write only changed values, and use the configured tmux socket. A normal daemon stop unsets the options and marks; pane moves are picked up on the next daemon scan.
 
 ### Notifications
 

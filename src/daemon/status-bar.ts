@@ -2,7 +2,14 @@ import {
   isStatusBarColor,
   isStatusBarIcon,
   type StatusBarConfig,
+  type Preferences,
 } from "../lib/preferences";
+import {
+  getStatusIcon,
+  getAttentionIcon,
+  isValidIconStyle,
+  type IconStyle,
+} from "../lib/icons";
 import { tmuxArgv } from "../lib/tmux-exec";
 import type { Session, TmuxPane } from "../types/session";
 import type { SessionManager } from "./sessions";
@@ -24,10 +31,16 @@ type RunTmux = (args: string[]) => Promise<boolean>;
 function marker(
   config: StatusBarConfig,
   state: "waiting" | "unread",
+  style: IconStyle,
   count = "",
 ): string {
   const icon = config[`${state}Icon`];
-  const text = `${isStatusBarIcon(icon) ? icon : state === "waiting" ? "⚠" : "●"}${count}`;
+  const defaultIcon =
+    state === "waiting"
+      ? getStatusIcon("waiting", null, style)
+      : getAttentionIcon("unread", style);
+  const text = `${isStatusBarIcon(icon) ? icon : defaultIcon}${count}`;
+  if (!text) return "";
   const color = config[`${state}Color`];
   return color && isStatusBarColor(color)
     ? `#[fg=${color}]${text}#[fg=default]`
@@ -38,7 +51,9 @@ export function statusBarValues(
   sessions: readonly StatusSession[],
   panes: readonly WindowPane[],
   config: StatusBarConfig,
+  iconStyle: IconStyle = "dot",
 ) {
+  const style = isValidIconStyle(iconStyle) ? iconStyle : "dot";
   let waiting = 0;
   let unread = 0;
   let working = 0;
@@ -73,8 +88,8 @@ export function statusBarValues(
     [
       "@ccmux_status",
       [
-        waiting ? marker(config, "waiting", String(waiting)) : "",
-        unread ? marker(config, "unread", String(unread)) : "",
+        waiting ? marker(config, "waiting", style, String(waiting)) : "",
+        unread ? marker(config, "unread", style, String(unread)) : "",
       ]
         .filter(Boolean)
         .join(" "),
@@ -85,7 +100,10 @@ export function statusBarValues(
   for (const pane of panes) {
     if (!pane.windowId) continue;
     const state = urgency.get(pane.windowId);
-    windows.set(pane.windowId, state ? marker(config, state) : null);
+    windows.set(
+      pane.windowId,
+      state ? marker(config, state, style) || null : null,
+    );
   }
   return { globals, windows };
 }
@@ -117,12 +135,12 @@ export class StatusBar {
 
   constructor(
     private readonly sessions: SessionManager,
-    private readonly config: StatusBarConfig = {},
+    private readonly prefs: Pick<Preferences, "statusBar" | "iconStyle"> = {},
     private readonly run: RunTmux = runTmux,
   ) {}
 
   start(): void {
-    if (this.active || this.config.enabled !== true) return;
+    if (this.active || this.prefs.statusBar?.enabled !== true) return;
     this.active = true;
     this.sessions.on("change", this.listener);
     this.refresh();
@@ -174,7 +192,8 @@ export class StatusBar {
     const { globals, windows } = statusBarValues(
       this.sessions.getSessions(),
       this.panes,
-      this.config,
+      this.prefs.statusBar ?? {},
+      this.prefs.iconStyle,
     );
     for (const [name, value] of globals) {
       if (this.globals.get(name) === value) continue;

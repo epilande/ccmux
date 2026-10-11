@@ -249,7 +249,7 @@ export interface NotificationsConfig {
 export interface StatusBarConfig {
   /** Opt-in; all settings take effect after a daemon restart. */
   enabled?: boolean;
-  /** Defaults to ⚠ / ●. */
+  /** Override the shared iconStyle glyphs (dot defaults: ■ / ●). */
   waitingIcon?: string;
   unreadIcon?: string;
   /** tmux foreground colors; empty (the default) inherits the surrounding style. */
