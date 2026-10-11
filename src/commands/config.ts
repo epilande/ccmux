@@ -11,10 +11,13 @@ import {
   MAX_PROMPT_LINES,
   VALID_NOTIFICATION_BACKENDS,
   VALID_NOTIFICATION_EVENTS,
+  isStatusBarColor,
+  isStatusBarIcon,
   type BreakpointConfig,
   type ColumnsConfig,
   type ColumnEntry,
   type NotificationsConfig,
+  type StatusBarConfig,
   type Preferences,
   type RowConfig,
 } from "../lib/preferences";
@@ -177,7 +180,7 @@ function isPromptLines(v: string): boolean {
 
 /**
  * Every `config set` key and completion key: the flat KNOWN_KEYS plus dotted
- * sidebar, notifications, and worktree leaves. The `columns.<row>.<side>` and
+ * sidebar, notifications, statusBar, and worktree leaves. The `columns.<row>.<side>` and
  * `breakpoints.<name>` families are open-ended and left to shell guesswork.
  */
 export function completableConfigKeys(): string[] {
@@ -193,6 +196,11 @@ export function completableConfigKeys(): string[] {
     "notifications.delayMs",
     "notifications.backend",
     "notifications.command",
+    "statusBar.enabled",
+    "statusBar.waitingIcon",
+    "statusBar.unreadIcon",
+    "statusBar.waitingColor",
+    "statusBar.unreadColor",
     "worktree.path",
   ];
 }
@@ -205,6 +213,7 @@ export function configValueChoices(key: string): readonly string[] | null {
     case "sidebar.position":
       return ["left", "right"];
     case "notifications.enabled":
+    case "statusBar.enabled":
     case "notifications.sound":
       return BOOLEAN_CHOICES;
     case "notifications.backend":
@@ -316,7 +325,7 @@ export function createConfigCommand(): Command {
         if (!spec) {
           console.error(`Unknown key: ${key}`);
           console.error(
-            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, worktree.path`,
+            `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, statusBar.<key>, worktree.path`,
           );
           process.exit(1);
         }
@@ -461,6 +470,53 @@ export function createConfigCommand(): Command {
         return;
       }
 
+      if (parts[0] === "statusBar" && parts.length === 2) {
+        const statusKey = parts[1];
+        const prefs = await getPreferences();
+        const statusBar: StatusBarConfig = { ...prefs.statusBar };
+        switch (statusKey) {
+          case "enabled":
+            if (value !== "true" && value !== "false") {
+              console.error("Invalid statusBar.enabled (true, false)");
+              process.exit(1);
+            }
+            statusBar.enabled = value === "true";
+            break;
+          case "waitingIcon":
+          case "unreadIcon":
+            if (!isStatusBarIcon(value)) {
+              console.error(
+                "Status bar icons must be plain text without # or control characters",
+              );
+              process.exit(1);
+            }
+            statusBar[statusKey] = value;
+            break;
+          case "waitingColor":
+          case "unreadColor":
+            if (!isStatusBarColor(value)) {
+              console.error(
+                "Invalid status bar color (ANSI name, colour0–255, #rrggbb, or empty)",
+              );
+              process.exit(1);
+            }
+            statusBar[statusKey] = value;
+            break;
+          default:
+            console.error(`Unknown statusBar key: ${statusKey}`);
+            console.error(
+              "Valid statusBar keys: enabled, waitingIcon, unreadIcon, waitingColor, unreadColor",
+            );
+            process.exit(1);
+        }
+        await setPreferences({ statusBar });
+        console.log(`${key} = ${value}`);
+        console.log(
+          "Takes effect after a daemon restart (ccmux daemon restart)",
+        );
+        return;
+      }
+
       if (parts[0] === "notifications" && parts.length === 2) {
         const notifKey = parts[1];
         const prefs = await getPreferences();
@@ -566,7 +622,7 @@ export function createConfigCommand(): Command {
 
       console.error(`Unknown key: ${key}`);
       console.error(
-        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, worktree.path`,
+        `Valid keys: ${Object.keys(KNOWN_KEYS).join(", ")}, columns.<row>.<side>, breakpoints.<name>, ageFade.after, sidebar.<key>, notifications.<key>, statusBar.<key>, worktree.path`,
       );
       process.exit(1);
     });

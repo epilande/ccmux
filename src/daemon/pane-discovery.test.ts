@@ -95,6 +95,7 @@ describe("scanTmuxPanesOrThrow", () => {
       "claude",
       "node",
       "/repo",
+      "@12",
     ].join(PANE_FIELD_SEP);
     withTmuxResult({ exitCode: 0, stdout: `${line}\n` });
 
@@ -105,6 +106,7 @@ describe("scanTmuxPanesOrThrow", () => {
       paneId: "%7",
       panePid: 4242,
       target: "work:1.0",
+      windowId: "@12",
     });
   });
 });

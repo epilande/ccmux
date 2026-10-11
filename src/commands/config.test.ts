@@ -561,6 +561,7 @@ describe("completableConfigKeys() parity with config set", () => {
     "Valid keys:",
     "Valid sidebar keys:",
     "Valid notifications keys:",
+    "Valid statusBar keys:",
     "Valid worktree keys:",
   ] as const;
 
@@ -593,6 +594,12 @@ describe("completableConfigKeys() parity with config set", () => {
         return "3"; // integer 0-MAX_PROMPT_LINES
       case "notifications.delayMs":
         return "500"; // non-negative integer
+      case "statusBar.waitingIcon":
+      case "statusBar.unreadIcon":
+        return "!";
+      case "statusBar.waitingColor":
+      case "statusBar.unreadColor":
+        return "yellow";
       case "notifications.command":
         return "notify-send"; // non-empty string
       default:
@@ -679,5 +686,49 @@ describe("KNOWN_KEYS.attentionBand", () => {
     expect(spec.parse("false")).toBe(false);
     expect(completableConfigKeys()).toContain("attentionBand");
     expect(configValueChoices("attentionBand")).toEqual(["true", "false"]);
+  });
+});
+
+describe("config set statusBar.*", () => {
+  it("merges settings and rejects invalid values without changing preferences", async () => {
+    store = { statusBar: { unreadIcon: "*" } };
+    const restoreExit = withExitSentinel();
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const [key, value] of [
+        ["enabled", "true"],
+        ["waitingIcon", "!"],
+        ["waitingColor", "#aabbcc"],
+        ["unreadColor", "colour255"],
+      ]) {
+        expect(await runConfigSet(`statusBar.${key}`, value)).toBeNull();
+      }
+      expect(store.statusBar).toEqual({
+        enabled: true,
+        waitingIcon: "!",
+        unreadIcon: "*",
+        waitingColor: "#aabbcc",
+        unreadColor: "colour255",
+      });
+      const before = structuredClone(store);
+      for (const [key, value] of [
+        ["enabled", "yes"],
+        ["waitingIcon", "#{bad}"],
+        ["unreadIcon", "a\nb"],
+        ["waitingColor", "red]oops"],
+        ["unreadColor", "colour256"],
+        ["unknown", "x"],
+      ]) {
+        expect((await runConfigSet(`statusBar.${key}`, value))?.code).toBe(1);
+        expect(store).toEqual(before);
+      }
+      expect(await runConfigSet("statusBar.waitingColor", "")).toBeNull();
+      expect(store.statusBar?.waitingColor).toBe("");
+    } finally {
+      restoreExit();
+      log.mockRestore();
+      error.mockRestore();
+    }
   });
 });

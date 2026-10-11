@@ -89,6 +89,7 @@ import { AttentionTracker } from "./attention-tracker";
 import { redirectStdioToLogFile } from "./log-redirect";
 import { InvocationManager } from "./invocation-manager";
 import { Notifier, buildStateChangedPayload } from "./notifier";
+import { StatusBar } from "./status-bar";
 import { createNotifyDelivery } from "./notify-delivery";
 import { performJump, type JumpDeps } from "./notify-jump";
 import {
@@ -225,6 +226,7 @@ export class Daemon {
    * feature is gated off (no watchers, no resync, zero overhead). */
   private backgroundSource: ClaudeBackgroundSource | null = null;
   private notifier: Notifier;
+  private statusBar: StatusBar | null = null;
   /** Shared notification delivery closure (Notifier + stale-press re-notify).
    *  Set in the constructor before the server, which needs the action runner
    *  that depends on it. */
@@ -482,6 +484,11 @@ export class Daemon {
     // the constructor wires before this line.
     this.server.start();
     this.notifier.start();
+    this.statusBar = new StatusBar(
+      this.sessionManager,
+      preferences.statusBar ?? {},
+    );
+    this.statusBar.start();
 
     // Migrate/discover existing sessions before starting watcher
     await this.migrateExistingSessions();
@@ -555,6 +562,7 @@ export class Daemon {
     await this.hookManager.stop();
     await this.backgroundSource?.stop();
     this.notifier.stop();
+    await this.statusBar?.stop();
     this.server.stop();
 
     // Remove PID file
@@ -589,6 +597,7 @@ export class Daemon {
         ProcessTree.build(),
       ]);
       const panes = paneScan.panes;
+      this.statusBar?.updatePanes(panes, paneScan.noServer !== null);
       if (paneScan.noServer) this.recordNoTmuxServer(paneScan.noServer);
 
       // Update pane cache for API response enrichment

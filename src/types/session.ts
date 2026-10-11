@@ -405,6 +405,8 @@ export interface PendingHandoffSummary {
  */
 export interface TmuxPane {
   paneId: string;
+  /** Stable window ID, independent of session names and window renumbering. */
+  windowId?: string;
   panePid: number;
   sessionName: string;
   windowIndex: number;

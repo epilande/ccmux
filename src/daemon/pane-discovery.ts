@@ -87,6 +87,7 @@ export async function scanTmuxPanesOrThrow(): Promise<PaneScan> {
           "#{pane_title}",
           "#{pane_current_command}",
           "#{pane_current_path}",
+          "#{window_id}",
         ].join(PANE_FIELD_SEP),
       ),
       {
@@ -138,6 +139,7 @@ export async function scanTmuxPanesOrThrow(): Promise<PaneScan> {
       paneTitle,
       currentCommand,
       currentPath,
+      windowId,
     ] = line.split(PANE_FIELD_SEP);
 
     const panePid = parseInt(panePidStr, 10);
@@ -155,6 +157,7 @@ export async function scanTmuxPanesOrThrow(): Promise<PaneScan> {
     if (!isNaN(panePid) && paneId) {
       panes.push({
         paneId,
+        windowId: windowId || undefined,
         panePid,
         sessionName,
         windowIndex,

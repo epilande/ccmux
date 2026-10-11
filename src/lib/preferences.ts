@@ -246,6 +246,29 @@ export interface NotificationsConfig {
   command?: string;
 }
 
+export interface StatusBarConfig {
+  /** Opt-in; all settings take effect after a daemon restart. */
+  enabled?: boolean;
+  /** Defaults to ⚠ / ●. */
+  waitingIcon?: string;
+  unreadIcon?: string;
+  /** tmux foreground colors; empty (the default) inherits the surrounding style. */
+  waitingColor?: string;
+  unreadColor?: string;
+}
+
+export function isStatusBarIcon(value: unknown): value is string {
+  return typeof value === "string" && !/[#\x00-\x1f\x7f]/.test(value);
+}
+
+export function isStatusBarColor(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (/^colour\d+$/.test(value)) return Number(value.slice(6)) <= 255;
+  return /^(?:|#[0-9a-fA-F]{6}|default|gr[ae]y|(?:bright)?(?:black|red|green|yellow|blue|magenta|cyan|white))$/.test(
+    value,
+  );
+}
+
 export const DEFAULT_BREAKPOINTS: Required<BreakpointConfig> = {
   xs: 40,
   sm: 60,
@@ -376,6 +399,8 @@ export interface Preferences {
   sidebar?: SidebarConfig;
   /** Desktop notification settings (default: disabled). See {@link NotificationsConfig}. */
   notifications?: NotificationsConfig;
+  /** Publish session counts and attention marks as tmux user options. */
+  statusBar?: StatusBarConfig;
   /**
    * The tmux server ccmux tracks: a socket path (leading "/", passed as `-S`)
    * or a socket label (anything else, passed as `-L`). Unset means today's
