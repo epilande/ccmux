@@ -272,6 +272,23 @@ ccmux daemon restart
 
 Colors default to empty (inherit your tmux style); accepted colors are ANSI names such as `yellow` or `brightred`, `colour0`–`colour255`, `#rrggbb`, and `default`. Icons are plain text. All `statusBar` settings, and changes to `iconStyle` for this daemon-owned surface, require a daemon restart. Updates follow session changes, write only changed values, and use the configured tmux socket. A normal daemon stop unsets the options and marks; pane moves are picked up on the next daemon scan.
 
+**Click to open the picker (tmux 3.4+).** Use these formats and binding in `~/.tmux.conf` to make the attention segment and individual window marks open a picker popup. Window names still select their windows, and the clock keeps its normal status-right behavior:
+
+```tmux
+set -g mouse on
+set -g status-right '#[range=user|ccmux]#{@ccmux_status}#[range=right] %H:%M'
+set -g window-status-format '#I:#W#[range=user|ccmux] #{@ccmux_mark}#[range=window|#{window_index}] '
+set -g window-status-current-format '#I:#W#[range=user|ccmux] #{@ccmux_mark}#[range=window|#{window_index}] '
+
+bind-key -n MouseDown1Status if-shell -F '#{==:#{mouse_status_range},ccmux}' {
+  display-popup -E -w 80% -h 75% 'ccmux picker'
+} {
+  select-window -t =
+}
+```
+
+Reload with `tmux source-file ~/.tmux.conf`. If you already customize `MouseDown1Status`, keep your existing action in the final branch instead of `select-window -t =`. These mouse bindings belong to your tmux configuration; the daemon only publishes the option values.
+
 ### Notifications
 
 Desktop notifications on `waiting`/`finished` transitions, disabled by default. When a session needs permission, or has a plan waiting for approval, the banner carries **Approve** / **Deny** buttons; permission, plan, question, and "finished" notifications also carry an inline **Reply** field, so you can answer, redirect, or send the next instruction without switching to its pane. Focusing a session's pane clears its notification.
