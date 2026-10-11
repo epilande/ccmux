@@ -39,7 +39,9 @@ function marker(
     state === "waiting"
       ? getStatusIcon("waiting", null, style)
       : getAttentionIcon("unread", style);
-  const text = `${isStatusBarIcon(icon) ? icon : defaultIcon}${count}`;
+  const text = [isStatusBarIcon(icon) ? icon : defaultIcon, count]
+    .filter(Boolean)
+    .join(" ");
   if (!text) return "";
   const color = config[`${state}Color`];
   return color && isStatusBarColor(color)

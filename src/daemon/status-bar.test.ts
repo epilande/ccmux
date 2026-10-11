@@ -70,7 +70,7 @@ describe("status bar", () => {
         "set-option",
         "-g",
         "@ccmux_status",
-        `#[fg=yellow]${waiting}1#[fg=default] #[fg=green]${unread}1#[fg=default]`,
+        `#[fg=yellow]${waiting ? `${waiting} ` : ""}1#[fg=default] #[fg=green]${unread ? `${unread} ` : ""}1#[fg=default]`,
       ]);
       for (const [window, icon, color] of [
         ["@10", waiting, "yellow"],
@@ -174,7 +174,7 @@ describe("status bar", () => {
       "@ccmux_waiting": "2",
       "@ccmux_unread": "2",
       "@ccmux_working": "1",
-      "@ccmux_status": "■2 ●2",
+      "@ccmux_status": "■ 2 ● 2",
     });
     expect(Object.fromEntries(values.windows)).toEqual({
       "@10": "■",
@@ -286,7 +286,7 @@ describe("status bar", () => {
       waitingColor: "yellow",
     });
     expect(values.globals.get("@ccmux_status")).toBe(
-      "#[fg=yellow]!1#[fg=default]",
+      "#[fg=yellow]! 1#[fg=default]",
     );
     expect(values.windows.get("@10")).toBe("#[fg=yellow]!#[fg=default]");
     expect(
@@ -294,7 +294,7 @@ describe("status bar", () => {
         waitingIcon: "#{bad}",
         waitingColor: "red]oops",
       }).globals.get("@ccmux_status"),
-    ).toBe("■1");
+    ).toBe("■ 1");
   });
 
   it("retries failed writes on the next scan without rewriting successful values", async () => {
@@ -366,7 +366,7 @@ describe("status bar", () => {
     const settled = bar.refresh();
     release();
     await settled;
-    expect(values.get("@ccmux_status")).toBe("●1");
+    expect(values.get("@ccmux_status")).toBe("● 1");
     expect(values.get("@ccmux_waiting")).toBe("0");
     expect(values.has("@10/@ccmux_mark")).toBe(false);
     expect(values.get("@20/@ccmux_mark")).toBe("●");
