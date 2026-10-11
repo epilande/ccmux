@@ -122,6 +122,7 @@ export interface SourcePickerProps {
    *  second agent into it. */
   onOpenWorktree: (target: {
     path: string;
+    sameRepoRegisteredRoots: readonly string[];
     cursor: string;
     filter: string;
   }) => void;
@@ -468,8 +469,16 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       }
       const path = checkedOutPathFor(row, snapshot);
       const checkout = refreshed ? path : (path ?? row.checkedOutPath);
+      const sameRepoRegisteredRoots =
+        snapshot?.repos
+          .find((repo) => repo.repoRoot === row.repoRoot)
+          ?.worktrees.map((worktree) => worktree.path) ?? [];
       if (checkout) {
-        props.onOpenWorktree({ path: checkout, ...carry });
+        props.onOpenWorktree({
+          path: checkout,
+          sameRepoRegisteredRoots,
+          ...carry,
+        });
         return;
       }
       if (row.kind === "pr") {

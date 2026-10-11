@@ -95,7 +95,12 @@ function installFetch(handlers: Handlers) {
 interface Picked {
   prs: { number: number; cursor: string; filter: string }[];
   issues: { number: number; cursor: string; filter: string }[];
-  worktrees: { path: string; cursor: string; filter: string }[];
+  worktrees: {
+    path: string;
+    sameRepoRegisteredRoots: readonly string[];
+    cursor: string;
+    filter: string;
+  }[];
   closes: number;
 }
 
@@ -276,10 +281,44 @@ describe("SourcePicker", () => {
   it("marks an issue whose worktree a previous spawn cut", async () => {
     const harness = await mountSettled({
       issues: [openIssue()],
-      worktrees: [worktreeRow({ name: "issue-144-notifications" })],
+      worktrees: [
+        worktreeRow({
+          name: "issue-144-notifications",
+          branch: "issue-144-notifications",
+        }),
+      ],
     });
     expect(await harness.frame()).toContain(
       "checked out in issue-144-notifications",
+    );
+  });
+
+  it("renders detached legacy issue worktrees by their directory name", async () => {
+    const harness = await mountSettled({
+      issues: [openIssue()],
+      worktrees: [
+        worktreeRow({
+          name: "issue-144-legacy",
+          branch: null,
+          detached: true,
+        }),
+      ],
+    });
+    expect(await harness.frame()).toContain("checked out in issue-144-legacy");
+  });
+
+  it("does not let a non-null branch defer to a matching issue directory", async () => {
+    const harness = await mountSettled({
+      issues: [openIssue()],
+      worktrees: [
+        worktreeRow({
+          name: "issue-144-legacy",
+          branch: "feature/unrelated",
+        }),
+      ],
+    });
+    expect(await harness.frame()).not.toContain(
+      "checked out in issue-144-legacy",
     );
   });
 });
@@ -400,7 +439,12 @@ describe("SourcePicker keys", () => {
     listed = [
       worktreeRow({
         name: "issue-144-notifications",
+        branch: "issue-144-notifications",
         path: "/repo/wt/issue-144",
+      }),
+      worktreeRow({
+        name: "nested-child",
+        path: "/repo/wt/issue-144/custom/nested-child",
       }),
     ];
     harness.keys.pressEnter();
@@ -414,7 +458,53 @@ describe("SourcePicker keys", () => {
     }
 
     expect(harness.picked.worktrees[0]?.path).toBe("/repo/wt/issue-144");
+    expect(harness.picked.worktrees[0]?.sameRepoRegisteredRoots).toEqual([
+      "/repo/wt/issue-144",
+      "/repo/wt/issue-144/custom/nested-child",
+    ]);
     expect(harness.picked.issues).toHaveLength(0);
+  });
+
+  it("opens a detached legacy issue checkout by its directory name", async () => {
+    const path = "/repo/custom/deep/checkouts/issue-144-legacy";
+    const harness = await mountSettled({
+      prs: [],
+      issues: [openIssue()],
+      worktrees: [
+        worktreeRow({
+          name: "issue-144-legacy",
+          branch: null,
+          detached: true,
+          path,
+        }),
+      ],
+    });
+    harness.keys.pressEnter();
+    await harness.frame();
+
+    expect(harness.picked.worktrees[0]?.path).toBe(path);
+    expect(harness.picked.worktrees[0]?.sameRepoRegisteredRoots).toEqual([
+      path,
+    ]);
+    expect(harness.picked.issues).toHaveLength(0);
+  });
+
+  it("spawns an issue when its matching directory has another branch", async () => {
+    const harness = await mountSettled({
+      prs: [],
+      issues: [openIssue()],
+      worktrees: [
+        worktreeRow({
+          name: "issue-144-legacy",
+          branch: "feature/unrelated",
+        }),
+      ],
+    });
+    harness.keys.pressEnter();
+    await harness.frame();
+
+    expect(harness.picked.worktrees).toHaveLength(0);
+    expect(harness.picked.issues[0]?.number).toBe(144);
   });
 
   it("closes on q", async () => {

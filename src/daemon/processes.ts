@@ -445,10 +445,10 @@ export interface ProcessFdInfo {
 }
 
 /**
- * The kernel's marker for a cwd whose directory has been unlinked:
+ * The kernel's marker for a cwd or executable that has been unlinked:
  * `readlink("/proc/<pid>/cwd")` answers `/path/to/dir (deleted)`.
  */
-const PROCFS_DELETED_SUFFIX = " (deleted)";
+export const PROCFS_DELETED_SUFFIX = " (deleted)";
 
 /**
  * Resolve each pid's cwd from procfs — the whole of cwd discovery on Linux,
@@ -498,6 +498,77 @@ async function readProcfsCwd(
     ? target.slice(0, -PROCFS_DELETED_SUFFIX.length)
     : target;
   return path || null;
+}
+
+/**
+ * The executable a process runs, as the version probe needs it: `path` names
+ * the installation (matched against an agent's `processMatch`), `probePath`
+ * is what to run with `--version`.
+ */
+export interface ProcessExecutable {
+  path: string;
+  probePath: string;
+  /** Identity reported for the live executable, not its current pathname. */
+  identity?: { dev: bigint; ino: bigint };
+}
+
+/** Read the first executable record from `lsof -FnDi`, keeping its identity. */
+export function parseLsofExecutable(lines: string[]): ProcessExecutable | null {
+  const start = lines.indexOf("ftxt");
+  if (start === -1) return null;
+  let path = "";
+  let dev = "";
+  let ino = "";
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("f") || line.startsWith("p")) break;
+    if (line.startsWith("n")) path = line.slice(1);
+    if (line.startsWith("D")) dev = line.slice(1);
+    if (line.startsWith("i")) ino = line.slice(1);
+  }
+  if (
+    !path ||
+    path.endsWith(PROCFS_DELETED_SUFFIX) ||
+    !/^0x[\da-f]+$/i.test(dev) ||
+    !/^\d+$/.test(ino)
+  ) {
+    return null;
+  }
+  return {
+    path,
+    probePath: path,
+    identity: { dev: BigInt(dev), ino: BigInt(ino) },
+  };
+}
+
+/**
+ * The executable a process is running, from `/proc/<pid>/exe`, or null where
+ * there is no procfs or the link cannot be read. Probing `<path> --version`
+ * is how an agent launched by a bare name (absent from the daemon's PATH)
+ * gets a version, and lsof, the only other source, is not installed by
+ * default on several distros.
+ *
+ * Always probe the `/proc/<pid>/exe` link: it executes the running inode
+ * even if an installer replaces the pathname after this lookup. Strip a
+ * `(deleted)` suffix from the name used for agent matching only.
+ */
+export async function readProcfsExecutable(
+  pid: number,
+  platform: DiscoveryPlatform = PLATFORM,
+): Promise<ProcessExecutable | null> {
+  if (platform.cwdSource !== "procfs") return null;
+  const link = `/proc/${pid}/exe`;
+  let target: string;
+  try {
+    target = await platform.readLink(link);
+  } catch {
+    return null;
+  }
+  if (!target) return null;
+  if (target.endsWith(PROCFS_DELETED_SUFFIX)) {
+    const path = target.slice(0, -PROCFS_DELETED_SUFFIX.length);
+    return path ? { path, probePath: link } : null;
+  }
+  return { path: target, probePath: link };
 }
 
 /**

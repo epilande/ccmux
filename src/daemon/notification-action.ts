@@ -17,7 +17,7 @@
  */
 
 import type { Session } from "../types/session";
-import type { AgentDef } from "../lib/agents";
+import { sessionNotificationActions, type AgentDef } from "../lib/agents";
 import {
   AMBIGUOUS_WAIT_ERROR,
   checkForegroundLiveness,
@@ -335,7 +335,7 @@ function resolveActionPlan(
   agentDef: AgentDef | undefined,
   waitTypeOverride?: "plan_approval" | "permission",
 ): ActionPlan {
-  const na = agentDef?.notificationActions;
+  const na = sessionNotificationActions(agentDef, session.version);
 
   if (session.status === "idle") {
     // Finished notification: the pane sits at an idle composer. Reply only,

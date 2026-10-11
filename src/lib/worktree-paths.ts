@@ -1,9 +1,9 @@
 /**
  * Recognizing an agent worktree by its PATH.
  *
- * Both conventions live under the same parent directory: Claude Code's Agent
- * tool isolates a teammate into `<repo>/.claude/worktrees/agent-<id>`, and
- * ccmux's own `--worktree` spawns write `<repo>/.claude/worktrees/<slug>`.
+ * Claude Code's Agent tool isolates a teammate into
+ * `<repo>/.claude/worktrees/agent-<id>`. ccmux's default layout shares that
+ * parent, but its configurable sibling directories are identified through git.
  *
  * Path shape is a heuristic, and it is used here only where the alternative
  * is nothing at all: git cannot be consulted synchronously on a hot update

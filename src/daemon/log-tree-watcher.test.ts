@@ -56,6 +56,14 @@ describe("LogTreeWatcher (native)", () => {
     return new Promise((resolve) => watcher!.on("ready", () => resolve()));
   }
 
+  // macOS can emit change during startup, before ready. Start each operation's
+  // assertions at its own boundary so earlier events cannot fail or satisfy it.
+  function clearEvents(): void {
+    added.length = 0;
+    changed.length = 0;
+    unlinked.length = 0;
+  }
+
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "ccmux-tree-watch-"));
     added = [];
@@ -90,11 +98,13 @@ describe("LogTreeWatcher (native)", () => {
     const file = join(root, "proj-a", "log.jsonl");
     writeFileSync(file, "line1\n");
     await startWatcher(1);
+    expect(added).toEqual([file]);
 
+    clearEvents();
     appendFileSync(file, "line2\n");
 
     expect(await until(() => changed.includes(file))).toBe(true);
-    expect(added).toEqual([file]); // initial walk only, no duplicate add
+    expect(added).toEqual([]); // no duplicate add
   });
 
   it("discovers a file created inside a brand-new directory", async () => {
@@ -141,11 +151,15 @@ describe("LogTreeWatcher (native)", () => {
     writeFileSync(file, "x\n");
     await startWatcher(1);
 
+    clearEvents();
     watcher!.unwatch(file);
     appendFileSync(file, "y\n");
     await Bun.sleep(400);
+    expect(added).toEqual([]);
     expect(changed).toEqual([]);
+    expect(unlinked).toEqual([]);
 
+    clearEvents();
     watcher!.add(file);
     appendFileSync(file, "z\n");
     expect(await until(() => changed.includes(file))).toBe(true);
@@ -157,15 +171,21 @@ describe("LogTreeWatcher (native)", () => {
     writeFileSync(file, "x\n");
     await startWatcher(1);
 
+    clearEvents();
     watcher!.unwatch(file);
     unlinkSync(file);
     await Bun.sleep(200);
     writeFileSync(file, "y\n");
     await Bun.sleep(400);
 
-    expect(added).toEqual([file]); // the initial walk only
+    expect(added).toEqual([]);
     expect(changed).toEqual([]);
     expect(unlinked).toEqual([]);
+
+    clearEvents();
+    watcher!.add(file);
+    appendFileSync(file, "z\n");
+    expect(await until(() => changed.includes(file))).toBe(true);
   });
 
   it("classifies a deletion surfacing as a too-deep path event", async () => {

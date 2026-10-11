@@ -4,12 +4,14 @@ import { join } from "path";
 import {
   parseElapsedTime,
   parseLsofFdOutput,
+  parseLsofExecutable,
   parsePsOutput,
   isCodexPluginHostCwd,
   discoverAgentProcesses,
   discoverAgentProcessesOrThrow,
   dropWrapperParents,
   readProcfsCwds,
+  readProcfsExecutable,
   resolveDiscoveredProcesses,
   ProcessDiscoveryError,
   FD_TTY_DISCOVERY,
@@ -379,6 +381,93 @@ describe("readProcfsCwds", () => {
     const byPid = await readProcfsCwds([9_999_901], PS_TTY_DISCOVERY.readLink);
 
     expect(byPid.get(9_999_901)?.cwd).toBeNull();
+  });
+});
+
+describe("parseLsofExecutable", () => {
+  it("keeps the executable's exact device and inode across intervening fields", () => {
+    expect(
+      parseLsofExecutable([
+        "p100",
+        "fcwd",
+        "n/repo",
+        "ftxt",
+        "D0x1000012",
+        "i1152921500312573276",
+        "n/agents/opencode",
+        "ftxt",
+        "n/usr/lib/dyld",
+      ]),
+    ).toEqual({
+      path: "/agents/opencode",
+      probePath: "/agents/opencode",
+      identity: { dev: 0x1000012n, ino: 1152921500312573276n },
+    });
+  });
+
+  it.each(
+    [
+      ["ftxt", "n/agents/opencode"],
+      ["ftxt", "D0x1", "inope", "n/agents/opencode"],
+      ["ftxt", "Dunknown", "i2", "n/agents/opencode"],
+      ["ftxt", "D0x1", "i2", "n/agents/opencode (deleted)"],
+      ["ftxt", "n/agents/opencode", "ftxt", "D0x1", "i2", "n/usr/lib/dyld"],
+    ].map((lines) => ({ lines })),
+  )(
+    "rejects incomplete, invalid or deleted executable records: %j",
+    ({ lines }) => {
+      expect(parseLsofExecutable(lines)).toBeNull();
+    },
+  );
+});
+
+describe("readProcfsExecutable", () => {
+  const procfs = (readLink: (path: string) => Promise<string>) => ({
+    ...PS_TTY_DISCOVERY,
+    readLink,
+  });
+
+  it("reads the pid's exe link", async () => {
+    let asked = "";
+    const executable = await readProcfsExecutable(
+      100,
+      procfs(async (p) => {
+        asked = p;
+        return "/home/u/.opencode/bin/opencode";
+      }),
+    );
+    expect(asked).toBe("/proc/100/exe");
+    expect(executable).toEqual({
+      path: "/home/u/.opencode/bin/opencode",
+      probePath: "/proc/100/exe",
+    });
+  });
+
+  it("probes a binary replaced while the process ran through its exe link", async () => {
+    // The bare path would now describe the replacement, not this process;
+    // the link still executes the inode the process is running.
+    const executable = await readProcfsExecutable(
+      100,
+      procfs(async () => "/home/u/.opencode/bin/opencode (deleted)"),
+    );
+    expect(executable).toEqual({
+      path: "/home/u/.opencode/bin/opencode",
+      probePath: "/proc/100/exe",
+    });
+  });
+
+  it("is null when the link cannot be read", async () => {
+    const executable = await readProcfsExecutable(
+      100,
+      procfs(async () => {
+        throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      }),
+    );
+    expect(executable).toBeNull();
+  });
+
+  it("is null where there is no procfs to read", async () => {
+    expect(await readProcfsExecutable(100, FD_TTY_DISCOVERY)).toBeNull();
   });
 });
 

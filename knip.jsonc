@@ -2,7 +2,8 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
     // OpenCode loads via dynamic import at runtime; not reachable from src/index.ts.
-    "src/plugins/opencode/plugin.js"
+    "src/plugins/opencode/plugin.js",
+    "src/plugins/opencode/tui.js"
   ],
   "project": ["src/**/*.{ts,tsx,js}"],
   "ignoreDependencies": [

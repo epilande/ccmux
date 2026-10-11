@@ -1,6 +1,8 @@
 import type { AgentDef } from "../lib/agents";
 import { existsSync, readFileSync, realpathSync } from "fs";
-import { dirname, join } from "path";
+import { stat } from "fs/promises";
+import { dirname, isAbsolute, join } from "path";
+import type { ProcessExecutable } from "./processes";
 
 interface CommandResult {
   stdout: string;
@@ -18,11 +20,26 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+/** The fields of a file's stat that change when it is replaced or rewritten. */
+interface FileIdentity {
+  dev: number | bigint;
+  ino: number | bigint;
+  size: number | bigint;
+  mtimeMs: number | bigint;
+}
+
+function fileIdentityKey(identity: FileIdentity | null): string {
+  if (!identity) return "";
+  const { dev, ino, size, mtimeMs } = identity;
+  return `${dev}:${ino}:${size}:${mtimeMs}`;
+}
+
 interface VersionResolverOptions {
   ttlMs?: number;
   timeoutMs?: number;
   now?: () => number;
   runCommand?: CommandRunner;
+  statFile?: (path: string) => Promise<FileIdentity>;
 }
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
@@ -38,6 +55,27 @@ function regexTest(pattern: RegExp, value: string): boolean {
 
 function executableName(token: string): string {
   return token.split("/").filter(Boolean).at(-1)?.toLowerCase() ?? "";
+}
+
+/**
+ * A native agent needs its process executable even when argv[0] is absolute:
+ * an installer may have replaced that pathname since the process launched.
+ * Runtime/script commands retain their separate script-based resolution.
+ */
+export function needsNativeExecutable(
+  agent: AgentDef,
+  processCommand: string,
+  executable?: ProcessExecutable,
+): boolean {
+  const first = parseShellTokens(processCommand)[0] ?? "";
+  return (
+    first !== "" &&
+    regexTest(agent.processMatch, executableName(first)) &&
+    !(
+      executable &&
+      regexTest(agent.processMatch, executableName(executable.path))
+    )
+  );
 }
 
 function findFirstNonOption(tokens: string[], start: number): string | null {
@@ -389,6 +427,7 @@ export class VersionResolver {
   private readonly timeoutMs: number;
   private readonly now: () => number;
   private readonly runCommand: CommandRunner;
+  private readonly statFile: (path: string) => Promise<FileIdentity>;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly inflight = new Map<string, Promise<string | null>>();
 
@@ -397,18 +436,60 @@ export class VersionResolver {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.now = options.now ?? Date.now;
     this.runCommand = options.runCommand ?? runCommandWithTimeout;
+    this.statFile =
+      options.statFile ?? ((path) => stat(path, { bigint: true }));
   }
 
   async resolve(
     agent: AgentDef,
     processCommand: string,
+    executable?: ProcessExecutable,
   ): Promise<string | null> {
-    const probe = buildVersionProbeCommand(processCommand, agent);
+    const commandName = executableName(
+      parseShellTokens(processCommand)[0] ?? "",
+    );
+    const nativeExecutable =
+      executable &&
+      regexTest(agent.processMatch, commandName) &&
+      regexTest(agent.processMatch, executableName(executable.path))
+        ? executable
+        : undefined;
+    let probe: string[] | null;
+    if (nativeExecutable) {
+      // A native agent's argv[0] may be bare, a symlink, or a different
+      // installation on daemon PATH. Keep wrappers' script arguments intact;
+      // their PID executable is a runtime whose version is not the agent's.
+      // The probe is built here rather than by buildVersionProbeCommand:
+      // a procfs probe path (`/proc/<pid>/exe`, basename `exe`) never
+      // matches processMatch, and that builder would fall back to
+      // `versionCommand` on PATH.
+      probe = [nativeExecutable.probePath, "--version"];
+    } else {
+      probe = buildVersionProbeCommand(processCommand, agent);
+    }
     if (!probe) {
       return null;
     }
 
-    const cacheKey = `${agent.name}\0${probe.join("\0")}`;
+    // The probed file's identity is part of the key: an installer that
+    // replaces the binary at the same path (OpenCode 2's writes over 1.x's
+    // ~/.opencode/bin/opencode) must not inherit the old binary's version.
+    const identity = await this.fileIdentity(probe[0]);
+    if (nativeExecutable) {
+      if (!identity) return null;
+      // macOS lsof can keep the original pathname without a `(deleted)`
+      // suffix after replacement. Only its device/inode identify the live
+      // executable; stat'ing the pathname alone identifies the replacement.
+      const live = nativeExecutable.identity;
+      if (
+        live &&
+        (BigInt(identity.dev) !== live.dev || BigInt(identity.ino) !== live.ino)
+      ) {
+        return null;
+      }
+    }
+    const identityKey = fileIdentityKey(identity);
+    const cacheKey = `${agent.name}\0${probe.join("\0")}\0${identityKey}\0${nativeExecutable ? "native" : "command"}`;
     const now = this.now();
     const cached = this.cache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
@@ -426,6 +507,7 @@ export class VersionResolver {
       processCommand,
       agent,
       agent.versionPatterns,
+      nativeExecutable ? identityKey : undefined,
     );
     this.inflight.set(cacheKey, pending);
     return pending;
@@ -437,14 +519,25 @@ export class VersionResolver {
     processCommand: string,
     agent: AgentDef,
     patterns?: RegExp[],
+    expectedIdentity?: string,
   ): Promise<string | null> {
-    let value = inferVersionFromProcessCommand(processCommand, agent);
+    // Native probes read the executable itself; a nearby package.json or
+    // version-named directory can have changed independently of that inode.
+    let value = expectedIdentity
+      ? null
+      : inferVersionFromProcessCommand(processCommand, agent);
 
     try {
       if (!value) {
         const result = await this.runCommand(probe, this.timeoutMs);
         const output = `${result.stdout}\n${result.stderr}`;
         value = extractVersionFromOutput(output, patterns);
+      }
+      if (
+        expectedIdentity !== undefined &&
+        fileIdentityKey(await this.fileIdentity(probe[0])) !== expectedIdentity
+      ) {
+        value = null;
       }
     } catch {
       value = null;
@@ -457,5 +550,19 @@ export class VersionResolver {
     }
 
     return value;
+  }
+
+  /** A probed executable's stat identity, or null for a bare name or a file
+   *  that cannot be stat'd. A command probe's cache key then falls back to
+   *  the path alone; a native probe refuses to run without one. */
+  private async fileIdentity(
+    path: string | undefined,
+  ): Promise<FileIdentity | null> {
+    if (!path || !isAbsolute(path)) return null;
+    try {
+      return await this.statFile(path);
+    } catch {
+      return null;
+    }
   }
 }

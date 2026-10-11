@@ -105,6 +105,10 @@ export interface TranscriptSession {
   logPath: string | null;
   cwd: string;
   nativeSessionId?: string;
+  /** The pane's agent process, for readers requiring current marker ownership. */
+  pid?: number | null;
+  /** The agent's resolved version, for readers whose storage differs by it. */
+  version?: string | null;
 }
 
 /**

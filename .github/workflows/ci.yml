@@ -7,8 +7,12 @@ on:
     branches: [main]
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -20,5 +24,24 @@ jobs:
       # own completion engine. Without fish on the runner those tests skip
       # silently, which is how a bad line in that script shipped once: every
       # other assertion about it is a substring match on the script text.
-      - run: sudo apt-get update && sudo apt-get install -y fish
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y fish
+      - if: runner.os == 'macOS'
+        run: brew install fish
+      - name: Verify completion test shells
+        run: |
+          bash --version
+          fish --version
       - run: bun test
+
+  # Branch protection requires a check named `ci`, and a matrix job reports one
+  # check per leg (`test (ubuntu-latest)`, ...), never a bare `ci`. This gate
+  # keeps that name stable however the matrix changes. `always()` is
+  # load-bearing: without it a failed leg SKIPS this job, and protection counts
+  # a skipped required check as passing.
+  ci:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test.result }}" = "success"

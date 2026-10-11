@@ -700,8 +700,8 @@ async function runMove(input: MoveChangesInput): Promise<MoveChangesResult> {
   // dir/" and exits 0, leaving the directory exactly where it was. So this list
   // is what either mode can honestly claim: the copy set for `copy`, and the
   // report for `move`, whose stash arguments are unchanged — it still hands
-  // git the whole tree and lets git decline the part it will not take. Only
-  // `.claude/worktrees/` is covered upstream, by the hosting repo's exclude.
+  // git the whole tree and lets git decline the part it will not take. Configured
+  // nested worktree parents are covered upstream by the hosting repo's exclude.
   const untrackedFiles = state.untrackedPaths.filter(
     (path) => !path.endsWith("/"),
   );

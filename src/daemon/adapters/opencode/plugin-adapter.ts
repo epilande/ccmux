@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
@@ -10,8 +11,12 @@ import {
   MARKERS_DIR,
   OPENCODE_PLUGIN_DIR,
   OPENCODE_PLUGIN_FILE,
+  OPENCODE_TUI_PLUGIN_DIR,
+  OPENCODE_TUI_PLUGIN_FILE,
 } from "../../../lib/config";
 import pkg from "../../../../package.json" with { type: "json" };
+import { BUILTIN_AGENTS, parseMajorVersion } from "../../../lib/agents";
+import { VersionResolver } from "../../version-resolver";
 import { aggregateOpenCodeMarkers } from "./aggregate";
 import {
   findPaneTrackedSession,
@@ -19,7 +24,7 @@ import {
   type HookAdapterOutcome,
   type HookManagerContext,
 } from "../../hook-adapter";
-import { renderOpenCodePlugin } from "./plugin-script";
+import { renderOpenCodePlugin, renderOpenCodeTuiPlugin } from "./plugin-script";
 import {
   filterMarkerCache,
   type SessionPidMarker,
@@ -29,6 +34,16 @@ const CCMUX_VERSION: string = pkg.version;
 
 const SENTINEL_PREFIX = "// ccmux-plugin v";
 const SENTINEL_REGEX = /^\/\/ ccmux-plugin v(\S+)/;
+
+/** `opencode --version` from PATH: `1.18.34` on 1.x, `opencode v2.0.21` on 2.x. */
+async function readInstalledOpenCodeVersion(): Promise<string | null> {
+  const agent = BUILTIN_AGENTS.find((a) => a.name === "opencode");
+  if (!agent) return null;
+  return new VersionResolver({ timeoutMs: 3000 }).resolve(
+    agent,
+    agent.executable ?? agent.name,
+  );
+}
 
 function inspectInstalledPlugin(path: string): {
   exists: boolean;
@@ -48,102 +63,261 @@ function inspectInstalledPlugin(path: string): {
 }
 
 /**
+ * One ccmux-owned file in OpenCode's config dir. OpenCode 1 loads the
+ * server plugin (`plugin/ccmux.js`); OpenCode 2 rejects that file and loads
+ * the TUI plugin (`plugins/ccmux/tui.js`), which OpenCode 1 never reads.
+ */
+interface PluginFile {
+  file: string;
+  dir: string;
+  /** The directory exists only for this file, so uninstall removes it too. */
+  ownsDir: boolean;
+  render: typeof renderOpenCodePlugin;
+}
+
+// Built per call rather than at module load, so the paths stay live config
+// bindings (tests mock them; a module-level copy would keep the real ones).
+function serverPlugin(): PluginFile {
+  return {
+    file: OPENCODE_PLUGIN_FILE,
+    dir: OPENCODE_PLUGIN_DIR,
+    ownsDir: false,
+    render: renderOpenCodePlugin,
+  };
+}
+
+function tuiPlugin(): PluginFile {
+  return {
+    file: OPENCODE_TUI_PLUGIN_FILE,
+    dir: OPENCODE_TUI_PLUGIN_DIR,
+    ownsDir: true,
+    render: renderOpenCodeTuiPlugin,
+  };
+}
+
+/**
+ * Write (or refresh) one plugin file. A same-named file without the
+ * sentinel is left alone, matching Codex's "advisory, keep going" posture
+ * so a combined `ccmux setup` can still install the other agents' hooks.
+ */
+function installPluginFile(plugin: PluginFile): HookAdapterOutcome {
+  const inspection = inspectInstalledPlugin(plugin.file);
+  if (inspection.exists && !inspection.owned) {
+    return {
+      lines: [
+        `Skipped ${plugin.file}: first line does not start with "${SENTINEL_PREFIX}".`,
+        "Move the existing file aside and re-run `ccmux setup --agent opencode` to install.",
+      ],
+      changed: false,
+    };
+  }
+  const source = plugin.render({
+    markersDir: MARKERS_DIR,
+    version: CCMUX_VERSION,
+  });
+  if (inspection.exists && readFileSync(plugin.file, "utf-8") === source) {
+    return {
+      lines: [`Plugin already up to date: ${plugin.file}`],
+      changed: false,
+    };
+  }
+  mkdirSync(plugin.dir, { recursive: true });
+  const tmp = `${plugin.file}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmp, source);
+  renameSync(tmp, plugin.file);
+  return {
+    lines: [
+      inspection.exists
+        ? `Updated plugin: ${plugin.file} (was v${inspection.version ?? "unknown"}, now v${CCMUX_VERSION})`
+        : `Created plugin: ${plugin.file}`,
+    ],
+    changed: true,
+  };
+}
+
+/**
+ * OpenCode 2 rejects the server plugin outright ("Plugin must export a
+ * default definition with an id and an effect or setup function") and
+ * raises that error on every launch, so setup removes a copy it wrote
+ * earlier instead of installing one. A same-named file ccmux did not write
+ * is left alone.
+ */
+function retireServerPlugin(version: string): HookAdapterOutcome {
+  const inspection = inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
+  if (inspection.owned) {
+    unlinkSync(OPENCODE_PLUGIN_FILE);
+    return {
+      lines: [
+        `Removed ${OPENCODE_PLUGIN_FILE}, which OpenCode ${version} rejects at startup.`,
+      ],
+      changed: true,
+    };
+  }
+  if (inspection.exists) {
+    return {
+      lines: [
+        `Left ${OPENCODE_PLUGIN_FILE} alone: first line does not start with "${SENTINEL_PREFIX}".`,
+      ],
+      changed: false,
+    };
+  }
+  return { lines: [], changed: false };
+}
+
+function uninstallPluginFile(plugin: PluginFile): HookAdapterOutcome {
+  const inspection = inspectInstalledPlugin(plugin.file);
+  if (!inspection.exists) return { lines: [], changed: false };
+  if (!inspection.owned) {
+    return {
+      lines: [
+        `Skipped ${plugin.file}: first line does not start with "${SENTINEL_PREFIX}". ` +
+          "Refusing to delete a file ccmux did not write.",
+      ],
+      changed: false,
+    };
+  }
+  unlinkSync(plugin.file);
+  if (plugin.ownsDir) {
+    try {
+      rmdirSync(plugin.dir);
+    } catch {
+      // Not empty (leave whatever else landed there), or already gone.
+    }
+  }
+  return { lines: [`Removed ${plugin.file}`], changed: true };
+}
+
+/**
  * OpenCode plugin-based hook integration.
  *
  * Unlike Claude/Codex, there are no shell scripts to install. `install()`
- * writes a single JS file to OpenCode's auto-discovered plugin directory;
- * `uninstall()` unlinks it. The plugin's first line carries a sentinel
+ * writes JS files OpenCode auto-discovers: the TUI plugin for OpenCode 2
+ * (always; OpenCode 1 ignores it) and the server plugin for OpenCode 1
+ * (removed instead when the installed OpenCode is 2.x, which rejects it).
+ * `uninstall()` unlinks both. Each file's first line carries a sentinel
  * (`// ccmux-plugin v<version>`) so we can confirm ownership before
  * overwriting or deleting.
  *
- * Marker lifecycle is driven by the plugin: on every OpenCode bus event
- * it rewrites a `opencode-<session_id>.json` marker. The adapter reads
- * those markers (via `filterMarkerCache`) and folds the N-per-server set
- * into the single ccmux Session for the hosting tmux pane.
+ * Marker lifecycle is driven by the plugins: on OpenCode events they
+ * rewrite `opencode-<session_id>.json` markers with the same schema. The
+ * adapter reads those markers (via `filterMarkerCache`) and folds every
+ * marker sharing a pid into the single ccmux Session for the hosting tmux
+ * pane: N sessions per 1.x server, one displayed session per 2.x TUI.
  */
 export class OpenCodePluginAdapter implements HookAdapter {
   readonly agentType = "opencode";
 
+  private readonly readOpenCodeVersion: () => Promise<string | null>;
+
+  constructor(
+    options: {
+      /** Version string of the `opencode` on PATH, or null if it cannot be run. */
+      readOpenCodeVersion?: () => Promise<string | null>;
+    } = {},
+  ) {
+    this.readOpenCodeVersion =
+      options.readOpenCodeVersion ?? readInstalledOpenCodeVersion;
+  }
+
+  /** The installed OpenCode's version when it is 2.x or newer, else null. */
+  private async detectOpenCode2(): Promise<string | null> {
+    const version = await this.readOpenCodeVersion().catch(() => null);
+    const major = parseMajorVersion(version);
+    return major !== null && major >= 2 ? version : null;
+  }
+
   async install(): Promise<HookAdapterOutcome> {
-    const lines: string[] = [];
-
-    const inspection = inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
-    if (inspection.exists && !inspection.owned) {
-      // Matches Codex's "advisory, keep going" posture so a combined
-      // `ccmux setup` invocation can still install Claude/Codex hooks.
+    const tui = installPluginFile(tuiPlugin());
+    const v2Version = await this.detectOpenCode2();
+    const server = v2Version
+      ? retireServerPlugin(v2Version)
+      : installPluginFile(serverPlugin());
+    const lines = [...tui.lines, ...server.lines];
+    const changed = tui.changed || server.changed;
+    // Only a written plugin needs a restart. A retired one needs none:
+    // OpenCode 2 already refused it at startup.
+    if (tui.changed || (!v2Version && server.changed)) {
       lines.push(
-        `Skipped ${OPENCODE_PLUGIN_FILE}: first line does not start with "${SENTINEL_PREFIX}".`,
+        "Restart any running OpenCode sessions to pick up the plugin.",
       );
-      lines.push(
-        "Move the existing file aside and re-run `ccmux setup --agent opencode` to install.",
-      );
-      return { lines, changed: false };
     }
-
-    mkdirSync(OPENCODE_PLUGIN_DIR, { recursive: true });
-
-    const source = renderOpenCodePlugin({
-      markersDir: MARKERS_DIR,
-      version: CCMUX_VERSION,
-    });
-    const tmp = `${OPENCODE_PLUGIN_FILE}.tmp.${process.pid}.${Date.now()}`;
-    writeFileSync(tmp, source);
-    renameSync(tmp, OPENCODE_PLUGIN_FILE);
-
-    lines.push(
-      inspection.exists
-        ? `Updated plugin: ${OPENCODE_PLUGIN_FILE} (was v${inspection.version ?? "unknown"}, now v${CCMUX_VERSION})`
-        : `Created plugin: ${OPENCODE_PLUGIN_FILE}`,
-    );
-    lines.push("OpenCode will auto-discover the plugin on next launch.");
-    lines.push("Restart any running OpenCode sessions to pick up the plugin.");
-    return { lines, changed: true };
+    return { lines, changed };
   }
 
   async uninstall(): Promise<HookAdapterOutcome> {
-    const lines: string[] = [];
-    const inspection = inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
-    if (!inspection.exists) {
-      lines.push(`No ccmux plugin at ${OPENCODE_PLUGIN_FILE}.`);
-      return { lines, changed: false };
-    }
-    if (!inspection.owned) {
+    const outcomes = [serverPlugin(), tuiPlugin()].map(uninstallPluginFile);
+    const lines = outcomes.flatMap((o) => o.lines);
+    const changed = outcomes.some((o) => o.changed);
+    if (!changed && lines.length === 0) {
       lines.push(
-        `Skipped ${OPENCODE_PLUGIN_FILE}: first line does not start with "${SENTINEL_PREFIX}". ` +
-          "Refusing to delete a file ccmux did not write.",
+        `No ccmux plugin at ${OPENCODE_PLUGIN_FILE} or ${OPENCODE_TUI_PLUGIN_FILE}.`,
       );
-      return { lines, changed: false };
     }
-    unlinkSync(OPENCODE_PLUGIN_FILE);
-    lines.push(`Removed ${OPENCODE_PLUGIN_FILE}`);
-    lines.push(
-      "Marker files under ~/.config/ccmux/session-pids/ will be swept on the next daemon cycle.",
-    );
-    return { lines, changed: true };
+    if (changed) {
+      lines.push(
+        "Marker files under ~/.config/ccmux/session-pids/ will be swept on the next daemon cycle.",
+      );
+    }
+    return { lines, changed };
   }
 
   isInstalled(): boolean {
-    return inspectInstalledPlugin(OPENCODE_PLUGIN_FILE).owned;
+    return (
+      inspectInstalledPlugin(OPENCODE_TUI_PLUGIN_FILE).owned ||
+      inspectInstalledPlugin(OPENCODE_PLUGIN_FILE).owned
+    );
   }
 
   describeInstallDetail(): string | null {
-    const inspection = inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
+    const tui = inspectInstalledPlugin(OPENCODE_TUI_PLUGIN_FILE);
+    const inspection = tui.owned
+      ? tui
+      : inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
     if (!inspection.owned || !inspection.version) return null;
     return inspection.version === CCMUX_VERSION
       ? `(plugin v${inspection.version}, matches running ccmux)`
       : `(plugin v${inspection.version})`;
   }
 
-  describeInstallAnomalies(): string[] {
-    const inspection = inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
-    if (!inspection.owned) return [];
-    if (inspection.version && inspection.version !== CCMUX_VERSION) {
-      return [
-        `OpenCode: plugin at ${OPENCODE_PLUGIN_FILE} is v${inspection.version} but ccmux is v${CCMUX_VERSION}. ` +
-          "Run `ccmux setup --agent opencode` to update.",
-      ];
+  async describeInstallAnomalies(): Promise<string[]> {
+    const warnings: string[] = [];
+    const server = inspectInstalledPlugin(OPENCODE_PLUGIN_FILE);
+    if (server.owned) {
+      const v2Version = await this.detectOpenCode2();
+      if (v2Version) {
+        warnings.push(
+          `OpenCode: plugin at ${OPENCODE_PLUGIN_FILE} is installed, but OpenCode ${v2Version} rejects it at startup. ` +
+            "Run `ccmux setup --agent opencode` to replace it.",
+        );
+      }
+    } else if (!server.exists) {
+      // The other direction: setup ran while 2.x was on PATH, so only the
+      // TUI plugin is installed, which OpenCode 1 never loads.
+      const tui = inspectInstalledPlugin(OPENCODE_TUI_PLUGIN_FILE);
+      const version = tui.owned
+        ? await this.readOpenCodeVersion().catch(() => null)
+        : null;
+      if (parseMajorVersion(version) === 1) {
+        warnings.push(
+          `OpenCode: only the OpenCode 2 plugin is installed, but OpenCode ${version} loads ${OPENCODE_PLUGIN_FILE}. ` +
+            "Run `ccmux setup --agent opencode` to install it.",
+        );
+      }
     }
-    return [];
+    for (const file of [OPENCODE_PLUGIN_FILE, OPENCODE_TUI_PLUGIN_FILE]) {
+      const inspection = inspectInstalledPlugin(file);
+      if (
+        inspection.owned &&
+        inspection.version &&
+        inspection.version !== CCMUX_VERSION
+      ) {
+        warnings.push(
+          `OpenCode: plugin at ${file} is v${inspection.version} but ccmux is v${CCMUX_VERSION}. ` +
+            "Run `ccmux setup --agent opencode` to update.",
+        );
+      }
+    }
+    return warnings;
   }
 
   isSessionStillLive(_marker: SessionPidMarker): boolean {

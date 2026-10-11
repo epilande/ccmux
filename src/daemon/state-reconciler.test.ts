@@ -635,6 +635,50 @@ describe("reconcileAll", () => {
       };
     }
 
+    it.each([
+      [
+        'Completed: {"error":{"type":"permission.rejected"}}\nBuild · MiMo-V2.6-Flash Free\nctrl+p commands',
+        "idle",
+      ],
+      [
+        "△ Permission required\n$ ls\nAllow once  Reject\nenter confirm",
+        "waiting",
+      ],
+      [
+        "△ Reject permission\nTell OpenCode what to do differently\nenter confirm  esc cancel",
+        "waiting",
+      ],
+    ] as const)(
+      "an idle marker with terminal %s settles at %s",
+      async (capture, status) => {
+        const id = opencodeSession();
+        const marker = ocMarker({
+          session_id: "ses_primary",
+          state: "idle",
+          state_timestamp: 1_000,
+        });
+        mockCapturePane = async () => capture;
+        await reconcileAll(
+          makeDeps(sessionManager, {
+            hookManager: {
+              getMarkerForSession: () => marker,
+              getMarkersByAgentAndPid: () => [marker],
+            },
+            agents: BUILTIN_AGENTS.filter((agent) => agent.name === "opencode"),
+          }),
+          makeSnapshot({ panes: [fakePane({ paneId: "%2", tty: "ttys002" })] }),
+        );
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe(status);
+        expect(session.attentionType).toBe(
+          status === "waiting" ? "permission" : null,
+        );
+        expect(session.pendingTool).toBe(
+          status === "waiting" ? "Command" : null,
+        );
+      },
+    );
+
     it("uses aggregator (worst-of) instead of single-marker stateFromMarker", async () => {
       // One server PID hosts three sessions: one waiting_permission, one
       // working, one idle. The single marker matched by nativeSessionId

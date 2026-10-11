@@ -255,6 +255,16 @@ export interface AgentDef {
    * pattern is positional (`/(^|\s)\/\S/`). A matching reply is refused
    * fail-closed at the accept path (409, text preserved via re-notify)
    * instead of typed into the pane.
+   *
+   * `approvalKeysVerifiedThroughMajor` is the newest major version of the
+   * agent whose permission prompt `approve`/`deny` were verified against. A
+   * session on a newer major, or one whose version has not resolved, gets
+   * neither key (see `sessionNotificationActions`), because a prompt
+   * redesign can turn a deny sequence into an approve. Like
+   * `unsafeReplyPattern`, it survives a user override that omits it: the
+   * README tells users to copy across the keys they keep, and a copied 1.x
+   * deny sequence is exactly what approves on 2.x. An override lifts the
+   * gate only by setting a larger number itself.
    */
   notificationActions?: {
     approve?: string[];
@@ -267,6 +277,7 @@ export interface AgentDef {
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
     unsafeReplyPattern?: RegExp;
+    approvalKeysVerifiedThroughMajor?: number;
   };
   /**
    * This agent's permission-prompt marker cannot be trusted to mean a real
@@ -500,6 +511,17 @@ function mergeAgentConfig(base: AgentDef, override: AgentConfig): AgentDef {
       merged.notificationActions.unsafeReplyPattern =
         base.notificationActions.unsafeReplyPattern;
     }
+    // Same exception for the approval version gate: an override that copies
+    // the builtin approve/deny keys must not also re-arm them on a major
+    // version where they were never verified (OpenCode 2's Deny approves).
+    if (
+      merged.notificationActions.approvalKeysVerifiedThroughMajor ===
+        undefined &&
+      base.notificationActions?.approvalKeysVerifiedThroughMajor !== undefined
+    ) {
+      merged.notificationActions.approvalKeysVerifiedThroughMajor =
+        base.notificationActions.approvalKeysVerifiedThroughMajor;
+    }
   }
   if (override.ambiguousPermissionMarker !== undefined) {
     merged.ambiguousPermissionMarker = override.ambiguousPermissionMarker;
@@ -524,6 +546,15 @@ function parseNotificationActions(
     parsed.unsafeReplyPattern = parseRegex(
       unsafeReplyPattern,
       `${fieldName}.unsafeReplyPattern`,
+    );
+  }
+  const verifiedThrough = config.approvalKeysVerifiedThroughMajor;
+  if (
+    verifiedThrough !== undefined &&
+    !(Number.isInteger(verifiedThrough) && verifiedThrough >= 0)
+  ) {
+    throw new Error(
+      `Invalid ${fieldName}.approvalKeysVerifiedThroughMajor: must be a non-negative integer`,
     );
   }
   return parsed;
@@ -721,9 +752,8 @@ export const BUILTIN_AGENTS: AgentDef[] = [
       // the multi-select Confirm tab renders no arrow glyphs at all, so that
       // anchor silently misses it (fixtures in terminal-detector.test.ts).
       //
-      // MUST stay ahead of the permission rule below, whose `matchAny`
-      // includes the bare word "reject": model-authored question text can
-      // contain it, and a permission misclassification on the pane-only path
+      // MUST stay ahead of the permission rules below: question text can
+      // quote permission controls, and a misclassification on the pane-only path
       // attaches Approve/Deny buttons whose approve key is a bare Enter,
       // which the picker consumes as a selection. See
       // docs/agent-adapters.md for the full capture.
@@ -734,7 +764,21 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: null,
       },
       {
-        matchAny: ["allow once", "allow always", "reject", "[y/n]", "(y/n)"],
+        matchAll: ["allow once", "reject"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      },
+      {
+        // A child permission's Reject action opens a second form. The bare
+        // word "reject" also occurs in completed permission.rejected output.
+        matchAll: ["reject permission", "enter confirm", "esc cancel"],
+        status: "waiting",
+        attentionType: "permission",
+        pendingTool: "Command",
+      },
+      {
+        matchAny: ["[y/n]", "(y/n)"],
         status: "waiting",
         attentionType: "permission",
         pendingTool: "Command",
@@ -789,11 +833,19 @@ export const BUILTIN_AGENTS: AgentDef[] = [
     // OpenCode trims the leading space in front of `!` and enters SHELL MODE,
     // where Enter EXECUTES the text as a real shell command. Hence the
     // unsafeReplyPattern.
+    //
+    // Approve/Deny stop at 1.x (issue #214). OpenCode 2's option row wraps
+    // around and drops "Always allow" when a request carries no save
+    // patterns, so `Right, Right, Enter` from the initial "Allow once" lands
+    // back on "Allow once" and APPROVES (`packages/tui/src/routes/session/
+    // permission.tsx` at v2.0.21). Re-verify against a live 2.x before
+    // raising this.
     notificationActions: {
       approve: ["Enter"],
       deny: ["Right", "Right", "Enter"],
       replyOnFinished: true,
       unsafeReplyPattern: /^\s*!/,
+      approvalKeysVerifiedThroughMajor: 1,
     },
     invokeMode: {
       // `--format json` emits one event per line; default output prints a
@@ -1809,4 +1861,45 @@ export function findAgentForProcess(
     }
   }
   return null;
+}
+
+/**
+ * The major version in a resolved agent version string (`Session.version`,
+ * already stripped of any `v`), or null when it is absent or unparseable.
+ *
+ * `0.0.0` is null too. It is a placeholder, not a release: OpenCode stamps
+ * every preview build `0.0.0-<channel>-<build>` in both its 1.x package
+ * (`0.0.0-dev-202610030456`) and its 2.x one (`0.0.0-beta-19507`), so it
+ * says nothing about which major's code is running, and reading it as 0
+ * would pass a 2.x preview through a 1.x approval gate.
+ */
+export function parseMajorVersion(
+  version: string | null | undefined,
+): number | null {
+  const trimmed = version?.trim();
+  if (!trimmed || /^v?0\.0\.0(?:$|[-+])/i.test(trimmed)) return null;
+  const match = trimmed.match(/^v?(\d+)(?:\.|$)/i);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * The notification actions a session may be offered or may press: the
+ * agent's map, minus `approve`/`deny` when `approvalKeysVerifiedThroughMajor`
+ * does not vouch for the session's major version. An unresolved version
+ * fails closed, since the keys are only safe on a prompt they were checked
+ * against. Every other field passes through untouched.
+ */
+export function sessionNotificationActions(
+  agentDef: AgentDef | undefined,
+  version: string | null | undefined,
+): AgentDef["notificationActions"] {
+  const actions = agentDef?.notificationActions;
+  const verifiedThrough = actions?.approvalKeysVerifiedThroughMajor;
+  if (!actions || verifiedThrough === undefined) return actions;
+  const major = parseMajorVersion(version);
+  if (major !== null && major <= verifiedThrough) return actions;
+  const gated = { ...actions };
+  delete gated.approve;
+  delete gated.deny;
+  return gated;
 }

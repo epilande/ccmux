@@ -1,3 +1,4 @@
+import type { WorktreeConfig } from "./worktree-layout";
 import { mkdirSync, readFileSync } from "fs";
 import { dirname } from "path";
 import { PREFS_FILE } from "./config";
@@ -96,6 +97,9 @@ export interface AgentConfig {
    * regex (string form, parsed like `readyPattern`) matching reply text the
    * delivery path must refuse for this agent (composer triggers a leading
    * space cannot defuse; see `AgentDef.notificationActions`).
+   * `approvalKeysVerifiedThroughMajor` is the newest major version the
+   * `approve`/`deny` keys are known to be safe on; like `unsafeReplyPattern`
+   * it carries over from the built-in when an override omits it.
    */
   notificationActions?: {
     approve?: string[];
@@ -108,6 +112,7 @@ export interface AgentConfig {
     replyOnQuestion?: boolean;
     replyOnFinished?: boolean;
     unsafeReplyPattern?: string;
+    approvalKeysVerifiedThroughMajor?: number;
   };
   /**
    * Set when this custom agent's permission marker can actually cover an
@@ -329,6 +334,8 @@ export interface Preferences {
    * may start with `~`. See `resolveClaudeProjectDirs`.
    */
   additionalClaudeConfigDirs?: string[];
+  /** Worktree directory path template; branch names are unaffected. */
+  worktree?: WorktreeConfig;
   columns?: ColumnsConfig;
   breakpoints?: BreakpointConfig;
   /** Default prompt display mode (default "inline"). The runtime `p`-key
