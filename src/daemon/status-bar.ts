@@ -230,7 +230,9 @@ export class StatusBar {
     await this.pending;
     for (const name of GLOBAL_OPTIONS)
       await this.write(["set-option", "-gu", name]);
-    for (const window of this.windows.keys()) {
+    // Windows cached as null are already clear; only marked ones need an unset.
+    for (const [window, value] of this.windows) {
+      if (value === null) continue;
       await this.write(["set-option", "-qwu", "-t", window, "@ccmux_mark"]);
     }
     this.globals.clear();

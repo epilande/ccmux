@@ -479,4 +479,16 @@ describe("status bar", () => {
     expect(calls).toEqual([]);
   });
 
+  it("unsets only marked windows on shutdown", async () => {
+    const { bar, calls, sessions, add } = harness();
+    sessions.updateSession(add().id, { status: "waiting" });
+    bar.start();
+    bar.updatePanes(panes);
+    await bar.refresh();
+    calls.length = 0;
+    await bar.stop();
+    expect(calls.filter((args) => args.includes("@ccmux_mark"))).toEqual([
+      ["set-option", "-qwu", "-t", "@10", "@ccmux_mark"],
+    ]);
+  });
 });
