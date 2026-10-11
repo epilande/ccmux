@@ -98,6 +98,7 @@ import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
   getMarkerKey,
   isBackgroundSession,
+  isVisibleSession,
   type SessionManager,
   type SessionEvent,
 } from "./sessions";
@@ -1564,27 +1565,6 @@ export class DaemonServer {
   }
 
   /**
-   * Whether a session should be surfaced to clients. Pane-tracked/native
-   * sessions are visible once they have a tmux pane; background
-   * (background-agent) sessions are paneless by nature and visible from
-   * creation (their `created` event IS their visible moment).
-   */
-  private isVisibleSession(s: Readonly<Session>): boolean {
-    return (
-      s.tmuxPane !== null ||
-      s.trackingMode === "background" ||
-      // Transcript-backed native sessions are visible even without a pane:
-      // when the binder refuses to guess (ambiguous
-      // evidence) the row must be VISIBLY unbound, not hidden — an unbound
-      // row self-corrects (marker arrival, rebind attempt) or is reaped by
-      // the zombie cleanup, and hiding it would just re-disguise the
-      // refusal as a missing session. Pane-tracked sessions keep the
-      // pane-gated promotion: their existence IS their pane.
-      (s.trackingMode === "native" && s.logPath !== null)
-    );
-  }
-
-  /**
    * Resolve this daemon's tmux socket path. Works without an attached client
    * (the daemon runs detached): `display-message -p` reads the same server
    * `list-panes -a` scans (the configured socket override, else the inherited
@@ -1646,7 +1626,7 @@ export class DaemonServer {
     const allSessions = this.sessionManager.getSessions();
     const data = {
       status: "ok",
-      sessions: allSessions.filter((s) => this.isVisibleSession(s)).length,
+      sessions: allSessions.filter((s) => isVisibleSession(s)).length,
       trackedSessions: allSessions.length,
       clients: this.sseClients.size,
       uptime: process.uptime(),
@@ -1662,7 +1642,7 @@ export class DaemonServer {
   ): Promise<Response> {
     const showAll = url.searchParams.get("all") === "true";
     let sessions = this.sessionManager.getSessions();
-    if (!showAll) sessions = sessions.filter((s) => this.isVisibleSession(s));
+    if (!showAll) sessions = sessions.filter((s) => isVisibleSession(s));
     return Response.json(
       { sessions: await this.enrichSessions(sessions) },
       { headers },
@@ -2253,7 +2233,7 @@ export class DaemonServer {
     const query = q.toLowerCase();
     const sessions = this.sessionManager
       .getSessions()
-      .filter((s) => this.isVisibleSession(s));
+      .filter((s) => isVisibleSession(s));
 
     const results: SessionMatches[] = [];
     for (let i = 0; i < sessions.length; i += SEARCH_CONCURRENCY) {
@@ -3997,7 +3977,7 @@ export class DaemonServer {
         // Send init event with pane-matched + background (paneless) sessions
         const matched = this.sessionManager
           .getSessions()
-          .filter((s) => this.isVisibleSession(s));
+          .filter((s) => isVisibleSession(s));
         for (const s of matched) this.visibleSessions.add(s.id);
         const initEvent: SSEEvent = {
           type: "init",
@@ -4047,7 +4027,7 @@ export class DaemonServer {
         // session_created at creation. Pane-tracked sessions start
         // tmuxPane=null and are suppressed until a pane is assigned
         // (promoted in the "updated" branch).
-        if (this.isVisibleSession(session)) {
+        if (isVisibleSession(session)) {
           this.visibleSessions.add(session.id);
           this.recordBroadcast(session);
           return {
@@ -4061,7 +4041,7 @@ export class DaemonServer {
 
       case "updated": {
         const session = event.session!;
-        const isVisibleNow = this.isVisibleSession(session);
+        const isVisibleNow = isVisibleSession(session);
         const wasVisible = this.visibleSessions.has(session.id);
 
         if (isVisibleNow && !wasVisible) {

@@ -12,7 +12,7 @@ import {
 } from "../lib/icons";
 import { tmuxArgv } from "../lib/tmux-exec";
 import type { Session, TmuxPane } from "../types/session";
-import type { SessionManager } from "./sessions";
+import { isVisibleSession, type SessionManager } from "./sessions";
 
 const GLOBAL_OPTIONS = [
   "@ccmux_waiting",
@@ -23,7 +23,7 @@ const GLOBAL_OPTIONS = [
 
 type StatusSession = Pick<
   Session,
-  "status" | "attentionState" | "tmuxPane" | "trackingMode"
+  "status" | "attentionState" | "tmuxPane" | "trackingMode" | "logPath"
 >;
 type WindowPane = Pick<TmuxPane, "paneId" | "windowId">;
 type RunTmux = (args: string[]) => Promise<boolean>;
@@ -64,6 +64,9 @@ export function statusBarValues(
   );
   const urgency = new Map<string, "waiting" | "unread">();
   for (const session of sessions) {
+    // Count only what the picker lists: a soft-evicted pane session keeps its
+    // last status until reaped, and a count with no row behind it misleads.
+    if (!isVisibleSession(session)) continue;
     if (session.status === "waiting") waiting++;
     if (session.attentionState === "unread") unread++;
     if (session.status === "working") working++;

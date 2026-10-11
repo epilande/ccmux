@@ -122,6 +122,31 @@ export function isBackgroundSession(session: Session): boolean {
 }
 
 /**
+ * Whether a session should be surfaced to clients. Pane-tracked/native
+ * sessions are visible once they have a tmux pane; background
+ * (background-agent) sessions are paneless by nature and visible from
+ * creation (their `created` event IS their visible moment). Shared by the
+ * server's session lists and the tmux status bar so a count never names a
+ * session the picker hides.
+ */
+export function isVisibleSession(
+  s: Readonly<Pick<Session, "tmuxPane" | "trackingMode" | "logPath">>,
+): boolean {
+  return (
+    s.tmuxPane !== null ||
+    s.trackingMode === "background" ||
+    // Transcript-backed native sessions are visible even without a pane:
+    // when the binder refuses to guess (ambiguous
+    // evidence) the row must be VISIBLY unbound, not hidden — an unbound
+    // row self-corrects (marker arrival, rebind attempt) or is reaped by
+    // the zombie cleanup, and hiding it would just re-disguise the
+    // refusal as a missing session. Pane-tracked sessions keep the
+    // pane-gated promotion: their existence IS their pane.
+    (s.trackingMode === "native" && s.logPath !== null)
+  );
+}
+
+/**
  * Whether a cwd read out of a log entry may replace the session's current
  * one.
  *

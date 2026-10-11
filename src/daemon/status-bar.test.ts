@@ -100,6 +100,7 @@ describe("status bar", () => {
         attentionState: null,
         tmuxPane: "%1",
         trackingMode: "pane" as const,
+        logPath: null,
       },
     ];
     expect(
@@ -147,24 +148,28 @@ describe("status bar", () => {
           attentionState: null,
           tmuxPane: "%1",
           trackingMode: "pane",
+          logPath: null,
         },
         {
           status: "idle",
           attentionState: "unread",
           tmuxPane: "%2",
           trackingMode: "pane",
+          logPath: null,
         },
         {
           status: "working",
           attentionState: null,
           tmuxPane: "%3",
           trackingMode: "pane",
+          logPath: null,
         },
         {
           status: "waiting",
           attentionState: "unread",
           tmuxPane: null,
           trackingMode: "background",
+          logPath: null,
         },
       ],
       panes,
@@ -179,6 +184,48 @@ describe("status bar", () => {
     expect(Object.fromEntries(values.windows)).toEqual({
       "@10": "■",
       "@20": null,
+    });
+  });
+
+  it("counts only sessions the picker lists", () => {
+    const values = statusBarValues(
+      [
+        // Soft-evicted pane session: keeps its last status, hidden until reaped.
+        {
+          status: "waiting",
+          attentionState: null,
+          tmuxPane: null,
+          trackingMode: "pane",
+          logPath: null,
+        },
+        // Unbound native session: listed in the picker, so counted, but unmarked.
+        {
+          status: "waiting",
+          attentionState: null,
+          tmuxPane: null,
+          trackingMode: "native",
+          logPath: "/logs/session.jsonl",
+        },
+        {
+          status: "idle",
+          attentionState: "unread",
+          tmuxPane: "%3",
+          trackingMode: "pane",
+          logPath: null,
+        },
+      ],
+      panes,
+      {},
+    );
+    expect(Object.fromEntries(values.globals)).toEqual({
+      "@ccmux_waiting": "1",
+      "@ccmux_unread": "1",
+      "@ccmux_working": "0",
+      "@ccmux_status": "■ 1 ● 1",
+    });
+    expect(Object.fromEntries(values.windows)).toEqual({
+      "@10": null,
+      "@20": "●",
     });
   });
 
@@ -279,6 +326,7 @@ describe("status bar", () => {
         attentionState: null,
         tmuxPane: "%1",
         trackingMode: "pane" as const,
+        logPath: null,
       },
     ];
     const values = statusBarValues(sessions, panes, {
@@ -430,4 +478,5 @@ describe("status bar", () => {
     await bar.refresh();
     expect(calls).toEqual([]);
   });
+
 });
