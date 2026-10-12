@@ -128,6 +128,8 @@ async function runTmux(args: string[]): Promise<boolean> {
 /** One serialized writer: change bursts coalesce, and shutdown drains before unsetting. */
 export class StatusBar {
   private active = false;
+  // Stay quiet until a pane scan confirms a server, including during startup.
+  private serverAvailable = false;
   private dirty = false;
   private resetCache = false;
   private pending: Promise<void> | null = null;
@@ -145,7 +147,7 @@ export class StatusBar {
   ) {}
 
   start(): void {
-    if (this.active || this.prefs.statusBar?.enabled !== true) return;
+    if (this.active || this.prefs.statusBar?.enabled === false) return;
     this.active = true;
     this.sessions.on("change", this.listener);
     this.refresh();
@@ -153,8 +155,8 @@ export class StatusBar {
 
   /** The existing daemon scan supplies topology changes even when session state is unchanged. */
   updatePanes(panes: readonly WindowPane[], noServer = false): void {
-    if (!this.active) return;
     this.panes = panes;
+    this.serverAvailable = !noServer;
     // tmux restarts can reuse window IDs; old successful writes no longer exist.
     if (noServer) {
       this.resetCache = true;
@@ -163,7 +165,7 @@ export class StatusBar {
   }
 
   refresh(): Promise<void> {
-    if (!this.active) return Promise.resolve();
+    if (!this.active || !this.serverAvailable) return Promise.resolve();
     this.dirty = true;
     if (!this.pending) {
       this.pending = Promise.resolve().then(async () => {
@@ -181,6 +183,8 @@ export class StatusBar {
   }
 
   private async write(args: string[]): Promise<boolean> {
+    // A no-server scan can arrive while the preceding write is in flight.
+    if (!this.serverAvailable) return false;
     try {
       return await this.run(args);
     } catch {
@@ -189,6 +193,7 @@ export class StatusBar {
   }
 
   private async sync(): Promise<void> {
+    if (!this.serverAvailable) return;
     if (this.resetCache) {
       this.globals.clear();
       this.windows.clear();

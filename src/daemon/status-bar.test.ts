@@ -10,7 +10,7 @@ const panes = [
   { paneId: "%3", windowId: "@20" },
 ];
 
-function harness(config: StatusBarConfig = { enabled: true }) {
+function harness(config?: StatusBarConfig) {
   const sessions = new SessionManager();
   const calls: string[][] = [];
   const bar = new StatusBar(sessions, { statusBar: config }, async (args) => {
@@ -129,8 +129,31 @@ describe("status bar", () => {
     ).toBe(" ⏳");
   });
 
-  it("is opt-in and never subscribes or runs tmux when disabled", async () => {
-    const { bar, sessions, calls, add } = harness({});
+  for (const config of [undefined, {}, { enabled: true }]) {
+    it(`publishes with ${JSON.stringify(config) ?? "no statusBar config"}`, async () => {
+      const { bar, calls, sessions, add } = harness(config);
+      sessions.updateSession(add().id, { status: "waiting" });
+      // The daemon supplies the initial scan before starting the publisher.
+      bar.updatePanes(panes);
+      await bar.refresh();
+      expect(calls).toEqual([]);
+      bar.start();
+      await bar.refresh();
+      expect(calls).toContainEqual(["set-option", "-g", "@ccmux_waiting", "1"]);
+      expect(calls).toContainEqual([
+        "set-option",
+        "-w",
+        "-t",
+        "@10",
+        "@ccmux_mark",
+        " ■",
+      ]);
+      await bar.stop();
+    });
+  }
+
+  it("never subscribes or runs tmux when explicitly disabled", async () => {
+    const { bar, sessions, calls, add } = harness({ enabled: false });
     bar.start();
     add();
     bar.updatePanes(panes);
@@ -138,6 +161,51 @@ describe("status bar", () => {
     await bar.stop();
     expect(calls).toEqual([]);
     expect(sessions.listenerCount("change")).toBe(0);
+  });
+
+  it("stays quiet before a successful scan and while no server exists, including shutdown", async () => {
+    const { bar, calls, sessions, add } = harness();
+    bar.start();
+    const session = add();
+    await bar.refresh();
+    expect(calls).toEqual([]);
+    for (let i = 0; i < 3; i++) {
+      bar.updatePanes([], true);
+      sessions.updateSession(session.id, { lastPrompt: `prompt ${i}` });
+      await bar.refresh();
+    }
+    await bar.stop();
+    expect(calls).toEqual([]);
+    expect(sessions.listenerCount("change")).toBe(0);
+  });
+
+  it("republishes all counts and marks after server loss, even with reused window IDs", async () => {
+    const { bar, calls, sessions, add } = harness();
+    sessions.updateSession(add().id, { status: "waiting" });
+    bar.updatePanes([], true);
+    bar.start();
+    await bar.refresh();
+    expect(calls).toEqual([]);
+    bar.updatePanes(panes);
+    await bar.refresh();
+    const initial = calls.slice();
+    expect(initial.filter((args) => args[1] === "-g")).toHaveLength(4);
+    expect(initial).toContainEqual([
+      "set-option",
+      "-w",
+      "-t",
+      "@10",
+      "@ccmux_mark",
+      " ■",
+    ]);
+    calls.length = 0;
+    bar.updatePanes([], true);
+    await bar.refresh();
+    expect(calls).toEqual([]);
+    bar.updatePanes(panes);
+    await bar.refresh();
+    expect(calls).toEqual(initial);
+    await bar.stop();
   });
 
   it("counts background sessions globally and prioritizes waiting in shared windows", () => {
@@ -360,16 +428,41 @@ describe("status bar", () => {
       },
     );
     bar.start();
+    bar.updatePanes([]);
     await bar.refresh();
     calls.length = 0;
     failing = false;
     bar.updatePanes([]);
     await bar.refresh();
     expect(calls).toEqual([["set-option", "-g", "@ccmux_unread", "0"]]);
-    calls.length = 0;
+    await bar.stop();
+  });
+
+  it("stops further writes when server loss arrives during an in-flight write", async () => {
+    const sessions = new SessionManager();
+    const calls: string[][] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const bar = new StatusBar(sessions, {}, async (args) => {
+      calls.push(args);
+      if (calls.length === 1) await blocked;
+      return true;
+    });
+    bar.updatePanes(panes);
+    bar.start();
+    const pending = bar.refresh();
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
     bar.updatePanes([], true);
+    release();
+    await pending;
+    expect(calls).toHaveLength(1);
+    calls.length = 0;
+    bar.updatePanes(panes);
     await bar.refresh();
-    expect(calls).toHaveLength(4);
+    expect(calls.filter((args) => args[1] === "-g")).toHaveLength(4);
     await bar.stop();
   });
 

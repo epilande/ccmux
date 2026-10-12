@@ -518,6 +518,8 @@ export class Daemon {
       this.copilotWatcher.ready,
     ]);
 
+    // Capture the initial scan's topology/server state without publishing yet.
+    this.statusBar = new StatusBar(this.sessionManager, preferences);
     // Initial scan - also matches existing sessions to panes
     DaemonPerf.startReporter(5);
     await this.scan();
@@ -535,9 +537,7 @@ export class Daemon {
     this.setupSignalHandlers();
 
     // Publish only after startup succeeds, with the initial scan's topology.
-    this.statusBar = new StatusBar(this.sessionManager, preferences);
     this.statusBar.start();
-    this.statusBar.updatePanes([...this.paneCache.values()]);
 
     this.running = true;
     console.log(`Daemon started with PID ${process.pid}`);

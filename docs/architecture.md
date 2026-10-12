@@ -608,7 +608,7 @@ Section and repo headers are LINES the cursor never stops on, but lines `sourceP
 | Agent-to-invoker dispatch                                                                                               | `src/daemon/invokers/registry.ts`             |
 | Claude interactive-tmux invoker                                                                                         | `src/daemon/invokers/claude-invoker.ts`       |
 | Subprocess invoker (Codex/Cursor/etc.)                                                                                  | `src/daemon/invokers/subprocess-invoker.ts`   |
-| Tmux status counts and window attention marks (opt-in, change-driven, serialized writes)                                | `src/daemon/status-bar.ts`                    |
+| Tmux status counts and window attention marks (default-on publishing, explicit opt-out, serialized writes; pauses without a server) | `src/daemon/status-bar.ts`                    |
 | Notification trigger engine (debounce, gating, payload build)                                                           | `src/daemon/notifier.ts`                      |
 | Notification backend resolution + delivery (dependency-free)                                                            | `src/lib/notify.ts`                           |
 | Daemon delivery + retraction wrapper                                                                                    | `src/daemon/notify-delivery.ts`               |

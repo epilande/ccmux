@@ -247,7 +247,7 @@ export interface NotificationsConfig {
 }
 
 export interface StatusBarConfig {
-  /** Opt-in; all settings take effect after a daemon restart. */
+  /** Default true; false disables publishing. Settings require a daemon restart. */
   enabled?: boolean;
   /** Override the shared iconStyle glyphs (dot defaults: ■ / ●). */
   waitingIcon?: string;

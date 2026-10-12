@@ -243,20 +243,15 @@ bind-key S run-shell "ccmux sidebar --toggle"
 
 ### Tmux status line
 
-Expose session counts and window attention marks without opening the picker:
-
-```bash
-ccmux config set statusBar.enabled true
-ccmux daemon restart
-```
-
-Add the options to your own `~/.tmux.conf` formats (ccmux never edits them):
+The daemon publishes session counts and window attention marks automatically. Nothing changes visibly until you reference the options in your own `~/.tmux.conf` formats (ccmux never edits them):
 
 ```tmux
 set -g status-right '#{@ccmux_status} %H:%M'
 set -g window-status-format '#I:#W#{@ccmux_mark}'
 set -g window-status-current-format '#I:#W#{@ccmux_mark}'
 ```
+
+Reload with `tmux source-file ~/.tmux.conf`. To disable publishing entirely, set `ccmux config set statusBar.enabled false` and restart the daemon. Publishing pauses while no tmux server is available and resumes when the daemon detects one.
 
 `@ccmux_status` shows waiting and unread counts, for example `■ 2 ● 1`, and is empty when neither needs attention. The global options `@ccmux_waiting`, `@ccmux_unread`, and `@ccmux_working` expose raw counts for custom formats. Each window's `@ccmux_mark` shows its most urgent state: waiting (`■`) before unread (`●`). The mark includes its leading space and is unset on quiet windows, so place it directly after `#W`. Background sessions count globally but have no window mark. Focusing a pane clears unread through the existing attention tracking.
 
