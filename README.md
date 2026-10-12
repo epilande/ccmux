@@ -258,7 +258,7 @@ set -g window-status-format '#I:#W#{@ccmux_mark}'
 set -g window-status-current-format '#I:#W#{@ccmux_mark}'
 ```
 
-`@ccmux_status` shows waiting and unread counts, for example `■ 2 ● 1`, and is empty when neither needs attention. The global options `@ccmux_waiting`, `@ccmux_unread`, and `@ccmux_working` expose raw counts for custom formats. Each window's `@ccmux_mark` shows its most urgent state: waiting (`■`) before unread (`●`). Background sessions count globally but have no window mark. Focusing a pane clears unread through the existing attention tracking.
+`@ccmux_status` shows waiting and unread counts, for example `■ 2 ● 1`, and is empty when neither needs attention. The global options `@ccmux_waiting`, `@ccmux_unread`, and `@ccmux_working` expose raw counts for custom formats. Each window's `@ccmux_mark` shows its most urgent state: waiting (`■`) before unread (`●`). The mark includes its leading space and is unset on quiet windows, so place it directly after `#W`. Background sessions count globally but have no window mark. Focusing a pane clears unread through the existing attention tracking.
 
 Icons follow the existing `iconStyle` preference (`dot`, `emoji`, `nerdfont`, or `none`), using the shared generic waiting and unread icons. The default `dot` style uses ordinary Unicode symbols and does not require a Nerd Font. Only choose `nerdfont` if your terminal uses a Nerd Font; unsupported glyphs may appear as boxes. For plain ASCII, use overrides such as `!` and `*` below. With `none`, counts remain visible and window marks are hidden. Explicit icon overrides take precedence, including over `none`. Icons and foreground colors apply to both the segment and window marks:
 
@@ -277,8 +277,8 @@ Colors default to empty (inherit your tmux style); accepted colors are ANSI name
 ```tmux
 set -g mouse on
 set -g status-right '#[range=user|ccmux]#{@ccmux_status}#[range=right] %H:%M'
-set -g window-status-format '#I:#W#[range=user|ccmux] #{@ccmux_mark}#[range=window|#{window_index}] '
-set -g window-status-current-format '#I:#W#[range=user|ccmux] #{@ccmux_mark}#[range=window|#{window_index}] '
+set -g window-status-format '#I:#W#[range=user|ccmux]#{@ccmux_mark}#[range=window|#{window_index}]'
+set -g window-status-current-format '#I:#W#[range=user|ccmux]#{@ccmux_mark}#[range=window|#{window_index}]'
 
 bind-key -n MouseDown1Status if-shell -F '#{==:#{mouse_status_range},ccmux}' {
   display-popup -E -w 80% -h 75% 'ccmux picker'

@@ -105,10 +105,10 @@ export function statusBarValues(
   for (const pane of panes) {
     if (!pane.windowId) continue;
     const state = urgency.get(pane.windowId);
-    windows.set(
-      pane.windowId,
-      state ? marker(config, state, style) || null : null,
-    );
+    const mark = state ? marker(config, state, style) : "";
+    // The mark carries its own leading space so a plain `#W#{@ccmux_mark}`
+    // separates it from the name, and a quiet window adds nothing.
+    windows.set(pane.windowId, mark ? ` ${mark}` : null);
   }
   return { globals, windows };
 }

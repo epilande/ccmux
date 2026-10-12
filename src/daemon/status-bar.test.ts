@@ -84,7 +84,7 @@ describe("status bar", () => {
                 "-t",
                 window,
                 "@ccmux_mark",
-                `#[fg=${color}]${icon}#[fg=default]`,
+                ` #[fg=${color}]${icon}#[fg=default]`,
               ]
             : ["set-option", "-qwu", "-t", window, "@ccmux_mark"],
         );
@@ -110,7 +110,7 @@ describe("status bar", () => {
         { waitingIcon: "!" },
         "none",
       ).windows.get("@10"),
-    ).toBe("!");
+    ).toBe(" !");
     const hidden = statusBarValues(
       sessions,
       panes,
@@ -126,7 +126,7 @@ describe("status bar", () => {
         { waitingIcon: "#{invalid}" },
         "emoji",
       ).windows.get("@10"),
-    ).toBe("⏳");
+    ).toBe(" ⏳");
   });
 
   it("is opt-in and never subscribes or runs tmux when disabled", async () => {
@@ -182,7 +182,7 @@ describe("status bar", () => {
       "@ccmux_status": "■ 2 ● 2",
     });
     expect(Object.fromEntries(values.windows)).toEqual({
-      "@10": "■",
+      "@10": " ■",
       "@20": null,
     });
   });
@@ -225,7 +225,7 @@ describe("status bar", () => {
     });
     expect(Object.fromEntries(values.windows)).toEqual({
       "@10": null,
-      "@20": "●",
+      "@20": " ●",
     });
   });
 
@@ -270,7 +270,7 @@ describe("status bar", () => {
       "-t",
       "@10",
       "@ccmux_mark",
-      "●",
+      " ●",
     ]);
     calls.length = 0;
     bar.updatePanes([
@@ -291,7 +291,7 @@ describe("status bar", () => {
       "-t",
       "@20",
       "@ccmux_mark",
-      "●",
+      " ●",
     ]);
     calls.length = 0;
     sessions.setAttentionState(session.id, "read");
@@ -336,7 +336,7 @@ describe("status bar", () => {
     expect(values.globals.get("@ccmux_status")).toBe(
       "#[fg=yellow]! 1#[fg=default]",
     );
-    expect(values.windows.get("@10")).toBe("#[fg=yellow]!#[fg=default]");
+    expect(values.windows.get("@10")).toBe(" #[fg=yellow]!#[fg=default]");
     expect(
       statusBarValues(sessions, panes, {
         waitingIcon: "#{bad}",
@@ -417,7 +417,7 @@ describe("status bar", () => {
     expect(values.get("@ccmux_status")).toBe("● 1");
     expect(values.get("@ccmux_waiting")).toBe("0");
     expect(values.has("@10/@ccmux_mark")).toBe(false);
-    expect(values.get("@20/@ccmux_mark")).toBe("●");
+    expect(values.get("@20/@ccmux_mark")).toBe(" ●");
     await bar.stop();
     expect(values.size).toBe(0);
   });
