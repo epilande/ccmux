@@ -9927,13 +9927,14 @@ describe("syncPaneSummaries", () => {
       "%1",
       fakePane({ paneId: "%1", paneTitle, currentPath: "/Users/test/proj" }),
     );
-    const { server, internals } = createServer(manager, cache);
     manager.createPaneTrackedSession({
       agentType: "claude",
       paneId: "%1",
       cwd: "/Users/test/proj",
       pid: 42,
     });
+    // Seed the row before subscribing so no async created event can leak into this pass.
+    const { server, internals } = createServer(manager, cache);
     internals.visibleSessions.add("claude_pane1");
     // `syncPaneSummaries` early-returns with nobody listening, so the whole
     // describe needs one connected client. The stub below replaces
@@ -9957,10 +9958,6 @@ describe("syncPaneSummaries", () => {
         }),
       );
     };
-    // The manager's own `session_created` fan-out is async, so drain it before
-    // handing the array over — every count below is about this pass alone.
-    await drain();
-    events.length = 0;
     return { server, events, setTitle, manager, internals };
   }
 
@@ -10067,20 +10064,19 @@ describe("syncPaneSummaries", () => {
     const pane = (title: string) =>
       fakePane({ paneId: "%1", paneTitle: title, currentPath: "/tmp/proj" });
     cache.set("%1", pane("probe-codex-x7"));
-    const { server, internals } = createServer(manager, cache);
     manager.createPaneTrackedSession({
       agentType: "codex",
       paneId: "%1",
       cwd: "/tmp/proj",
       pid: 42,
     });
+    // Seed the row before subscribing so no async created event can leak into this pass.
+    const { server, internals } = createServer(manager, cache);
     internals.visibleSessions.add("codex_pane1");
     const events: SSEEvent[] = [];
     internals.broadcastEvent = (event: SSEEvent) => {
       events.push(event);
     };
-    await drain();
-    events.length = 0;
 
     server.syncPaneSummaries();
     cache.set("%1", pane("⠏ probe-codex-x7"));
@@ -10106,13 +10102,14 @@ describe("syncPaneSummaries", () => {
     const manager = new SessionManager();
     const cache = new Map<string, TmuxPane>();
     cache.set("%1", fakePane({ paneId: "%1", paneTitle: "✳ One" }));
-    const { server, internals } = createServer(manager, cache);
     manager.createPaneTrackedSession({
       agentType: "claude",
       paneId: "%1",
       cwd: "/Users/test/proj",
       pid: 42,
     });
+    // Seed the row before subscribing so no async created event can leak into this pass.
+    const { server, internals } = createServer(manager, cache);
     const events: SSEEvent[] = [];
     internals.broadcastEvent = (event: SSEEvent) => {
       events.push(event);
@@ -10123,11 +10120,7 @@ describe("syncPaneSummaries", () => {
       id: "client-0",
       controller: { enqueue() {} },
     });
-    // Drop it back out of visibility: the manager's own created-event pass
-    // promotes a pane-bound row on its way through `sessionEventToSSE`.
-    await drain();
-    events.length = 0;
-    internals.visibleSessions.clear();
+    expect(internals.visibleSessions.has("claude_pane1")).toBe(false);
 
     server.syncPaneSummaries();
     cache.set("%1", fakePane({ paneId: "%1", paneTitle: "✳ Two" }));
