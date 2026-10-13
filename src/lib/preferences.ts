@@ -252,7 +252,7 @@ export interface StatusBarConfig {
   /** Override the shared iconStyle glyphs (dot defaults: ■ / ●). */
   waitingIcon?: string;
   unreadIcon?: string;
-  /** tmux foreground colors; empty (the default) inherits the surrounding style. */
+  /** tmux foreground colors (defaults red / green); empty inherits the surrounding style. */
   waitingColor?: string;
   unreadColor?: string;
 }

@@ -179,6 +179,36 @@ describe("HookManager", () => {
       await manager.stop();
     });
 
+    it("dispatches onMarkerRemoved for a marker replayed on start()", async () => {
+      // Claude's SessionStart hook deletes the old marker on /clear. chokidar
+      // never reports a replayed file as added and the unlink arrives after the
+      // file is gone, so only the replay can have recorded its payload.
+      const events: string[] = [];
+      const notified: string[] = [];
+      manager.register(makeAdapter("claude", events));
+      manager.setContext({
+        ...trivialContext(),
+        onMarkerChanged: (sessionId: string) => notified.push(sessionId),
+      });
+      const path = writeMarker("claude-s1", {
+        agent_type: "claude",
+        pid: 1,
+        tty: "/dev/ttys0",
+        session_id: "s1",
+        timestamp: 1,
+      });
+
+      await manager.start();
+      rmSync(path);
+      // Called in the same tick as the rm, so this runs before chokidar's own
+      // unlink, which then finds the entry consumed and returns early.
+      await manager.handleMarkerRemoved(path);
+
+      expect(events).toContain("claude:rm:s1");
+      expect(notified).toContain("s1");
+      await manager.stop();
+    });
+
     it("handleMarkerAdded dispatches by marker.agent_type", async () => {
       const events: string[] = [];
       manager.register(makeAdapter("claude", events));

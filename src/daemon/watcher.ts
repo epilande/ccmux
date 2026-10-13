@@ -496,12 +496,13 @@ export class LogWatcher {
     // Memoized: the binder may consult the same transcript twice (encoded
     // pre-filter miss, then pool entry); one bounded head read per path.
     const transcriptCwdMemo = new Map<string, string | null>();
+    const markerPidBySessionId = getMarkerPidSnapshot();
     const { actions, warnings } = decideInitialClaudeBatch(items, {
       processes: claudeProcs,
       panes,
       processTree,
       sessions: this.buildReplaceableSlices(),
-      markerPidBySessionId: getMarkerPidSnapshot(),
+      markerPidBySessionId,
       getSessionTimestamps: (sessionId, projectPath) =>
         getSessionTimestampsIn(historyEntries, sessionId, projectPath),
       getTranscriptCwd: (path) => {
@@ -556,11 +557,29 @@ export class LogWatcher {
       }
     }
 
-    // Unwatch files that didn't become active sessions to reduce FDs
-    for (const path of this.watchedFiles) {
-      if (!this.fileOffsets.has(path)) {
-        this.unwatchFile(path);
+    // Unwatch files that didn't become active sessions to reduce FDs.
+    //
+    // The marker watcher is already live, so a SessionStart marker can land
+    // while the actions above are awaited (e.g. /clear during daemon boot).
+    // `handleMarkerAdded` skips a path that is still watched, so unwatching
+    // it here would leave that session untracked until a daemon restart. A
+    // marker the binder never saw goes through the add path instead, which
+    // binds it by that marker. Markers the binder did see keep its verdict.
+    // That add is awaited, so iterate a snapshot and re-check each path when
+    // its turn comes. No await sits between a path's checks and its unwatch,
+    // so a marker arriving after finds the path unwatched and re-arms it.
+    for (const path of [...this.watchedFiles]) {
+      if (this.fileOffsets.has(path) || !this.watchedFiles.has(path)) continue;
+      const sessionId = this.adapter.resolveSessionIdFromPath(path);
+      if (
+        sessionId &&
+        !markerPidBySessionId.has(sessionId) &&
+        getSessionPidMarker(sessionId)
+      ) {
+        await this.handleAdd(path);
+        continue;
       }
+      this.unwatchFile(path);
     }
   }
 

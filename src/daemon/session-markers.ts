@@ -122,24 +122,36 @@ export function filterMarkerCache(
  * Get all session PID markers.
  */
 export function getAllSessionPidMarkers(): SessionPidMarker[] {
+  return getAllSessionPidMarkerFiles().map((entry) => entry.marker);
+}
+
+/**
+ * Get all session PID markers along with the file each one was read from.
+ * For callers that key on the marker file itself, like the HookManager
+ * replay, which has to remember each path to dispatch its later unlink.
+ */
+export function getAllSessionPidMarkerFiles(): Array<{
+  path: string;
+  marker: SessionPidMarker;
+}> {
   DaemonPerf.incMarkerBatchReads();
   if (!existsSync(MARKERS_DIR)) return [];
 
   try {
     const files = readdirSync(MARKERS_DIR).filter((f) => f.endsWith(".json"));
-    const markers: SessionPidMarker[] = [];
+    const entries: Array<{ path: string; marker: SessionPidMarker }> = [];
 
     for (const file of files) {
+      const path = join(MARKERS_DIR, file);
       try {
-        const content = readFileSync(join(MARKERS_DIR, file), "utf-8");
-        const marker = parseMarkerFile(content);
-        if (marker) markers.push(marker);
+        const marker = parseMarkerFile(readFileSync(path, "utf-8"));
+        if (marker) entries.push({ path, marker });
       } catch {
         // Skip unreadable files.
       }
     }
 
-    return markers;
+    return entries;
   } catch {
     return [];
   }

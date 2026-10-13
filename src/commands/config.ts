@@ -496,7 +496,7 @@ export function createConfigCommand(): Command {
           case "unreadColor":
             if (!isStatusBarColor(value)) {
               console.error(
-                "Invalid status bar color (ANSI name, colour0–255, #rrggbb, or empty)",
+                "Invalid status bar color (ANSI name, colour0–255, #rrggbb, or empty to inherit)",
               );
               process.exit(1);
             }
