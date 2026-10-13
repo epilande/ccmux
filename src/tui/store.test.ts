@@ -1532,6 +1532,31 @@ describe("store", () => {
       expect(store.state.sessions[0].id).toBe("s1");
     });
 
+    // A second `session_created` for one id used to append a copy that
+    // updateSession (first match only) never reached: a frozen ghost row.
+    it("replaces the row when the same session is created twice", () => {
+      const store = createTUIStore({ groupBy: "none" });
+      const first = createMockSession({
+        id: "s1",
+        status: "idle",
+        tmuxPane: null,
+        pendingHandoff: {
+          fromSessionId: "peer",
+          queuedAt: "2024-01-15T12:00:00Z",
+        },
+      });
+      store.actions.addSession(first);
+
+      const { pendingHandoff: _, ...newer } = first;
+      store.actions.addSession({ ...newer, status: "working", tmuxPane: "%1" });
+
+      expect(store.state.sessions).toHaveLength(1);
+      expect(store.state.sessions[0].status).toBe("working");
+      expect(store.state.sessions[0].tmuxPane).toBe("%1");
+      // Replaced like updateSession does, not merged: an omitted key is gone.
+      expect(store.state.sessions[0].pendingHandoff).toBeUndefined();
+    });
+
     it("should fall back to first filtered session when selectedSessionId is null", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([

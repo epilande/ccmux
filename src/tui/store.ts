@@ -1759,7 +1759,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       });
     },
 
+    /**
+     * Add a row for `session_created`, or replace the row when one with this
+     * id is already there. The daemon creates a session once, but a second
+     * `created` for the same id used to append a copy that `updateSession`
+     * (first match only) never reached, so it sat frozen until a restart.
+     */
     addSession(session: EnrichedSession) {
+      if (state.sessions.some((s) => s.id === session.id)) {
+        this.updateSession(session);
+        return;
+      }
       setState("sessions", (s) => [...s, session]);
     },
 
