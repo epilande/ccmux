@@ -2817,18 +2817,26 @@ describe("reconcileAll", () => {
       };
     }
 
-    it("should mark session as unread when working->idle and user not viewing", async () => {
+    it("leaves finished turns to AttentionTransitions and skips the active-pane query", async () => {
+      // Status edges are decided off-scan (`attention-transitions.ts`). A
+      // second owner here is what let a turn finished between two scans be
+      // judged by the scan, against the wrong pane, or not at all (#232).
       const id = makeSession(sessionManager, {
         status: "working",
         tmuxPane: "%1",
         pid: 12345,
         lastActivityAt: new Date().toISOString(),
       });
-
-      // Simulate working -> idle transition
       sessionManager.updateSession(id, { status: "idle" });
 
-      const attnDeps = makeAttentionDeps("%99"); // user is on a different pane
+      let activePaneQueries = 0;
+      const attnDeps = {
+        ...makeAttentionDeps("%99"),
+        getActivePaneId: async () => {
+          activePaneQueries++;
+          return "%99";
+        },
+      };
 
       await reconcileAll(
         makeDeps(sessionManager, attnDeps),
@@ -2838,60 +2846,8 @@ describe("reconcileAll", () => {
         }),
       );
 
-      const session = sessionManager.getSession(id)!;
-      expect(session.attentionState).toBe("unread");
-    });
-
-    it("should mark session as read when working->idle and user IS viewing", async () => {
-      const id = makeSession(sessionManager, {
-        status: "working",
-        tmuxPane: "%1",
-        pid: 12345,
-        lastActivityAt: new Date().toISOString(),
-      });
-
-      sessionManager.updateSession(id, { status: "idle" });
-
-      const attnDeps = makeAttentionDeps("%1"); // user viewing this pane
-
-      await reconcileAll(
-        makeDeps(sessionManager, attnDeps),
-        makeSnapshot({
-          processes: [fakeProcess()],
-          panes: [fakePane()],
-        }),
-      );
-
-      const session = sessionManager.getSession(id)!;
-      expect(session.attentionState).toBe("read");
-    });
-
-    it("should NOT set attentionState for a background session on finish", async () => {
-      // Background rows are paneless and read-only: the inbox/unread
-      // semantics can never clear (no pane to view), so they must be
-      // excluded from attention tracking; a finish must leave it null.
-      const id = "sup-attn";
-      sessionManager.createBackgroundSession({
-        daemonShort: id,
-        pid: 999,
-        cwd: "/private/tmp",
-        logPath: null,
-        version: null,
-        status: "working",
-        attentionType: null,
-        pendingTool: null,
-        lastPrompt: null,
-        lastActivityAt: new Date().toISOString(),
-      });
-      // working -> idle transition (sets previousStatus="working")
-      sessionManager.updateSession(id, { status: "idle" });
-
-      const attnDeps = makeAttentionDeps("%99"); // not viewing
-
-      await reconcileAll(makeDeps(sessionManager, attnDeps), makeSnapshot());
-
-      const session = sessionManager.getSession(id)!;
-      expect(session.attentionState).toBeNull();
+      expect(sessionManager.getSession(id)!.attentionState).toBeNull();
+      expect(activePaneQueries).toBe(0);
     });
 
     it("should NOT clobber a working background session's status on reconcile", async () => {
@@ -2935,69 +2891,6 @@ describe("reconcileAll", () => {
 
       const session = sessionManager.getSession(id)!;
       expect(session.attentionState).toBe("read");
-    });
-
-    it("should clear attention when new work starts", async () => {
-      const id = makeSession(sessionManager, {
-        status: "working",
-        tmuxPane: "%1",
-        pid: 12345,
-        lastActivityAt: new Date().toISOString(),
-      });
-      sessionManager.setAttentionState(id, "unread");
-
-      const attnDeps = makeAttentionDeps(null);
-
-      await reconcileAll(
-        makeDeps(sessionManager, attnDeps),
-        makeSnapshot({
-          processes: [fakeProcess()],
-          panes: [fakePane()],
-        }),
-      );
-
-      const session = sessionManager.getSession(id)!;
-      expect(session.attentionState).toBeNull();
-    });
-
-    it("should reset processedTransitions when new work starts with null attention", async () => {
-      const id = makeSession(sessionManager, {
-        status: "working",
-        tmuxPane: "%1",
-        pid: 12345,
-        lastActivityAt: new Date().toISOString(),
-      });
-
-      // First cycle: working -> idle -> unread
-      sessionManager.updateSession(id, { status: "idle" });
-      const attnDeps = makeAttentionDeps("%99");
-      const deps = makeDeps(sessionManager, attnDeps);
-
-      await reconcileAll(
-        deps,
-        makeSnapshot({ processes: [fakeProcess()], panes: [fakePane()] }),
-      );
-      expect(sessionManager.getSession(id)!.attentionState).toBe("unread");
-
-      // Simulate read decay: unread -> read -> null
-      sessionManager.setAttentionState(id, null);
-
-      // Second cycle: new work starts (attentionState is null)
-      sessionManager.updateSession(id, { status: "working" });
-      await reconcileAll(
-        deps,
-        makeSnapshot({ processes: [fakeProcess()], panes: [fakePane()] }),
-      );
-
-      // Third cycle: work finishes -> should trigger "done" again
-      sessionManager.updateSession(id, { status: "idle" });
-      await reconcileAll(
-        deps,
-        makeSnapshot({ processes: [fakeProcess()], panes: [fakePane()] }),
-      );
-
-      const session = sessionManager.getSession(id)!;
-      expect(session.attentionState).toBe("unread");
     });
 
     it("should decay read -> null after timeout", async () => {

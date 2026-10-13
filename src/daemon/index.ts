@@ -86,6 +86,7 @@ import {
   type ReconcilerDeps,
 } from "./state-reconciler";
 import { AttentionTracker } from "./attention-tracker";
+import { AttentionTransitions } from "./attention-transitions";
 import { redirectStdioToLogFile } from "./log-redirect";
 import { InvocationManager } from "./invocation-manager";
 import { Notifier, buildStateChangedPayload } from "./notifier";
@@ -205,6 +206,7 @@ export class Daemon {
   private hookManager = new HookManager();
   private versionResolver = new VersionResolver();
   private attentionTracker = new AttentionTracker();
+  private attentionTransitions: AttentionTransitions;
   private claudeRuntimeMode: ClaudeRuntimeMode = "claude-no-hooks";
   /** Latest scan's ProcessTree, reused by off-scan consumers so marker
    * events don't re-spawn `ps` on every fire. Null before first scan. */
@@ -336,10 +338,10 @@ export class Daemon {
       this.hookManager.register(adapter);
     }
 
-    this.sessionManager.on("change", (event) => {
-      if (event.type === "removed" && event.sessionId) {
-        this.attentionTracker.removeSession(event.sessionId);
-      }
+    this.attentionTransitions = new AttentionTransitions({
+      sessionManager: this.sessionManager,
+      tracker: this.attentionTracker,
+      getActivePaneId,
     });
 
     this.notifier = new Notifier({
@@ -483,6 +485,7 @@ export class Daemon {
     // hydrate live via session_created/session_updated broadcasts, which
     // the constructor wires before this line.
     this.server.start();
+    this.attentionTransitions.start();
     this.notifier.start();
 
     // Migrate/discover existing sessions before starting watcher
@@ -561,6 +564,7 @@ export class Daemon {
     await this.copilotWatcher.stop();
     await this.hookManager.stop();
     await this.backgroundSource?.stop();
+    this.attentionTransitions.stop();
     this.notifier.stop();
     await this.statusBar?.stop();
     this.server.stop();

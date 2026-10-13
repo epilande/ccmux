@@ -19,43 +19,20 @@ interface PersistedState {
  * - idle + unread = finished while user was away
  * - idle + read = user just acknowledged (brief visual, then clears)
  * - idle + null = nothing new
+ *
+ * This class holds the timers and the persisted `lastSeen`. Status edges are
+ * turned into attention by `AttentionTransitions` (`attention-transitions.ts`)
+ * as they happen; the scan (`reconcileAttentionStates`) owns the
+ * unread -> read upgrade on viewing and the read -> null decay.
  */
 export class AttentionTracker {
   private lastSeen: Map<string, number> = new Map();
   private readAt: Map<string, number> = new Map();
-  private processedTransitions: Set<string> = new Set();
   private readTimeoutMs: number;
 
   constructor(readTimeoutMs: number = DEFAULT_READ_TIMEOUT_MS) {
     this.readTimeoutMs = readTimeoutMs;
     this.load();
-  }
-
-  /**
-   * Determine the attention state for a session based on its status transition
-   * and whether the user is currently viewing it.
-   */
-  resolveTransition(session: Session, isUserViewing: boolean): AttentionState {
-    const prev = session.previousStatus;
-    const curr = session.status;
-
-    if (curr !== "idle" || (prev !== "working" && prev !== "waiting")) {
-      return session.attentionState;
-    }
-
-    // Prevent re-triggering after read->null decay
-    if (this.processedTransitions.has(session.id)) {
-      return session.attentionState;
-    }
-    this.processedTransitions.add(session.id);
-
-    if (isUserViewing) {
-      this.readAt.set(session.id, Date.now());
-      this.lastSeen.set(session.id, Date.now());
-      return "read";
-    }
-
-    return "unread";
   }
 
   /**
@@ -93,15 +70,6 @@ export class AttentionTracker {
     this.readAt.delete(sessionId);
   }
 
-  /**
-   * Clear attention state when a session starts new work.
-   * Resets processedTransitions so the next idle transition can trigger again.
-   */
-  clearOnNewWork(sessionId: string): void {
-    this.readAt.delete(sessionId);
-    this.processedTransitions.delete(sessionId);
-  }
-
   isViewingSession(session: Session, activePaneId: string | null): boolean {
     if (!activePaneId || !session.tmuxPane) return false;
     return session.tmuxPane === activePaneId;
@@ -110,7 +78,6 @@ export class AttentionTracker {
   removeSession(sessionId: string): void {
     this.lastSeen.delete(sessionId);
     this.readAt.delete(sessionId);
-    this.processedTransitions.delete(sessionId);
   }
 
   /**
@@ -129,9 +96,6 @@ export class AttentionTracker {
     }
     for (const id of this.readAt.keys()) {
       if (!activeSessionIds.has(id)) this.readAt.delete(id);
-    }
-    for (const id of this.processedTransitions) {
-      if (!activeSessionIds.has(id)) this.processedTransitions.delete(id);
     }
     return pruned;
   }

@@ -105,7 +105,8 @@ export interface ScanSnapshot {
  * 3. Stale subagent sweep (silent working subagents count as finished)
  * 4. Log adapter tick (subagent-dir watch sync independent of parses)
  * 5. Pane-tracked session reconciliation (pane inspection + hooks)
- * 6. Attention state reconciliation (unread/read/null inbox tracking)
+ * 6. Attention upkeep (read decay, unread -> read when viewed; status
+ *    edges are resolved off-scan by `AttentionTransitions`)
  */
 export async function reconcileAll(
   deps: ReconcilerDeps,
@@ -403,10 +404,12 @@ export async function reconcileOne(
 const NATIVE_CASCADE_AGENTS: ReadonlySet<string> = new Set(["claude", "codex"]);
 
 /**
- * Reconcile attention states (unread/read/null) for all sessions.
+ * Scan-time attention upkeep (unread/read/null). Status edges are resolved as
+ * they happen by `AttentionTransitions` (`attention-transitions.ts`): new work
+ * clears attention and a finished turn lands unread or read. What is left here
+ * depends on time, or on focus moving with no status change to announce it:
  *
  * - "read" sessions decay to null after timeout.
- * - Sessions starting new work (idle -> working/waiting) clear attention.
  * - Unread sessions viewed by user transition to read.
  */
 async function reconcileAttentionStates(deps: ReconcilerDeps): Promise<void> {
@@ -418,37 +421,18 @@ async function reconcileAttentionStates(deps: ReconcilerDeps): Promise<void> {
   // Background (background-agent) sessions are paneless and read-only: the
   // inbox/unread attention semantics clear on pane-viewing, which can never
   // happen for them, so a finish would stick "unread" forever. Exclude them
-  // from transition tracking (prune below still runs over all sessions).
+  // from attention upkeep (prune below still runs over all sessions).
   const tracked = sessions.filter((s) => !isBackgroundSession(s));
 
-  // Check if any session needs active pane info before spawning the subprocess
-  const needsActivePaneId = tracked.some(
-    (s) =>
-      // Transition detection needs to know if user is viewing
-      (s.status === "idle" &&
-        s.attentionState === null &&
-        (s.previousStatus === "working" || s.previousStatus === "waiting")) ||
-      // Unread->read auto-detection needs to know if user is viewing
-      s.attentionState === "unread",
-  );
-
-  const activePaneId = needsActivePaneId
+  // Only the unread->read upgrade needs to know which pane the user is
+  // viewing, so skip the subprocess when nothing is unread.
+  const activePaneId = tracked.some((s) => s.attentionState === "unread")
     ? await (deps.getActivePaneId ?? getActivePaneId)()
     : null;
 
   let needsSave = false;
 
   for (const session of tracked) {
-    // Clear attention and reset transition guard when new work starts
-    if (session.status === "working" || session.status === "waiting") {
-      tracker.clearOnNewWork(session.id);
-      if (session.attentionState !== null) {
-        deps.sessionManager.setAttentionState(session.id, null);
-        needsSave = true;
-      }
-      continue;
-    }
-
     // Decay "read" -> null after timeout
     if (session.attentionState === "read") {
       if (tracker.shouldClearRead(session.id)) {
@@ -462,31 +446,14 @@ async function reconcileAttentionStates(deps: ReconcilerDeps): Promise<void> {
       continue;
     }
 
-    // Detect working/waiting -> idle transitions
-    if (
-      session.status === "idle" &&
-      session.attentionState === null &&
-      (session.previousStatus === "working" ||
-        session.previousStatus === "waiting")
-    ) {
-      const newState = tracker.resolveTransition(
-        session,
-        tracker.isViewingSession(session, activePaneId),
-      );
-      if (newState !== null) {
-        deps.sessionManager.setAttentionState(session.id, newState);
-        needsSave = true;
-        continue;
-      }
-    }
-
     // Auto-mark unread as read when user views the session's pane
-    if (session.attentionState === "unread") {
-      if (tracker.isViewingSession(session, activePaneId)) {
-        tracker.markSeen(session.id, false);
-        deps.sessionManager.setAttentionState(session.id, "read");
-        needsSave = true;
-      }
+    if (
+      session.attentionState === "unread" &&
+      tracker.isViewingSession(session, activePaneId)
+    ) {
+      tracker.markSeen(session.id, false);
+      deps.sessionManager.setAttentionState(session.id, "read");
+      needsSave = true;
     }
   }
 
@@ -501,8 +468,10 @@ async function reconcileAttentionStates(deps: ReconcilerDeps): Promise<void> {
 
 /**
  * Live tmux query for the currently active pane, shared by the reconciler's
- * own attention-tracking arm and the daemon notifier's focus-suppression
- * check (`src/daemon/notifier.ts` via its `getActivePaneId` dep).
+ * own attention-tracking arm, the finish-time attention verdict
+ * (`src/daemon/attention-transitions.ts`), and the daemon notifier's
+ * focus-suppression check (`src/daemon/notifier.ts`), each via its
+ * `getActivePaneId` dep.
  */
 export async function getActivePaneId(): Promise<string | null> {
   try {

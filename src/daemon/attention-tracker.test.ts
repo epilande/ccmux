@@ -55,58 +55,6 @@ describe("AttentionTracker", () => {
     tracker = new AttentionTracker(15_000);
   });
 
-  describe("resolveTransition", () => {
-    it("should return unread when working->idle and user not viewing", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "working",
-        attentionState: null,
-      });
-      const result = tracker.resolveTransition(session, false);
-      expect(result).toBe("unread");
-    });
-
-    it("should return unread when waiting->idle and user not viewing", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "waiting",
-        attentionState: null,
-      });
-      const result = tracker.resolveTransition(session, false);
-      expect(result).toBe("unread");
-    });
-
-    it("should return read when working->idle and user IS viewing", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "working",
-        attentionState: null,
-      });
-      const result = tracker.resolveTransition(session, true);
-      expect(result).toBe("read");
-    });
-
-    it("should preserve current attention state for non-idle transitions", () => {
-      const session = makeSession({
-        status: "working",
-        previousStatus: "idle",
-        attentionState: null,
-      });
-      const result = tracker.resolveTransition(session, false);
-      expect(result).toBeNull();
-    });
-
-    it("should preserve attention state for idle->idle", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "idle",
-        attentionState: "unread",
-      });
-      const result = tracker.resolveTransition(session, false);
-      expect(result).toBe("unread");
-    });
-  });
-
   describe("markSeen", () => {
     it("should return read", () => {
       const result = tracker.markSeen("test-session");
@@ -153,34 +101,14 @@ describe("AttentionTracker", () => {
     });
   });
 
-  describe("clearOnNewWork", () => {
-    it("should clear read tracking so shouldClearRead returns false", () => {
-      tracker.markSeen("test-session");
-      tracker.clearOnNewWork("test-session");
-      expect(tracker.shouldClearRead("test-session")).toBe(false);
-    });
-  });
-
   describe("removeSession", () => {
     it("should clear all tracking state for the session", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "working",
-      });
-      tracker.resolveTransition(session, false); // sets processedTransitions
       tracker.markSeen("test-session"); // sets lastSeen + readAt
 
       tracker.removeSession("test-session");
 
       expect(tracker.shouldClearRead("test-session")).toBe(false);
       expect(tracker.hasReadTimer("test-session")).toBe(false);
-      // processedTransitions cleared: re-trigger should work
-      const session2 = makeSession({
-        status: "idle",
-        previousStatus: "working",
-        attentionState: null,
-      });
-      expect(tracker.resolveTransition(session2, false)).toBe("unread");
     });
 
     it("should be a no-op for unknown sessions", () => {
@@ -214,39 +142,6 @@ describe("AttentionTracker", () => {
       // Clear any entries loaded from the state file
       tracker.prune(new Set());
       expect(tracker.prune(new Set())).toBe(false);
-    });
-  });
-
-  describe("processedTransitions (re-trigger prevention)", () => {
-    it("should not re-trigger unread after transition was already processed", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "working",
-        attentionState: null,
-      });
-      // First call processes the transition
-      const first = tracker.resolveTransition(session, false);
-      expect(first).toBe("unread");
-
-      // Second call with same session should not re-trigger
-      const second = tracker.resolveTransition(session, false);
-      expect(second).toBeNull(); // preserves current attentionState (null)
-    });
-
-    it("should allow re-trigger after clearOnNewWork resets the flag", () => {
-      const session = makeSession({
-        status: "idle",
-        previousStatus: "working",
-        attentionState: null,
-      });
-      tracker.resolveTransition(session, false);
-
-      // Simulate new work cycle
-      tracker.clearOnNewWork("test-session");
-
-      // Now the transition should fire again
-      const result = tracker.resolveTransition(session, false);
-      expect(result).toBe("unread");
     });
   });
 
