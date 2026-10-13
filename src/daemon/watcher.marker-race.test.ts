@@ -193,6 +193,16 @@ function setup({ clearInPlace = true }: { clearInPlace?: boolean } = {}) {
   return { manager, watcher, newPath };
 }
 
+/** The marker re-arm starts its add without awaiting it; poll for the result. */
+async function until(pred: () => boolean, maxMs = 2000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (pred()) return true;
+    await Bun.sleep(5);
+  }
+  return pred();
+}
+
 function cleanUp() {
   for (const spy of spies.splice(0)) spy.mockRestore();
   for (const dir of tempDirs.splice(0)) {
@@ -208,7 +218,8 @@ describe("LogWatcher: marker lands while a new transcript is being added", () =>
     const { entered, release } = stubDiscovery(markers);
     const { manager, watcher, newPath } = setup();
 
-    const adding = (watcher as unknown as WatcherInternals).handleAdd(newPath);
+    const internals = watcher as unknown as WatcherInternals;
+    const adding = internals.handleAdd(newPath);
 
     // The SessionStart hook's marker lands while the add awaits tmux/ps.
     await entered;
@@ -221,17 +232,43 @@ describe("LogWatcher: marker lands while a new transcript is being added", () =>
     expect(session).toBeDefined();
     expect(session?.tmuxPane).toBe(PANE.paneId);
     expect(session?.pid).toBe(AGENT_PID);
+    // Still watched, or the session's next write would be lost.
+    expect(internals.watchedFiles.has(newPath)).toBe(true);
   });
 
   it("still drops the transcript when no marker ever arrives", async () => {
     const markers = new Map<string, sessionMarkers.SessionPidMarker>();
     const { release } = stubDiscovery(markers);
     const { manager, watcher, newPath } = setup();
+    const internals = watcher as unknown as WatcherInternals;
 
     release();
-    await (watcher as unknown as WatcherInternals).handleAdd(newPath);
+    await internals.handleAdd(newPath);
 
     expect(manager.hasSession(NEW_SESSION_ID)).toBe(false);
+    expect(internals.watchedFiles.has(newPath)).toBe(false);
+  });
+
+  it("re-arms the dropped transcript when the marker lands after the add", async () => {
+    const markers = new Map<string, sessionMarkers.SessionPidMarker>();
+    const { release } = stubDiscovery(markers);
+    const { manager, watcher, newPath } = setup();
+    const internals = watcher as unknown as WatcherInternals;
+
+    release();
+    await internals.handleAdd(newPath);
+    expect(internals.watchedFiles.has(newPath)).toBe(false);
+
+    // Too late for the add, so the marker finds the path unwatched, re-arms
+    // it, and starts a fresh add that binds through the marker.
+    markers.set(NEW_SESSION_ID, marker(NEW_SESSION_ID));
+    watcher.handleMarkerAdded(marker(NEW_SESSION_ID));
+
+    expect(internals.watchedFiles.has(newPath)).toBe(true);
+    expect(
+      await until(() => manager.getSession(NEW_SESSION_ID)?.pid === AGENT_PID),
+    ).toBe(true);
+    expect(manager.getSession(NEW_SESSION_ID)?.tmuxPane).toBe(PANE.paneId);
   });
 });
 

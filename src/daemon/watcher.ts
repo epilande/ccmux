@@ -807,8 +807,10 @@ export class LogWatcher {
     // the start-time fallback finds nothing. `handleMarkerAdded` skips a
     // path that is still watched, so unwatching here would leave the session
     // untracked until a daemon restart. Retry once with the marker instead.
-    // No await sits between this check and the unwatch, so a marker arriving
-    // after it finds the path unwatched and re-arms it the normal way.
+    // It retries at most once: the re-entered call reads `marker` before its
+    // first await, so this check is false there. No await sits between this
+    // check and the unwatch, so a marker arriving after it finds the path
+    // unwatched and re-arms it the normal way.
     if (!marker && getSessionPidMarker(sessionId)) {
       await this.handleHookBackedClaudeAdd(sessionId, path);
       return;
