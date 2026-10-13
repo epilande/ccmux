@@ -7,6 +7,7 @@ import type { HookAdapter, HookManagerContext } from "./hook-adapter";
 import {
   getSessionPidMarker,
   getAllSessionPidMarkers,
+  getAllSessionPidMarkerFiles,
   filterMarkerCache,
   loadMarkerIntoCache,
   parseMarkerFile,
@@ -79,7 +80,11 @@ export class HookManager {
 
     // Replay existing markers through the adapter registry before starting
     // chokidar so initial state is consistent before live events begin.
-    for (const marker of getAllSessionPidMarkers()) {
+    // Each one is recorded by path, like a live add: chokidar ignores these
+    // files on its initial scan, and the file is already gone by the time
+    // its unlink fires, so this is the only copy `handleMarkerRemoved` has.
+    for (const { path, marker } of getAllSessionPidMarkerFiles()) {
+      this.lastSeenByPath.set(path, marker);
       await this.dispatchMarkerAdded(marker);
     }
 
@@ -157,9 +162,10 @@ export class HookManager {
   }
 
   /**
-   * Dispatch onMarkerRemoved for a previously-observed marker. Falls back
-   * to re-reading the file if the cache is cold (e.g., daemon started
-   * between add and remove events).
+   * Dispatch onMarkerRemoved for a previously-observed marker. The payload
+   * has to come from `lastSeenByPath`: by the time chokidar reports the
+   * unlink the file is gone, so the re-read fallback finds nothing for a
+   * marker that was never recorded. `start()` records the replayed ones.
    */
   async handleMarkerRemoved(path: string): Promise<void> {
     const marker =
