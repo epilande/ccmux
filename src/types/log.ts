@@ -116,6 +116,9 @@ export interface UserMessage {
 export interface UserLogEntry extends BaseLogEntry {
   type: "user";
   message: UserMessage;
+  /** Claude's own injected context (command caveats, expanded skill
+   *  prompts, plugin notices), never something the user typed. */
+  isMeta?: boolean;
   cwd?: string;
   version?: string;
   gitBranch?: string;

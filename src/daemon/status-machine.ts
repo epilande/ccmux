@@ -22,6 +22,7 @@ import {
   MAX_PROMPTS_TOTAL_BYTES,
 } from "../lib/config";
 import { deriveProject } from "./project-derivation";
+import { classifyClaudeUserEntry } from "./adapters/claude/user-entry";
 
 /**
  * Append a user prompt to the capped prompt index. Trims and truncates the
@@ -345,6 +346,15 @@ function processUserEntry(
   const version = entry.version || currentState.version;
   const gitBranch = entry.gitBranch || currentState.gitBranch;
 
+  // Claude's own bookkeeping (a local command like `/clear` or `/model`,
+  // isMeta context) runs no turn, so it moves neither the status nor the
+  // prompt index. Nor `lastActivityAt`: the cascade reads it as the log's
+  // freshness, and bumping it for an entry that says nothing about status
+  // would let a stale log status outrank a newer marker.
+  if (classifyClaudeUserEntry(entry) === "bookkeeping") {
+    return { ...currentState, cwd, project, version, gitBranch };
+  }
+
   // When user provides input after ExitPlanMode, exit plan mode
   const inPlanMode =
     currentState.pendingTool === "ExitPlanMode"
@@ -412,7 +422,8 @@ function processUserEntry(
     };
   }
 
-  // User message - Claude will start working
+  // User message - Claude will start working. A prompt-type slash command
+  // lands here too; its markup is the prompt the TUI reduces to `/name args`.
   // Also clear hasActiveSubagent on new user message (session reset)
   // Track lastUserInputAt for stable sorting (only actual user input, not tool results)
   return {
