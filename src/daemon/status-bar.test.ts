@@ -9,6 +9,8 @@ const panes = [
   { paneId: "%2", windowId: "@10" },
   { paneId: "%3", windowId: "@20" },
 ];
+const red = (text: string) => `#[fg=red]${text}#[fg=default]`;
+const green = (text: string) => `#[fg=green]${text}#[fg=default]`;
 
 function harness(config?: StatusBarConfig) {
   const sessions = new SessionManager();
@@ -110,7 +112,7 @@ describe("status bar", () => {
         { waitingIcon: "!" },
         "none",
       ).windows.get("@10"),
-    ).toBe(" !");
+    ).toBe(` ${red("!")}`);
     const hidden = statusBarValues(
       sessions,
       panes,
@@ -126,7 +128,7 @@ describe("status bar", () => {
         { waitingIcon: "#{invalid}" },
         "emoji",
       ).windows.get("@10"),
-    ).toBe(" ⏳");
+    ).toBe(` ${red("⏳")}`);
   });
 
   for (const config of [undefined, {}, { enabled: true }]) {
@@ -146,7 +148,7 @@ describe("status bar", () => {
         "-t",
         "@10",
         "@ccmux_mark",
-        " ■",
+        ` ${red("■")}`,
       ]);
       await bar.stop();
     });
@@ -196,7 +198,7 @@ describe("status bar", () => {
       "-t",
       "@10",
       "@ccmux_mark",
-      " ■",
+      ` ${red("■")}`,
     ]);
     calls.length = 0;
     bar.updatePanes([], true);
@@ -247,10 +249,10 @@ describe("status bar", () => {
       "@ccmux_waiting": "2",
       "@ccmux_unread": "2",
       "@ccmux_working": "1",
-      "@ccmux_status": "■ 2 ● 2",
+      "@ccmux_status": `${red("■ 2")} ${green("● 2")}`,
     });
     expect(Object.fromEntries(values.windows)).toEqual({
-      "@10": " ■",
+      "@10": ` ${red("■")}`,
       "@20": null,
     });
   });
@@ -289,11 +291,11 @@ describe("status bar", () => {
       "@ccmux_waiting": "1",
       "@ccmux_unread": "1",
       "@ccmux_working": "0",
-      "@ccmux_status": "■ 1 ● 1",
+      "@ccmux_status": `${red("■ 1")} ${green("● 1")}`,
     });
     expect(Object.fromEntries(values.windows)).toEqual({
       "@10": null,
-      "@20": " ●",
+      "@20": ` ${green("●")}`,
     });
   });
 
@@ -338,7 +340,7 @@ describe("status bar", () => {
       "-t",
       "@10",
       "@ccmux_mark",
-      " ●",
+      ` ${green("●")}`,
     ]);
     calls.length = 0;
     bar.updatePanes([
@@ -359,7 +361,7 @@ describe("status bar", () => {
       "-t",
       "@20",
       "@ccmux_mark",
-      " ●",
+      ` ${green("●")}`,
     ]);
     calls.length = 0;
     sessions.setAttentionState(session.id, "read");
@@ -387,7 +389,7 @@ describe("status bar", () => {
     await bar.stop();
   });
 
-  it("uses custom icons/colors and ignores malformed hand-edited values", () => {
+  it("uses custom icons/colors and falls back on malformed hand-edited values", () => {
     const sessions = [
       {
         status: "waiting" as const,
@@ -410,7 +412,33 @@ describe("status bar", () => {
         waitingIcon: "#{bad}",
         waitingColor: "red]oops",
       }).globals.get("@ccmux_status"),
-    ).toBe("■ 1");
+    ).toBe(red("■ 1"));
+  });
+
+  it("inherits the surrounding style when a color is set to empty", () => {
+    const sessions = [
+      {
+        status: "waiting" as const,
+        attentionState: null,
+        tmuxPane: "%1",
+        trackingMode: "pane" as const,
+        logPath: null,
+      },
+      {
+        status: "idle" as const,
+        attentionState: "unread" as const,
+        tmuxPane: "%3",
+        trackingMode: "pane" as const,
+        logPath: null,
+      },
+    ];
+    const values = statusBarValues(sessions, panes, {
+      waitingColor: "",
+      unreadColor: "",
+    });
+    expect(values.globals.get("@ccmux_status")).toBe("■ 1 ● 1");
+    expect(values.windows.get("@10")).toBe(" ■");
+    expect(values.windows.get("@20")).toBe(" ●");
   });
 
   it("retries failed writes on the next scan without rewriting successful values", async () => {
@@ -507,10 +535,10 @@ describe("status bar", () => {
     const settled = bar.refresh();
     release();
     await settled;
-    expect(values.get("@ccmux_status")).toBe("● 1");
+    expect(values.get("@ccmux_status")).toBe(green("● 1"));
     expect(values.get("@ccmux_waiting")).toBe("0");
     expect(values.has("@10/@ccmux_mark")).toBe(false);
-    expect(values.get("@20/@ccmux_mark")).toBe(" ●");
+    expect(values.get("@20/@ccmux_mark")).toBe(` ${green("●")}`);
     await bar.stop();
     expect(values.size).toBe(0);
   });

@@ -21,6 +21,10 @@ const GLOBAL_OPTIONS = [
   "@ccmux_status",
 ] as const;
 
+// The picker's own waiting and done colors, as ANSI names so they follow the
+// terminal's palette.
+const DEFAULT_COLORS = { waiting: "red", unread: "green" } as const;
+
 type StatusSession = Pick<
   Session,
   "status" | "attentionState" | "tmuxPane" | "trackingMode" | "logPath"
@@ -43,10 +47,13 @@ function marker(
     .filter(Boolean)
     .join(" ");
   if (!text) return "";
-  const color = config[`${state}Color`];
-  return color && isStatusBarColor(color)
-    ? `#[fg=${color}]${text}#[fg=default]`
-    : text;
+  const configured = config[`${state}Color`];
+  // Inheriting by default rendered black on themed bars that leave
+  // status-style's fg alone; empty is the explicit opt-out.
+  const color = isStatusBarColor(configured)
+    ? configured
+    : DEFAULT_COLORS[state];
+  return color ? `#[fg=${color}]${text}#[fg=default]` : text;
 }
 
 export function statusBarValues(
