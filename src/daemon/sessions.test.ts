@@ -6,7 +6,12 @@ import {
   setSystemTime,
   afterEach,
 } from "bun:test";
-import { SessionManager, adoptsLoggedCwd, getMarkerKey } from "./sessions";
+import {
+  SessionManager,
+  adoptsLoggedCwd,
+  getMarkerKey,
+  type SessionEvent,
+} from "./sessions";
 import { decodeProjectPath } from "./parser";
 import { encodeProjectPath } from "./binder/primitives";
 import type { Session } from "../types/session";
@@ -99,6 +104,29 @@ describe("SessionManager", () => {
     );
     expect(session.cwd).toBe("/Users/test/myproject");
     expect(session.project).toBe("myproject");
+  });
+
+  // Racing adds for one transcript used to create it twice, and the second
+  // create swapped the bound session for a fresh unbound one and emitted a
+  // second `created` that the TUI appended as a frozen duplicate row.
+  it("leaves an existing session alone when its id is created again", () => {
+    const manager = new SessionManager();
+    const logPath = "/some/path/test-id.jsonl";
+    const session = manager.createSession("test-id", logPath);
+    manager.setTmuxPane("test-id", "%1");
+    manager.setPid("test-id", 502);
+    manager.updateSession("test-id", { status: "working" });
+
+    const events: SessionEvent[] = [];
+    manager.on("change", (event: SessionEvent) => events.push(event));
+    const again = manager.createSession("test-id", logPath);
+
+    expect(again).toBe(session);
+    expect(manager.getSession("test-id")).toBe(session);
+    expect(session.tmuxPane).toBe("%1");
+    expect(session.pid).toBe(502);
+    expect(session.status).toBe("working");
+    expect(events).toEqual([]);
   });
 
   it("should update a session", () => {

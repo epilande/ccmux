@@ -8,7 +8,7 @@ import * as processes from "./processes";
 import * as sessionMarkers from "./session-markers";
 import * as history from "./adapters/claude/history";
 import { ProcessTree } from "./process-tree";
-import { SessionManager } from "./sessions";
+import { SessionManager, type SessionEvent } from "./sessions";
 import { LogWatcher } from "./watcher";
 import { ClaudeLogAdapter } from "./adapters/claude/log-adapter";
 
@@ -25,10 +25,13 @@ import { ClaudeLogAdapter } from "./adapters/claude/log-adapter";
 
 type WatcherInternals = {
   handleAdd(path: string): Promise<void>;
+  watchedFiles: Set<string>;
 };
 
 const PANE_PID = 500;
 const AGENT_PID = 502;
+const AGENT_START = 1_000_000;
+const AGENT_2_START = 2_000_000;
 const OLD_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const NEW_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
@@ -53,7 +56,24 @@ const PROC: ProcessInfo = {
   agentType: "claude",
   tty: "ttys041",
   cwd: "/repo/a",
-  startTime: 1_000_000,
+  startTime: AGENT_START,
+};
+
+/** A second Claude in the same cwd, started well after the first. */
+const PANE_2: TmuxPane = {
+  ...PANE,
+  paneId: "%2",
+  panePid: 600,
+  paneIndex: 2,
+  target: "main:1.2",
+  tty: "/dev/ttys042",
+};
+
+const PROC_2: ProcessInfo = {
+  ...PROC,
+  pid: 602,
+  tty: "ttys042",
+  startTime: AGENT_2_START,
 };
 
 const TREE = ProcessTree.fromPsOutput(
@@ -74,15 +94,39 @@ function marker(sessionId: string): sessionMarkers.SessionPidMarker {
   };
 }
 
+/** The new session's first prompt, shortly after a Claude started. */
+function promptAfter(startTime: number): history.HistoryEntry {
+  return {
+    project: "/repo/a",
+    sessionId: NEW_SESSION_ID,
+    timestamp: startTime + 500,
+  };
+}
+
 const spies: { mockRestore(): void }[] = [];
 const tempDirs: string[] = [];
 
 /**
- * Stub tmux/ps and the marker cache. The FIRST `listTmuxPanes` call, made
- * by the start-time fallback, blocks until `release` is called, which is
- * the window in which the test lands the marker.
+ * Stub tmux/ps, the marker cache, and Claude's history. The first
+ * `holdCalls` calls to `listTmuxPanes` block until `release` is called, and
+ * `entered` resolves once all of them are waiting. With the default of one,
+ * that is the start-time fallback's call, the window in which a test lands
+ * the marker.
  */
-function stubDiscovery(markers: Map<string, sessionMarkers.SessionPidMarker>) {
+function stubDiscovery(
+  markers: Map<string, sessionMarkers.SessionPidMarker>,
+  {
+    holdCalls = 1,
+    historyEntries = [],
+    panes = [PANE],
+    procs = [PROC],
+  }: {
+    holdCalls?: number;
+    historyEntries?: history.HistoryEntry[];
+    panes?: TmuxPane[];
+    procs?: ProcessInfo[];
+  } = {},
+) {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
@@ -98,22 +142,26 @@ function stubDiscovery(markers: Map<string, sessionMarkers.SessionPidMarker>) {
       (id: string) => markers.get(id) ?? null,
     ),
     spyOn(paneDiscovery, "listTmuxPanes").mockImplementation(async () => {
-      if (calls++ === 0) {
-        signalEntered();
+      if (calls < holdCalls) {
+        if (++calls === holdCalls) signalEntered();
         await gate;
       }
-      return [PANE];
+      return panes;
     }),
-    spyOn(processes, "discoverAgentProcesses").mockResolvedValue([PROC]),
+    spyOn(processes, "discoverAgentProcesses").mockResolvedValue(procs),
     spyOn(ProcessTree, "build").mockResolvedValue(TREE),
-    spyOn(history, "readClaudeHistory").mockReturnValue([]),
+    spyOn(history, "readClaudeHistory").mockReturnValue(historyEntries),
   );
 
   return { entered, release };
 }
 
-/** A clear-in-place setup: the old session holds %1, the new transcript exists. */
-function setup() {
+/**
+ * A clear-in-place setup: the old session holds %1, the new transcript
+ * exists. Without `clearInPlace` the new transcript is a fresh launch and %1
+ * is free.
+ */
+function setup({ clearInPlace = true }: { clearInPlace?: boolean } = {}) {
   const manager = new SessionManager();
   const watcher = new LogWatcher(new ClaudeLogAdapter(manager), manager);
 
@@ -122,11 +170,13 @@ function setup() {
   const projectDir = join(root, "projects", "-repo-a");
   mkdirSync(projectDir, { recursive: true });
 
-  const oldPath = join(projectDir, `${OLD_SESSION_ID}.jsonl`);
-  writeFileSync(oldPath, "");
-  manager.createSession(OLD_SESSION_ID, oldPath, "claude", "/repo/a");
-  manager.setTmuxPane(OLD_SESSION_ID, PANE.paneId);
-  manager.setPid(OLD_SESSION_ID, AGENT_PID);
+  if (clearInPlace) {
+    const oldPath = join(projectDir, `${OLD_SESSION_ID}.jsonl`);
+    writeFileSync(oldPath, "");
+    manager.createSession(OLD_SESSION_ID, oldPath, "claude", "/repo/a");
+    manager.setTmuxPane(OLD_SESSION_ID, PANE.paneId);
+    manager.setPid(OLD_SESSION_ID, AGENT_PID);
+  }
 
   const newPath = join(projectDir, `${NEW_SESSION_ID}.jsonl`);
   writeFileSync(
@@ -143,13 +193,15 @@ function setup() {
   return { manager, watcher, newPath };
 }
 
+function cleanUp() {
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe("LogWatcher: marker lands while a new transcript is being added", () => {
-  afterEach(() => {
-    for (const spy of spies.splice(0)) spy.mockRestore();
-    for (const dir of tempDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  afterEach(cleanUp);
 
   it("binds the session to its pane instead of dropping the transcript", async () => {
     const markers = new Map<string, sessionMarkers.SessionPidMarker>();
@@ -180,5 +232,118 @@ describe("LogWatcher: marker lands while a new transcript is being added", () =>
     await (watcher as unknown as WatcherInternals).handleAdd(newPath);
 
     expect(manager.hasSession(NEW_SESSION_ID)).toBe(false);
+  });
+});
+
+/**
+ * A change event starts an add for every write to a transcript that has no
+ * session yet, and the marker re-arm and the retry above start more, so
+ * several adds for one transcript can be in flight at once. All of them pass
+ * the `hasSession` check before awaiting tmux/ps. Each one used to create the
+ * session on resuming, and every create after the first swapped the bound
+ * session for a fresh unbound one and emitted another `created`, which the
+ * TUI appended as a frozen duplicate row.
+ */
+describe("LogWatcher: adds racing for one new transcript", () => {
+  afterEach(cleanUp);
+
+  const arms = [
+    { through: "the marker", withMarker: true, historyEntries: [] },
+    {
+      through: "the start-time fallback",
+      withMarker: false,
+      historyEntries: [promptAfter(AGENT_START)],
+    },
+  ];
+
+  for (const { through, withMarker, historyEntries } of arms) {
+    it(`creates the session once when both adds bind through ${through}`, async () => {
+      const markers = new Map<string, sessionMarkers.SessionPidMarker>();
+      if (withMarker) markers.set(NEW_SESSION_ID, marker(NEW_SESSION_ID));
+      const { entered, release } = stubDiscovery(markers, {
+        holdCalls: 2,
+        historyEntries,
+      });
+      const { manager, watcher, newPath } = setup({ clearInPlace: false });
+
+      let created = 0;
+      let bound = false;
+      let unboundAfterBind = false;
+      manager.on("change", (event: SessionEvent) => {
+        if (event.session?.id !== NEW_SESSION_ID) return;
+        if (event.type === "created") created++;
+        if (event.session.tmuxPane !== null) bound = true;
+        else if (bound) unboundAfterBind = true;
+      });
+
+      // Both adds are parked on tmux before either has created anything.
+      const internals = watcher as unknown as WatcherInternals;
+      const adds = [internals.handleAdd(newPath), internals.handleAdd(newPath)];
+      await entered;
+      expect(manager.hasSession(NEW_SESSION_ID)).toBe(false);
+      release();
+      await Promise.all(adds);
+
+      expect(created).toBe(1);
+      expect(unboundAfterBind).toBe(false);
+      const session = manager.getSession(NEW_SESSION_ID);
+      expect(session?.tmuxPane).toBe(PANE.paneId);
+      expect(session?.pid).toBe(AGENT_PID);
+    });
+  }
+
+  // The two cases below park one add on tmux, let a sibling create the
+  // session in the meantime, then resume the first. `createSession` alone
+  // would not stop the damage in either; only the add's own re-check does.
+
+  it("keeps the marker's binding when a start-time guess resumes after it", async () => {
+    const markers = new Map<string, sessionMarkers.SessionPidMarker>();
+    const { entered, release } = stubDiscovery(markers, {
+      panes: [PANE, PANE_2],
+      procs: [PROC, PROC_2],
+      // Points at the second Claude, so the guess is %2.
+      historyEntries: [promptAfter(AGENT_2_START)],
+    });
+    const { manager, watcher, newPath } = setup({ clearInPlace: false });
+    const internals = watcher as unknown as WatcherInternals;
+
+    // This add read no marker, so it is waiting on the start-time fallback.
+    const guessing = internals.handleAdd(newPath);
+    await entered;
+
+    // The marker lands and a later write's add binds the session through it.
+    markers.set(NEW_SESSION_ID, marker(NEW_SESSION_ID));
+    await internals.handleAdd(newPath);
+    expect(manager.getSession(NEW_SESSION_ID)?.tmuxPane).toBe(PANE.paneId);
+
+    release();
+    await guessing;
+
+    const session = manager.getSession(NEW_SESSION_ID);
+    expect(session?.tmuxPane).toBe(PANE.paneId);
+    expect(session?.pid).toBe(AGENT_PID);
+  });
+
+  it("keeps the transcript watched when the session appeared while it found no pane", async () => {
+    const markers = new Map<string, sessionMarkers.SessionPidMarker>();
+    const { entered, release } = stubDiscovery(markers, {
+      historyEntries: [promptAfter(AGENT_START)],
+    });
+    const { manager, watcher, newPath } = setup({ clearInPlace: false });
+    const internals = watcher as unknown as WatcherInternals;
+
+    const late = internals.handleAdd(newPath);
+    await entered;
+
+    // A sibling binds the only pane first, so the parked add, once resumed,
+    // finds nothing left for it.
+    await internals.handleAdd(newPath);
+    expect(manager.getSession(NEW_SESSION_ID)?.tmuxPane).toBe(PANE.paneId);
+
+    release();
+    await late;
+
+    expect(manager.hasSession(NEW_SESSION_ID)).toBe(true);
+    expect(internals.watchedFiles.has(newPath)).toBe(true);
   });
 });

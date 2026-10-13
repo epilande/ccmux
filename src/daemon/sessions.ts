@@ -350,6 +350,13 @@ export class SessionManager extends EventEmitter {
    * directory name from a separator and turns `notes-cli` into `notes/cli`
    * (issue #156). Every caller that CAN know passes it, so the guess is the
    * last resort rather than the default.
+   *
+   * An id that already exists is returned untouched, with no event. Creating
+   * over it would swap a bound, possibly working session for a fresh unbound
+   * idle one and emit a second `created`, which the TUI used to append as a
+   * frozen duplicate row. Racing adds for one transcript did exactly that;
+   * the watcher re-checks before creating, and this keeps every other caller
+   * from doing it again.
    */
   createSession(
     sessionId: string,
@@ -357,6 +364,9 @@ export class SessionManager extends EventEmitter {
     agentType: string = "claude",
     knownCwd?: string | null,
   ): Session {
+    const existing = this.sessions.get(sessionId);
+    if (existing) return existing;
+
     const derived = extractProjectInfo(logPath);
     const cwd = knownCwd || derived.cwd;
     const project = knownCwd
