@@ -306,14 +306,33 @@ function processAssistantEntry(
     };
   }
 
+  // Claude Code writes one transcript entry per content block and stamps each
+  // with the message's FINAL stop_reason, so a `thinking` block's entry can
+  // carry `end_turn` while the `text` block that answers is still being
+  // generated (it can land seconds later, under the same `message.id`).
+  // Ending the turn there idles the row early, marks it unread, and fires
+  // "Finished" before there is a reply. So a thinking-only entry is never
+  // terminal; the entry after it is. None of ~280 sampled split messages
+  // ended on thinking alone, and one that did would still resolve:
+  // `turn_duration` (`processSystemEntry`) in interactive sessions,
+  // otherwise the reconciler's stale-pane sweep, the dead-process check, or
+  // the no-PID mtime net (`resolveDeadProcessState`).
+  const thinkingOnly =
+    content.length > 0 &&
+    content.every(
+      (block) =>
+        block.type === "thinking" || block.type === "redacted_thinking",
+    );
+
   // `stop_sequence` is terminal like `end_turn`: the model stopped at a
   // configured stop string, so the turn is over. Background agents commonly
   // end their transcripts with it (observed live), and treating it as
   // terminal makes their completion instant instead of waiting out the
   // silence-based stale sweep.
   if (
-    entry.message.stop_reason === "end_turn" ||
-    entry.message.stop_reason === "stop_sequence"
+    !thinkingOnly &&
+    (entry.message.stop_reason === "end_turn" ||
+      entry.message.stop_reason === "stop_sequence")
   ) {
     return {
       ...newState,

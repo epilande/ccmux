@@ -517,6 +517,179 @@ describe("status-machine", () => {
     });
   });
 
+  // Claude Code writes one transcript entry per content block, and each one
+  // already carries the message's final stop_reason. In real transcripts the
+  // thinking and text entries below share one `message.id`.
+  describe("thinking-only terminal entries", () => {
+    const prompt: UserLogEntry = {
+      type: "user",
+      uuid: "u1",
+      parentUuid: null,
+      timestamp: "2024-01-15T12:00:00Z",
+      message: { role: "user", content: "Design a retry policy" },
+    };
+
+    function assistant(
+      timestamp: string,
+      content: AssistantLogEntry["message"]["content"],
+      stopReason: string,
+    ): AssistantLogEntry {
+      return {
+        type: "assistant",
+        uuid: `a-${timestamp}`,
+        parentUuid: "u1",
+        timestamp,
+        message: { role: "assistant", content, stop_reason: stopReason },
+      };
+    }
+
+    const thinking = (timestamp: string, stopReason = "end_turn") =>
+      assistant(timestamp, [{ type: "thinking" }], stopReason);
+    const text = (timestamp: string, stopReason = "end_turn") =>
+      assistant(timestamp, [{ type: "text", text: "Here it is." }], stopReason);
+
+    const turnDuration: SystemLogEntry = {
+      type: "system",
+      uuid: "s1",
+      parentUuid: null,
+      timestamp: "2024-01-15T12:00:20Z",
+      subtype: "turn_duration",
+      durationMs: 20_000,
+    };
+
+    it("stays working after the thinking entry and idles on the text entry", () => {
+      const entries: LogEntry[] = [
+        prompt,
+        thinking("2024-01-15T12:00:05Z"),
+        text("2024-01-15T12:00:11Z"),
+      ];
+
+      const afterThinking = deriveStateFromEntries(entries.slice(0, 2));
+      expect(afterThinking.status).toBe("working");
+      expect(afterThinking.lastActivityAt).toBe("2024-01-15T12:00:05Z");
+
+      const afterText = deriveStateFromEntries(entries);
+      expect(afterText.status).toBe("idle");
+      expect(afterText.lastActivityAt).toBe("2024-01-15T12:00:11Z");
+    });
+
+    it("treats stop_sequence the same way", () => {
+      const entries: LogEntry[] = [
+        prompt,
+        thinking("2024-01-15T12:00:05Z", "stop_sequence"),
+        text("2024-01-15T12:00:11Z", "stop_sequence"),
+      ];
+
+      expect(deriveStateFromEntries(entries.slice(0, 2)).status).toBe(
+        "working",
+      );
+      expect(deriveStateFromEntries(entries).status).toBe("idle");
+    });
+
+    it("does not end the turn on a redacted_thinking entry", () => {
+      const state = deriveStateFromEntries([
+        prompt,
+        assistant(
+          "2024-01-15T12:00:05Z",
+          [{ type: "redacted_thinking" }],
+          "end_turn",
+        ),
+      ]);
+      expect(state.status).toBe("working");
+    });
+
+    it("still ends the turn when thinking and text share one entry", () => {
+      const state = deriveStateFromEntries([
+        prompt,
+        assistant(
+          "2024-01-15T12:00:05Z",
+          [{ type: "thinking" }, { type: "text", text: "Here it is." }],
+          "end_turn",
+        ),
+      ]);
+      expect(state.status).toBe("idle");
+    });
+
+    it("still ends the turn on an end_turn entry with no content", () => {
+      const state = deriveStateFromEntries([
+        prompt,
+        assistant("2024-01-15T12:00:05Z", [], "end_turn"),
+      ]);
+      expect(state.status).toBe("idle");
+    });
+
+    it("resolves a message that ends on thinking via turn_duration", () => {
+      const state = deriveStateFromEntries([
+        prompt,
+        thinking("2024-01-15T12:00:05Z"),
+        turnDuration,
+      ]);
+      expect(state.status).toBe("idle");
+    });
+
+    it("leaves a thinking-only ending with no turn_duration to the liveness nets", () => {
+      // Without `turn_duration` (SDK-driven sessions rarely write it) the log
+      // alone cannot tell this from a reply still in flight, so the row stays
+      // working with lastActivityAt pinned to the thinking entry. A dead
+      // process or a silent PID-less log then idles it here; a live process
+      // in a pane is idled by the reconciler's stale-pane sweep (see
+      // "native: downgrades active + wasWorking to idle" in
+      // state-reconciler.test.ts).
+      const state = deriveStateFromEntries([
+        prompt,
+        thinking("2024-01-15T12:00:05Z"),
+      ]);
+      expect(state.status).toBe("working");
+      expect(state.lastActivityAt).toBe("2024-01-15T12:00:05Z");
+
+      expect(resolveDeadProcessState(state, false).status).toBe("idle");
+      const silentMtime = Date.now() - 11 * 60 * 1000;
+      expect(resolveDeadProcessState(state, null, silentMtime).status).toBe(
+        "idle",
+      );
+      expect(resolveDeadProcessState(state, null, Date.now()).status).toBe(
+        "working",
+      );
+    });
+
+    it("leaves an idle session idle", () => {
+      const state = processEntry(
+        thinking("2024-01-15T12:00:05Z"),
+        createInitialState(),
+      );
+      expect(state.status).toBe("idle");
+    });
+
+    it("keeps a thinking entry with a tool_use stop_reason non-terminal", () => {
+      const working = deriveStateFromEntries([prompt]);
+      const state = processEntry(
+        thinking("2024-01-15T12:00:05Z", "tool_use"),
+        working,
+      );
+      expect(state.status).toBe("working");
+    });
+
+    it("still records activity, version and branch from the thinking entry", () => {
+      const working = {
+        ...deriveStateFromEntries([prompt]),
+        version: "2.1.200",
+        gitBranch: "main",
+      };
+      const state = processEntry(
+        {
+          ...thinking("2024-01-15T12:00:05Z"),
+          version: "2.1.296",
+          gitBranch: "fix/thinking",
+        },
+        working,
+      );
+      expect(state.status).toBe("working");
+      expect(state.lastActivityAt).toBe("2024-01-15T12:00:05Z");
+      expect(state.version).toBe("2.1.296");
+      expect(state.gitBranch).toBe("fix/thinking");
+    });
+  });
+
   describe("deriveStateFromEntries", () => {
     it("should derive state from multiple entries", () => {
       const entries: LogEntry[] = [
