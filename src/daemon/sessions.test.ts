@@ -1288,6 +1288,51 @@ describe("SessionManager", () => {
   });
 });
 
+describe("status revision", () => {
+  afterEach(() => {
+    setSystemTime();
+  });
+
+  it("moves on every status edge, including two in one millisecond", () => {
+    const manager = new SessionManager();
+    const id = manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: "/tmp/myapp",
+      pid: 1,
+    }).id;
+    expect(manager.getStatusRevision(id)).toBe(0);
+
+    setSystemTime(new Date("2024-01-15T12:00:00Z"));
+    manager.updateSession(id, { status: "working" });
+    manager.updateSession(id, { status: "idle" });
+    expect(manager.getStatusRevision(id)).toBe(2);
+
+    manager.updateSession(id, { status: "idle", gitBranch: "feat/x" });
+    expect(manager.getStatusRevision(id)).toBe(2);
+  });
+
+  it("moves when a relaunch resets the pane's row", () => {
+    const manager = new SessionManager();
+    const id = manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: "/tmp/myapp",
+      pid: 1,
+    }).id;
+    manager.updateSession(id, { status: "working" });
+    manager.updateSession(id, { status: "idle" });
+
+    manager.createPaneTrackedSession({
+      agentType: "claude",
+      paneId: "%1",
+      cwd: "/tmp/myapp",
+      pid: 2,
+    });
+    expect(manager.getStatusRevision(id)).toBe(3);
+  });
+});
+
 describe("getMarkerKey", () => {
   it("returns the common id when native-tracked (id === nativeSessionId)", () => {
     const session: Session = {

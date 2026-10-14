@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  mock,
+  setSystemTime,
+} from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -27,12 +35,6 @@ import { SessionManager } from "./sessions";
  * macrotask, so every already-queued microtask drains first. */
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-/** Real, short delay so back-to-back status changes land in different
- * milliseconds: `statusChangedAt` is the edge identity. */
-function tick(ms = 2): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface Deferred<T> {
@@ -97,10 +99,9 @@ function createHarness() {
     attention(id: string) {
       return sessionManager.getSession(id)!.attentionState;
     },
-    /** One full turn: working, then idle a moment later. */
+    /** One full turn: working, then idle. */
     async turn(id: string) {
       sessionManager.updateSession(id, { status: "working" });
-      await tick();
       sessionManager.updateSession(id, { status: "idle" });
       await flush();
     },
@@ -158,7 +159,6 @@ describe("AttentionTransitions", () => {
 
     h.focus("%99");
     for (let run = 0; run < 3; run++) {
-      await tick();
       await h.turn(id);
       expect(h.attention(id)).toBe("unread");
     }
@@ -179,7 +179,6 @@ describe("AttentionTransitions", () => {
     const id = h.createSession();
     h.holdLookups();
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle" });
     expect(h.pendingLookups.length).toBe(1);
 
@@ -194,7 +193,6 @@ describe("AttentionTransitions", () => {
       status: "waiting",
       attentionType: "permission",
     });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle", attentionType: null });
     await flush();
     expect(h.attention(id)).toBe("unread");
@@ -207,8 +205,6 @@ describe("AttentionTransitions", () => {
     const id = h.createSession();
     await h.turn(id);
     expect(h.attention(id)).toBe("unread");
-
-    await tick();
     h.sessionManager.updateSession(id, { status: "working" });
     expect(h.attention(id)).toBeNull();
   });
@@ -218,8 +214,6 @@ describe("AttentionTransitions", () => {
     h.focus("%1");
     await h.turn(id);
     expect(h.tracker.hasReadTimer(id)).toBe(true);
-
-    await tick();
     h.sessionManager.updateSession(id, { status: "waiting" });
     expect(h.attention(id)).toBeNull();
     expect(h.tracker.hasReadTimer(id)).toBe(false);
@@ -229,11 +223,8 @@ describe("AttentionTransitions", () => {
     const id = h.createSession();
     h.holdLookups();
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle" });
     expect(h.pendingLookups.length).toBe(1);
-
-    await tick();
     h.sessionManager.updateSession(id, { status: "working" });
     h.pendingLookups[0].resolve("%99");
     await flush();
@@ -246,11 +237,8 @@ describe("AttentionTransitions", () => {
     const id = h.createSession();
     h.holdLookups();
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle" });
     expect(h.pendingLookups.length).toBe(2);
 
@@ -270,7 +258,6 @@ describe("AttentionTransitions", () => {
     const id = h.createSession();
     h.holdLookups();
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle" });
     expect(h.pendingLookups.length).toBe(1);
 
@@ -286,7 +273,6 @@ describe("AttentionTransitions", () => {
     const id = h.createSession();
     h.holdLookups();
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.sessionManager.updateSession(id, { status: "idle" });
 
     h.sessionManager.markSeen(id);
@@ -295,6 +281,57 @@ describe("AttentionTransitions", () => {
     await flush();
 
     expect(h.attention(id)).toBeNull();
+  });
+
+  describe("status changes within one millisecond", () => {
+    afterEach(() => {
+      setSystemTime();
+    });
+
+    it("still decides a finish that shares its start's millisecond", async () => {
+      const id = h.createSession();
+      setSystemTime(new Date("2024-01-15T12:00:00Z"));
+      h.sessionManager.updateSession(id, { status: "working" });
+      h.sessionManager.updateSession(id, { status: "idle" });
+      await flush();
+
+      expect(h.attention(id)).toBe("unread");
+      expect(h.lookups).toBe(1);
+    });
+
+    it("still clears attention for a new turn that shares the last finish's millisecond", async () => {
+      const id = h.createSession();
+      setSystemTime(new Date("2024-01-15T12:00:00Z"));
+      h.sessionManager.updateSession(id, { status: "working" });
+      setSystemTime(new Date("2024-01-15T12:00:01Z"));
+      h.sessionManager.updateSession(id, { status: "idle" });
+      await flush();
+      expect(h.attention(id)).toBe("unread");
+
+      h.sessionManager.updateSession(id, { status: "working" });
+      expect(h.attention(id)).toBeNull();
+    });
+
+    it("drops a pending finish verdict once a same-millisecond turn finishes again", async () => {
+      const id = h.createSession();
+      h.holdLookups();
+      setSystemTime(new Date("2024-01-15T12:00:00Z"));
+      h.sessionManager.updateSession(id, { status: "working" });
+      h.sessionManager.updateSession(id, { status: "idle" });
+      h.sessionManager.updateSession(id, { status: "working" });
+      h.sessionManager.updateSession(id, { status: "idle" });
+      expect(h.pendingLookups.length).toBe(2);
+
+      // The first finish's stamp still matches the session's: only the
+      // revision tells its verdict is outdated.
+      h.pendingLookups[0].resolve("%1");
+      await flush();
+      expect(h.attention(id)).toBeNull();
+
+      h.pendingLookups[1].resolve("%99");
+      await flush();
+      expect(h.attention(id)).toBe("unread");
+    });
   });
 
   it("does not re-decide a finish on a later non-status update", async () => {
@@ -311,11 +348,10 @@ describe("AttentionTransitions", () => {
   });
 
   it("does not read a relaunch in the same pane as a finished turn", async () => {
-    // A new pid in the pane resets the row to idle without a new
-    // `statusChangedAt`: the agent was replaced, nothing finished.
+    // A new pid in the pane resets the row to idle with no previous
+    // status: the agent was replaced, nothing finished.
     const id = h.createSession("%1", 1);
     h.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h.createSession("%1", 2);
     await flush();
 
@@ -339,7 +375,6 @@ describe("AttentionTransitions", () => {
       pid: 1,
     }).id;
     sessionManager.updateSession(id, { status: "working" });
-    await tick();
     sessionManager.updateSession(id, { status: "idle" });
     await flush();
     transitions.stop();
@@ -374,7 +409,6 @@ describe("AttentionTransitions", () => {
     const h2 = createHarness();
     const id = h2.createSession();
     h2.sessionManager.updateSession(id, { status: "working" });
-    await tick();
     h2.sessionManager.updateSession(id, { status: "idle" });
     h2.transitions.start();
 

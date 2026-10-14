@@ -56,14 +56,13 @@ export function classifyAttentionEdge(
  * pane, which they have none of, so a finish would stick forever.
  */
 export class AttentionTransitions {
-  /** Last `statusChangedAt` consumed per session id: the edge identity, as in
-   * the notifier. Keying on the stamp rather than the
-   * `previousStatus -> status` pair is load-bearing, since every non-status
-   * update (a branch refresh, a prompt append) re-emits the same pair, and
-   * `resetPaneTrackedSessionState` flips `status` to idle without a new
-   * stamp, which is a relaunch, not a finished turn. Shares the notifier's
-   * accepted limitation: two transitions in the same millisecond collide. */
-  private seen = new Map<string, string>();
+  /** Last status revision consumed per session id: the edge identity.
+   * Keying on the revision rather than the `previousStatus -> status` pair
+   * is load-bearing, since every non-status update (a branch refresh, a
+   * prompt append) re-emits the same pair. The revision rather than
+   * `statusChangedAt`, because two edges in the same millisecond share a
+   * stamp, and the second (a finish, or a new turn's clear) would be lost. */
+  private seen = new Map<string, number>();
   private listener: ((event: SessionEvent) => void) | null = null;
 
   constructor(private readonly deps: AttentionTransitionsDeps) {}
@@ -73,10 +72,9 @@ export class AttentionTransitions {
     // Edges that landed before the listener existed were never observed as
     // edges; replaying them off a later unrelated update would judge an old
     // finish against today's focus.
-    for (const session of this.deps.sessionManager.getSessions()) {
-      if (session.statusChangedAt !== null) {
-        this.seen.set(session.id, session.statusChangedAt);
-      }
+    const { sessionManager } = this.deps;
+    for (const session of sessionManager.getSessions()) {
+      this.seen.set(session.id, sessionManager.getStatusRevision(session.id));
     }
     this.listener = (event) => this.handleChange(event);
     this.deps.sessionManager.on("change", this.listener);
@@ -102,10 +100,12 @@ export class AttentionTransitions {
     const session = event.session;
     if (!session || isBackgroundSession(session)) return;
 
-    const stamp = session.statusChangedAt;
-    if (stamp === null || this.seen.get(session.id) === stamp) return;
-    this.seen.set(session.id, stamp);
+    const revision = this.deps.sessionManager.getStatusRevision(session.id);
+    if ((this.seen.get(session.id) ?? 0) === revision) return;
+    this.seen.set(session.id, revision);
 
+    // `resetPaneTrackedSessionState` lands here as idle with no previous
+    // status: a replaced agent, not a finished turn.
     const edge = classifyAttentionEdge(session.previousStatus, session.status);
     if (edge === "new-work") {
       // Synchronous on purpose: no await between the status change and the
@@ -114,7 +114,7 @@ export class AttentionTransitions {
       this.deps.tracker.clearRead(session.id);
       this.deps.sessionManager.setAttentionState(session.id, null);
     } else if (edge === "finished") {
-      void this.resolveFinish(session.id, stamp).catch((error) => {
+      void this.resolveFinish(session.id, revision).catch((error) => {
         console.debug("AttentionTransitions: finish resolve failed", error);
       });
     }
@@ -123,14 +123,17 @@ export class AttentionTransitions {
   /**
    * Decide a finished turn against the pane focused as it finished. The
    * tmux lookup is async, and the session can start a new turn (or finish
-   * again) before it answers; the stamp check drops a verdict that belongs
-   * to a finish the session has already moved past, so a stale lookup can
-   * never mark a new turn unread. The user can also acknowledge the finish
-   * while tmux answers (`ccmux switch` posts /seen right after switching),
-   * and a focus read taken before that ack must not overwrite it, so any
-   * attention change during the lookup drops the verdict too.
+   * again) before it answers; the revision check drops a verdict that
+   * belongs to a finish the session has already moved past, so a stale
+   * lookup can never mark a new turn unread. The user can also acknowledge
+   * the finish while tmux answers (`ccmux switch` posts /seen right after
+   * switching), and a focus read taken before that ack must not overwrite
+   * it, so any attention change during the lookup drops the verdict too.
    */
-  private async resolveFinish(sessionId: string, stamp: string): Promise<void> {
+  private async resolveFinish(
+    sessionId: string,
+    statusRevision: number,
+  ): Promise<void> {
     const { sessionManager } = this.deps;
     const attentionRevision = sessionManager.getAttentionRevision(sessionId);
     const activePaneId = await this.deps.getActivePaneId().catch(() => null);
@@ -139,7 +142,7 @@ export class AttentionTransitions {
     if (
       !session ||
       session.status !== "idle" ||
-      session.statusChangedAt !== stamp ||
+      sessionManager.getStatusRevision(sessionId) !== statusRevision ||
       sessionManager.getAttentionRevision(sessionId) !== attentionRevision
     ) {
       return;
