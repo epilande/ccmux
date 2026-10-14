@@ -140,6 +140,8 @@ export interface SystemLogEntry extends BaseLogEntry {
   type: "system";
   subtype: string;
   durationMs?: number;
+  /** `stop_hook_summary`: one entry per Stop hook that blocked or failed. */
+  hookErrors?: string[];
 }
 
 /**

@@ -493,9 +493,17 @@ function processSystemEntry(
   entry: SystemLogEntry,
   currentState: SessionState,
 ): SessionState {
+  // A Stop hook that blocks writes its summary right AFTER the "Stop hook
+  // feedback" entry that starts Claude's continuation, so that summary must
+  // not end the turn. It can't say it blocked (a hook that merely failed
+  // lists `hookErrors` too), but a failed hook's summary follows the end_turn
+  // that already ended the turn, so skipping every summary with errors is
+  // safe.
+  const hasHookErrors =
+    Array.isArray(entry.hookErrors) && entry.hookErrors.length > 0;
   if (
     entry.subtype === "turn_duration" ||
-    entry.subtype === "stop_hook_summary"
+    (entry.subtype === "stop_hook_summary" && !hasHookErrors)
   ) {
     return {
       ...currentState,

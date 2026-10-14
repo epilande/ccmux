@@ -767,6 +767,159 @@ describe("status-machine", () => {
     });
   });
 
+  // Entry order copied from Claude Code 2.1.299 transcripts.
+  describe("stop_hook_summary", () => {
+    const REASON =
+      "Before you finish, and without using any tools, write about 120 words on why checklists help.";
+
+    const prompt: UserLogEntry = {
+      type: "user",
+      uuid: "u1",
+      parentUuid: null,
+      timestamp: "2024-01-15T12:00:00.000Z",
+      message: { role: "user", content: "Reply with just: ok" },
+    };
+
+    const assistant = (
+      timestamp: string,
+      content: AssistantLogEntry["message"]["content"],
+      stopReason = "end_turn",
+    ): AssistantLogEntry => ({
+      type: "assistant",
+      uuid: `a-${timestamp}`,
+      parentUuid: null,
+      timestamp,
+      message: { role: "assistant", content, stop_reason: stopReason },
+    });
+
+    const feedback: UserLogEntry = {
+      type: "user",
+      uuid: "u-feedback",
+      parentUuid: null,
+      timestamp: "2024-01-15T12:00:01.814Z",
+      isMeta: true,
+      message: { role: "user", content: `Stop hook feedback:\n${REASON}` },
+    };
+
+    const blockingAttachment = {
+      type: "attachment",
+      uuid: "att-1",
+      parentUuid: "u-feedback",
+      timestamp: "2024-01-15T12:00:01.813Z",
+      attachment: { type: "hook_blocking_error", hookEvent: "Stop" },
+    } as LogEntry;
+
+    const summary = (
+      timestamp: string,
+      hookErrors: string[],
+      extra: Record<string, unknown> = {},
+    ): SystemLogEntry => ({
+      type: "system",
+      uuid: `s-${timestamp}`,
+      parentUuid: null,
+      timestamp,
+      subtype: "stop_hook_summary",
+      hookErrors,
+      ...extra,
+    });
+
+    const turnDuration = (timestamp: string): SystemLogEntry => ({
+      type: "system",
+      uuid: `td-${timestamp}`,
+      parentUuid: null,
+      timestamp,
+      subtype: "turn_duration",
+      durationMs: 5_000,
+    });
+
+    /** Status after each entry. */
+    const statuses = (entries: LogEntry[]) => {
+      let state = createInitialState();
+      return entries.map(
+        (entry) => (state = processEntry(entry, state)).status,
+      );
+    };
+
+    it("stays working through a blocking hook's continuation", () => {
+      const entries: LogEntry[] = [
+        prompt,
+        assistant("2024-01-15T12:00:01.771Z", [{ type: "text", text: "ok" }]),
+        feedback,
+        blockingAttachment,
+        summary("2024-01-15T12:00:01.815Z", [REASON]),
+        assistant("2024-01-15T12:00:03.308Z", [{ type: "thinking" }]),
+        assistant("2024-01-15T12:00:05.747Z", [
+          { type: "text", text: "Checklists help because..." },
+        ]),
+        summary("2024-01-15T12:00:05.807Z", []),
+        turnDuration("2024-01-15T12:00:05.809Z"),
+      ];
+
+      expect(statuses(entries)).toEqual([
+        "working",
+        "idle",
+        "working",
+        "working",
+        "working",
+        "working",
+        "idle",
+        "idle",
+        "idle",
+      ]);
+    });
+
+    it("stays working when the feedback and the summary arrive in separate reads", () => {
+      const head = deriveStateFromEntries([
+        prompt,
+        assistant("2024-01-15T12:00:01.771Z", [{ type: "text", text: "ok" }]),
+        feedback,
+      ]);
+      const state = processEntry(
+        summary("2024-01-15T12:00:01.815Z", [REASON]),
+        head,
+      );
+      expect(state.status).toBe("working");
+      expect(state.lastActivityAt).toBe("2024-01-15T12:00:01.815Z");
+    });
+
+    it("ends the turn on a non-blocking hook's summary", () => {
+      // Shape of a turn whose final entry left the row working: the summary
+      // is what ends it.
+      const state = deriveStateFromEntries([
+        prompt,
+        assistant("2024-01-15T12:00:01.771Z", [{ type: "thinking" }]),
+        summary("2024-01-15T12:00:01.815Z", []),
+      ]);
+      expect(state.status).toBe("idle");
+      expect(state.lastActivityAt).toBe("2024-01-15T12:00:01.815Z");
+    });
+
+    it("stays idle through a hook that failed without blocking", () => {
+      expect(
+        statuses([
+          prompt,
+          assistant("2024-01-15T12:00:01.771Z", [{ type: "text", text: "ok" }]),
+          summary("2024-01-15T12:00:02.000Z", [
+            "Failed with non-blocking status code: boom",
+          ]),
+          turnDuration("2024-01-15T12:00:02.002Z"),
+        ]),
+      ).toEqual(["working", "idle", "idle", "idle"]);
+    });
+
+    it("ends the turn on a hook that stopped Claude with continue: false", () => {
+      const state = deriveStateFromEntries([
+        prompt,
+        assistant("2024-01-15T12:00:01.771Z", [{ type: "thinking" }]),
+        summary("2024-01-15T12:00:02.000Z", [], {
+          preventedContinuation: true,
+          stopReason: "halted by hook",
+        }),
+      ]);
+      expect(state.status).toBe("idle");
+    });
+  });
+
   describe("deriveStateFromEntries", () => {
     it("should derive state from multiple entries", () => {
       const entries: LogEntry[] = [
