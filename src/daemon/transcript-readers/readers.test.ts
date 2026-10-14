@@ -89,6 +89,7 @@ describe("claude reader", () => {
       "<command-name>/model</command-name><command-args>opus</command-args>",
       "<command-message>dev-extras:codex</command-message>\n<command-name>/dev-extras:codex</command-name>",
       "<local-command-stdout>Set model to opus</local-command-stdout>",
+      "<local-command-stderr>Unknown model</local-command-stderr>",
       "<local-command-caveat>Caveat: the messages below…</local-command-caveat>",
     ]) {
       expect(

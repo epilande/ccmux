@@ -384,3 +384,69 @@ describe("LogWatcher: adds racing for one new transcript", () => {
     expect(internals.watchedFiles.has(newPath)).toBe(true);
   });
 });
+
+/**
+ * Issue #233. What /clear actually writes to the new transcript, the moment
+ * it runs and before any prompt: Claude's local-command bookkeeping. The add
+ * derives the new session's status from that file, and reading the markup as
+ * a prompt made it `working` until the next scan settled it on the marker's
+ * `idle`, a working -> idle edge that marked the row unread (and would have
+ * fired a "Finished" notification) when no turn ran.
+ */
+describe("LogWatcher: the transcript /clear writes", () => {
+  afterEach(cleanUp);
+
+  it("creates the new session idle, with no edge to read as a finished turn", async () => {
+    const markers = new Map([[NEW_SESSION_ID, marker(NEW_SESSION_ID)]]);
+    stubDiscovery(markers, { holdCalls: 0 });
+    const { manager, watcher, newPath } = setup();
+    const line = (entry: Record<string, unknown>) =>
+      JSON.stringify({ uuid: crypto.randomUUID(), cwd: "/repo/a", ...entry });
+    writeFileSync(
+      newPath,
+      [
+        line({
+          type: "user",
+          isMeta: true,
+          timestamp: "2024-01-15T12:00:00.825Z",
+          message: {
+            role: "user",
+            content:
+              "<local-command-caveat>The command below was run directly in Claude Code, not sent to you as a request, and its output goes straight to the user. It's recorded here as context for later messages.</local-command-caveat>",
+          },
+        }),
+        line({
+          type: "user",
+          timestamp: "2024-01-15T12:00:00.788Z",
+          message: {
+            role: "user",
+            content:
+              "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>",
+          },
+        }),
+        line({
+          type: "system",
+          subtype: "local_command",
+          timestamp: "2024-01-15T12:00:00.821Z",
+          content: "<local-command-stdout></local-command-stdout>",
+        }),
+      ].join("\n") + "\n",
+    );
+
+    const statuses: string[] = [];
+    manager.on("change", (event: SessionEvent) => {
+      if (event.session?.id === NEW_SESSION_ID) {
+        statuses.push(event.session.status);
+      }
+    });
+
+    await (watcher as unknown as WatcherInternals).handleAdd(newPath);
+
+    const session = manager.getSession(NEW_SESSION_ID);
+    expect(session?.tmuxPane).toBe(PANE.paneId);
+    expect(statuses).not.toContain("working");
+    expect(session?.status).toBe("idle");
+    expect(session?.previousStatus).toBeNull();
+    expect(session?.lastPrompt).toBeNull();
+  });
+});
