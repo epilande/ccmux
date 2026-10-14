@@ -386,7 +386,7 @@ Desktop notifications are opt-in (`notifications.enabled`) and edge-triggered on
 
 Inbox attention is orthogonal to status: an idle session is `unread` (finished while you were elsewhere), `read` (you just acknowledged it, a brief visual), or `null`. It is decided on the status edge, not on the scan. `AttentionTransitions` (`attention-transitions.ts`) listens to `SessionManager`'s `"change"` event, so every status writer (log watchers, marker reconciles, the scan, hook adapters) is covered without knowing about attention. Entering `working`/`waiting` clears attention synchronously in the listener, so no client ever sees a new turn carrying the last one's unread mark. Entering `idle` from either asks tmux for the focused pane at that moment and lands `read` if it is the session's pane, `unread` otherwise. Deciding on the 5s scan instead (issue #232) lost any turn that started and ended between two scans, judged "viewing" against whichever pane was focused at scan time, and left a new turn marked unread until the scan caught up.
 
-The edge identity is `statusChangedAt`, as in the notifier: every non-status update re-emits the same `previousStatus -> status` pair, and `resetPaneTrackedSessionState` flips a relaunched pane to idle without a new stamp, which is a replaced agent, not a finished turn. The pane lookup is async, so the verdict is dropped unless the session is still idle on the same stamp when tmux answers; a lookup that loses a race with the next turn can never mark that turn unread. The lookup is the live `getActivePaneId()` (`tmux display-message`, one per finished turn), not the server's `lastActivePaneId` from the focus hook: that one is `null` until the first focus event after a daemon start, misses focus moves its two hooks don't cover (`switch-client`, a new window, a killed pane), and would be a second source of truth beside the live query the scan's `unread -> read` upgrade and the notifier's focus check already use.
+The edge identity is `statusChangedAt`, as in the notifier: every non-status update re-emits the same `previousStatus -> status` pair, and `resetPaneTrackedSessionState` flips a relaunched pane to idle without a new stamp, which is a replaced agent, not a finished turn. The pane lookup is async, so the verdict is dropped unless the session is still idle on the same stamp when tmux answers; a lookup that loses a race with the next turn can never mark that turn unread. It is also dropped if attention changed while tmux answered (a per-session attention revision `SessionManager` bumps on every `setAttentionState` change): `ccmux switch` posts `/seen` right after switching, and a focus read taken before that acknowledgment must not mark the session unread again. The lookup is the live `getActivePaneId()` (`tmux display-message`, one per finished turn), not the server's `lastActivePaneId` from the focus hook: that one is `null` until the first focus event after a daemon start, misses focus moves its two hooks don't cover (`switch-client`, a new window, a killed pane), and would be a second source of truth beside the live query the scan's `unread -> read` upgrade and the notifier's focus check already use.
 
 The scan (`reconcileAttentionStates`) keeps only what depends on time or on focus moving with no status change: `read` decays to `null` after 5s, and an `unread` session whose pane is focused becomes `read` (`POST /active-pane` does the same instantly on a focus hook). Background sessions are excluded from both halves, since unread clears on viewing a pane they do not have.
 
@@ -394,7 +394,7 @@ The scan (`reconcileAttentionStates`) keeps only what depends on time or on focu
 
 Removal is **death-gated, not acknowledgement-gated**. `handleKillSession` snapshots the row's pid, sends SIGTERM, then polls liveness (`waitForExit`, signal 0, 100ms, capped at 2s) and removes the session only once the process is confirmed gone. Removal happens daemon-side precisely so every attached client learns about it through the ordinary `session_removed` broadcast, rather than each one optimistically dropping the row and guessing whether the kill worked (issue #135). A SIGTERM that was already unnecessary (ESRCH) removes the row immediately, with no wait: the row is stale by definition.
 
-The response carries an additive `killed: boolean`. A process that outlives the cap **keeps its row** and reports `killed: false`; the scan loop's liveness cleanup owns it from there, so a surviving agent is never hidden from the picker. Before removing, the handler re-reads the row and skips a *different* non-null pid: the pid snapshot fixes which process was waited on, but the row is addressed by id, and a pane-tracked id outlives the process it names (`createPaneTrackedSession` mutates in place when a new agent appears in that pane).
+The response carries an additive `killed: boolean`. A process that outlives the cap **keeps its row** and reports `killed: false`; the scan loop's liveness cleanup owns it from there, so a surviving agent is never hidden from the picker. Before removing, the handler re-reads the row and skips a _different_ non-null pid: the pid snapshot fixes which process was waited on, but the row is addressed by id, and a pane-tracked id outlives the process it names (`createPaneTrackedSession` mutates in place when a new agent appears in that pane).
 
 `handleKillAllSessions` deliberately does NOT share this path: it is a synchronous SIGTERM sweep with no wait and no removal, so bulk-killed rows still linger until the next scan. Group kill is not the bulk path (the TUI fires per-row `/kill` requests concurrently), so it does get the death-gated removal.
 
@@ -544,87 +544,87 @@ Section and repo headers are LINES the cursor never stops on, but lines `sourceP
 
 ## Where to look in the code
 
-| Concern                                                                                                                 | Path                                          |
-| :---------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------- |
-| Daemon entry, scan loop                                                                                                 | `src/daemon/index.ts`                         |
-| Daemon process, PID file, port recovery                                                                                 | `src/daemon/lifecycle.ts`                     |
-| Per-tick reconciliation cascade                                                                                         | `src/daemon/state-reconciler.ts`              |
-| Pure freshest-wins-with-tiebreak fold                                                                                   | `src/daemon/cascade-evaluator.ts`             |
-| JSONL to state transitions                                                                                              | `src/daemon/status-machine.ts`                |
-| Worktree/repo identity for a cwd (`.git` walk + git's own `rev-parse` answer)                                           | `src/daemon/project-derivation.ts`            |
-| Regex on pane content                                                                                                   | `src/daemon/terminal-detector.ts`             |
-| Recursive log-tree watcher                                                                                              | `src/daemon/log-tree-watcher.ts`              |
-| Log tailing, offsets, stat-poll for open-fd appends                                                                     | `src/daemon/watcher.ts`                       |
-| Pane title / state heuristic (title proves working only; content spinner line; `detectPaneState`)                      | `src/daemon/pane-classify.ts`                 |
-| `tmux capture-pane` wrapper                                                                                             | `src/daemon/pane-io.ts`                       |
-| Tmux pane listing, PID-to-pane                                                                                          | `src/daemon/pane-discovery.ts`                |
-| Which tmux server to talk to (precedence, per-process rule, label to path)                                              | `src/lib/tmux-socket.ts`                      |
-| Central `tmux` argv builder (`-S`/`-L` injection, shell prefix)                                                         | `src/lib/tmux-exec.ts`                        |
-| Single-server invariant guard (`isSameTmuxServer`)                                                                      | `src/lib/tmux-server.ts`                      |
-| Session-to-pane matching policy (binder)                                                                                | `src/daemon/binder/`                          |
-| Binder I/O wrapper (`matchSessionsToPanes`)                                                                             | `src/daemon/session-pane-match.ts`            |
-| Agent process discovery                                                                                                 | `src/daemon/processes.ts`                     |
-| `ccmux-invoke-*` detached session lifecycle                                                                             | `src/daemon/detached-session.ts`              |
-| chokidar over markers, dispatch to adapters                                                                             | `src/daemon/hook-manager.ts`                  |
-| Marker file shape, cache, cleanup                                                                                       | `src/daemon/session-markers.ts`               |
-| Per-agent install + marker handling                                                                                     | `src/daemon/adapters/<agent>/hook-adapter.ts` |
-| Adapter factory (single source of truth)                                                                                | `src/daemon/adapters/index.ts`                |
-| SessionManager (EventEmitter)                                                                                           | `src/daemon/sessions.ts`                      |
-| HTTP REST + SSE on port 2269                                                                                            | `src/daemon/server.ts`                        |
-| Whole-session transcript search (`GET /search`)                                                                         | `src/daemon/transcript-search.ts`             |
-| Repo-wide open-PR / open-issue lists (`GET /prs`, `GET /issues`)                                                        | `src/daemon/pr-list.ts`, `src/daemon/issue-list.ts` |
-| Per-repo answer cache that is also the per-repo lock (in-flight join, split TTLs)                                       | `src/daemon/repo-answer-cache.ts`             |
-| Session reference resolution (tiers, proximity, ambiguity refusal)                                                      | `src/daemon/session-ref.ts`                   |
-| Backwards line walk, JSONL turn fold, transcript size guards                                                            | `src/daemon/transcript-read.ts`               |
-| Per-agent transcript readers + registry                                                                                 | `src/daemon/transcript-readers/`              |
-| Provenance header, compose-with-cap, pending-handoff queue                                                              | `src/daemon/handoff.ts`                       |
-| Shared delivery-safety guards (liveness, control chars, unsafe reply, defuse)                                           | `src/daemon/send-guards.ts`                   |
-| TUI clipboard tiers (command vs OSC 52)                                                                                 | `src/tui/utils/clipboard.ts`                  |
-| Spawnable-agent discovery (`GET /agents`)                                                                               | `src/lib/spawnable-agents.ts`                 |
-| Picker new-session dialog (row budget, modes, dropdowns)                                                                | `src/tui/components/NewSessionDialog.tsx`     |
-| New-session draft state, `NEW_SESSION_FIELDS`, mode policy (`namesAWorktree`, `newSessionFields`)                       | `src/tui/store.ts`                            |
-| Dialog option lists, one accessor for keys/pills/overlay (`newSessionOptions`)                                          | `src/tui/new-session-options.ts`              |
-| Dropdown pill + shared absolute overlay                                                                                 | `src/tui/components/DropdownField.tsx`        |
-| Row context menu (identity highlight, pointer snapshot, reserved height)                                                | `src/tui/components/ContextMenu.tsx`          |
-| Worktrees panel (two views, three-phase read, row presentation, removal flow)                                                        | `src/tui/components/WorktreesPanel.tsx`       |
-| Source picker (one list over open PRs + issues, filter, Enter routing)                                                  | `src/tui/components/SourcePicker.tsx`         |
-| Its rows, filtering, section text and the issue-worktree proof                                                          | `src/tui/components/source-picker-rows.ts`    |
-| Row-drawing primitives no surface owns (fitting, phrases, visual-line scrolling)                                        | `src/tui/components/row-segments.ts`          |
-| Open-PR row presentation + the SHA proof a checkout holds it                                                            | `src/tui/components/pr-rows.ts`               |
-| Reading the daemon's open-PR / open-issue lists (`fetchOpenPRs`, `fetchOpenIssues`)                                     | `src/tui/utils/source-lists.ts`               |
-| Merge-base resolution (recorded base first) for a branch review                                                         | `src/tui/utils/review.ts`                     |
-| Move accounting and recovery wording, shared by the CLI and the picker                                                  | `src/lib/move-report.ts`                      |
-| Acknowledge-before-continuing dialog (`store.state.notice`)                                                             | `src/tui/components/NoticeDialog.tsx`         |
-| Codex rollout line parsing (shared by adapter + search)                                                                 | `src/daemon/adapters/codex/parse.ts`          |
-| In-memory per-session prompt index (`appendPrompt`, caps in `config.ts`)                                                | `src/daemon/status-machine.ts`                |
-| `(cwd, branch)` → open-PR lookup                                                                                        | `src/daemon/pr-resolver.ts`                   |
-| Worktree creation for a spawn (name derivation, base resolution, create-or-open, file setup)                            | `src/daemon/worktree-create.ts`               |
-| Relocating a checkout's uncommitted work into a new worktree (`--with-changes`)                                         | `src/daemon/worktree-move-changes.ts`         |
-| A PR or issue number into a spawn (`gh pr view` / `gh issue view`, PR head fetch, branch tracking config)               | `src/daemon/gh-spawn-source.ts`               |
-| Worktree enumeration + git facts for pruning (`worktree list --porcelain`, dirty, ancestry, upstream)                   | `src/daemon/worktree-git.ts`                  |
-| Local-only worktree listing, the panel's first paint (`GET /worktrees`)                                                 | `src/daemon/worktree-list.ts`                 |
-| Project-header worktree counts (`GET /worktrees/counts`, `countRepoWorktrees`)                                          | `src/daemon/worktree-list.ts`                 |
-| Deadline-bounded metadata git reads (`runMetadataGit`, `runGit`'s timeout)                                              | `src/daemon/worktree-git.ts`                  |
-| Prune candidate classification + removal run                                                                            | `src/daemon/worktree-prune.ts`                |
-| Agent-worktree path recognition (`.claude/worktrees/<name>`), shared by `sessions.ts` and the Claude log adapter        | `src/lib/worktree-paths.ts`                   |
-| Bounded-parallelism fan-out (`mapWithConcurrency`)                                                                      | `src/lib/concurrency.ts`                      |
-| Per-directory agent state cleanup (`~/.claude.json` `projects`)                                                         | `src/daemon/agent-state.ts`                   |
-| Paneless Claude background-agent source                                                                                 | `src/daemon/sources/claude-background.ts`     |
-| `/invoke` request lifecycle                                                                                             | `src/daemon/invocation-manager.ts`            |
-| Subprocess invoke output store                                                                                          | `src/daemon/invocation-results.ts`            |
-| Invoker interface + capabilities                                                                                        | `src/daemon/invokers/invoker.ts`              |
-| Agent-to-invoker dispatch                                                                                               | `src/daemon/invokers/registry.ts`             |
-| Claude interactive-tmux invoker                                                                                         | `src/daemon/invokers/claude-invoker.ts`       |
-| Subprocess invoker (Codex/Cursor/etc.)                                                                                  | `src/daemon/invokers/subprocess-invoker.ts`   |
-| Tmux status counts and window attention marks (default-on publishing, explicit opt-out, serialized writes; pauses without a server) | `src/daemon/status-bar.ts`                    |
-| Notification trigger engine (debounce, gating, payload build)                                                           | `src/daemon/notifier.ts`                      |
-| Unread/read decided on status edges (finish-time focus lookup, stale-verdict guard)                                     | `src/daemon/attention-transitions.ts`         |
-| Notification backend resolution + delivery (dependency-free)                                                            | `src/lib/notify.ts`                           |
-| Daemon delivery + retraction wrapper                                                                                    | `src/daemon/notify-delivery.ts`               |
-| Actionable-notification shared handler (safety rules)                                                                   | `src/daemon/notification-action.ts`           |
-| Notification body context extraction                                                                                    | `src/daemon/notify-context.ts`                |
-| Notification click/button jump routing                                                                                  | `src/daemon/notify-jump.ts`                   |
-| D-Bus notifier (buttons, inline reply, retract)                                                                         | `src/lib/notify-dbus.ts`                      |
-| macOS `ccmux-notifier` helper app (Swift)                                                                               | `notifier/`                                   |
-| Setup install/uninstall flow                                                                                            | `src/commands/setup.ts`                       |
-| Shell completions (`completion` scripts + hidden `__complete` tree walk)                                                | `src/commands/completion.ts`                  |
+| Concern                                                                                                                             | Path                                                |
+| :---------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------- |
+| Daemon entry, scan loop                                                                                                             | `src/daemon/index.ts`                               |
+| Daemon process, PID file, port recovery                                                                                             | `src/daemon/lifecycle.ts`                           |
+| Per-tick reconciliation cascade                                                                                                     | `src/daemon/state-reconciler.ts`                    |
+| Pure freshest-wins-with-tiebreak fold                                                                                               | `src/daemon/cascade-evaluator.ts`                   |
+| JSONL to state transitions                                                                                                          | `src/daemon/status-machine.ts`                      |
+| Worktree/repo identity for a cwd (`.git` walk + git's own `rev-parse` answer)                                                       | `src/daemon/project-derivation.ts`                  |
+| Regex on pane content                                                                                                               | `src/daemon/terminal-detector.ts`                   |
+| Recursive log-tree watcher                                                                                                          | `src/daemon/log-tree-watcher.ts`                    |
+| Log tailing, offsets, stat-poll for open-fd appends                                                                                 | `src/daemon/watcher.ts`                             |
+| Pane title / state heuristic (title proves working only; content spinner line; `detectPaneState`)                                   | `src/daemon/pane-classify.ts`                       |
+| `tmux capture-pane` wrapper                                                                                                         | `src/daemon/pane-io.ts`                             |
+| Tmux pane listing, PID-to-pane                                                                                                      | `src/daemon/pane-discovery.ts`                      |
+| Which tmux server to talk to (precedence, per-process rule, label to path)                                                          | `src/lib/tmux-socket.ts`                            |
+| Central `tmux` argv builder (`-S`/`-L` injection, shell prefix)                                                                     | `src/lib/tmux-exec.ts`                              |
+| Single-server invariant guard (`isSameTmuxServer`)                                                                                  | `src/lib/tmux-server.ts`                            |
+| Session-to-pane matching policy (binder)                                                                                            | `src/daemon/binder/`                                |
+| Binder I/O wrapper (`matchSessionsToPanes`)                                                                                         | `src/daemon/session-pane-match.ts`                  |
+| Agent process discovery                                                                                                             | `src/daemon/processes.ts`                           |
+| `ccmux-invoke-*` detached session lifecycle                                                                                         | `src/daemon/detached-session.ts`                    |
+| chokidar over markers, dispatch to adapters                                                                                         | `src/daemon/hook-manager.ts`                        |
+| Marker file shape, cache, cleanup                                                                                                   | `src/daemon/session-markers.ts`                     |
+| Per-agent install + marker handling                                                                                                 | `src/daemon/adapters/<agent>/hook-adapter.ts`       |
+| Adapter factory (single source of truth)                                                                                            | `src/daemon/adapters/index.ts`                      |
+| SessionManager (EventEmitter)                                                                                                       | `src/daemon/sessions.ts`                            |
+| HTTP REST + SSE on port 2269                                                                                                        | `src/daemon/server.ts`                              |
+| Whole-session transcript search (`GET /search`)                                                                                     | `src/daemon/transcript-search.ts`                   |
+| Repo-wide open-PR / open-issue lists (`GET /prs`, `GET /issues`)                                                                    | `src/daemon/pr-list.ts`, `src/daemon/issue-list.ts` |
+| Per-repo answer cache that is also the per-repo lock (in-flight join, split TTLs)                                                   | `src/daemon/repo-answer-cache.ts`                   |
+| Session reference resolution (tiers, proximity, ambiguity refusal)                                                                  | `src/daemon/session-ref.ts`                         |
+| Backwards line walk, JSONL turn fold, transcript size guards                                                                        | `src/daemon/transcript-read.ts`                     |
+| Per-agent transcript readers + registry                                                                                             | `src/daemon/transcript-readers/`                    |
+| Provenance header, compose-with-cap, pending-handoff queue                                                                          | `src/daemon/handoff.ts`                             |
+| Shared delivery-safety guards (liveness, control chars, unsafe reply, defuse)                                                       | `src/daemon/send-guards.ts`                         |
+| TUI clipboard tiers (command vs OSC 52)                                                                                             | `src/tui/utils/clipboard.ts`                        |
+| Spawnable-agent discovery (`GET /agents`)                                                                                           | `src/lib/spawnable-agents.ts`                       |
+| Picker new-session dialog (row budget, modes, dropdowns)                                                                            | `src/tui/components/NewSessionDialog.tsx`           |
+| New-session draft state, `NEW_SESSION_FIELDS`, mode policy (`namesAWorktree`, `newSessionFields`)                                   | `src/tui/store.ts`                                  |
+| Dialog option lists, one accessor for keys/pills/overlay (`newSessionOptions`)                                                      | `src/tui/new-session-options.ts`                    |
+| Dropdown pill + shared absolute overlay                                                                                             | `src/tui/components/DropdownField.tsx`              |
+| Row context menu (identity highlight, pointer snapshot, reserved height)                                                            | `src/tui/components/ContextMenu.tsx`                |
+| Worktrees panel (two views, three-phase read, row presentation, removal flow)                                                       | `src/tui/components/WorktreesPanel.tsx`             |
+| Source picker (one list over open PRs + issues, filter, Enter routing)                                                              | `src/tui/components/SourcePicker.tsx`               |
+| Its rows, filtering, section text and the issue-worktree proof                                                                      | `src/tui/components/source-picker-rows.ts`          |
+| Row-drawing primitives no surface owns (fitting, phrases, visual-line scrolling)                                                    | `src/tui/components/row-segments.ts`                |
+| Open-PR row presentation + the SHA proof a checkout holds it                                                                        | `src/tui/components/pr-rows.ts`                     |
+| Reading the daemon's open-PR / open-issue lists (`fetchOpenPRs`, `fetchOpenIssues`)                                                 | `src/tui/utils/source-lists.ts`                     |
+| Merge-base resolution (recorded base first) for a branch review                                                                     | `src/tui/utils/review.ts`                           |
+| Move accounting and recovery wording, shared by the CLI and the picker                                                              | `src/lib/move-report.ts`                            |
+| Acknowledge-before-continuing dialog (`store.state.notice`)                                                                         | `src/tui/components/NoticeDialog.tsx`               |
+| Codex rollout line parsing (shared by adapter + search)                                                                             | `src/daemon/adapters/codex/parse.ts`                |
+| In-memory per-session prompt index (`appendPrompt`, caps in `config.ts`)                                                            | `src/daemon/status-machine.ts`                      |
+| `(cwd, branch)` → open-PR lookup                                                                                                    | `src/daemon/pr-resolver.ts`                         |
+| Worktree creation for a spawn (name derivation, base resolution, create-or-open, file setup)                                        | `src/daemon/worktree-create.ts`                     |
+| Relocating a checkout's uncommitted work into a new worktree (`--with-changes`)                                                     | `src/daemon/worktree-move-changes.ts`               |
+| A PR or issue number into a spawn (`gh pr view` / `gh issue view`, PR head fetch, branch tracking config)                           | `src/daemon/gh-spawn-source.ts`                     |
+| Worktree enumeration + git facts for pruning (`worktree list --porcelain`, dirty, ancestry, upstream)                               | `src/daemon/worktree-git.ts`                        |
+| Local-only worktree listing, the panel's first paint (`GET /worktrees`)                                                             | `src/daemon/worktree-list.ts`                       |
+| Project-header worktree counts (`GET /worktrees/counts`, `countRepoWorktrees`)                                                      | `src/daemon/worktree-list.ts`                       |
+| Deadline-bounded metadata git reads (`runMetadataGit`, `runGit`'s timeout)                                                          | `src/daemon/worktree-git.ts`                        |
+| Prune candidate classification + removal run                                                                                        | `src/daemon/worktree-prune.ts`                      |
+| Agent-worktree path recognition (`.claude/worktrees/<name>`), shared by `sessions.ts` and the Claude log adapter                    | `src/lib/worktree-paths.ts`                         |
+| Bounded-parallelism fan-out (`mapWithConcurrency`)                                                                                  | `src/lib/concurrency.ts`                            |
+| Per-directory agent state cleanup (`~/.claude.json` `projects`)                                                                     | `src/daemon/agent-state.ts`                         |
+| Paneless Claude background-agent source                                                                                             | `src/daemon/sources/claude-background.ts`           |
+| `/invoke` request lifecycle                                                                                                         | `src/daemon/invocation-manager.ts`                  |
+| Subprocess invoke output store                                                                                                      | `src/daemon/invocation-results.ts`                  |
+| Invoker interface + capabilities                                                                                                    | `src/daemon/invokers/invoker.ts`                    |
+| Agent-to-invoker dispatch                                                                                                           | `src/daemon/invokers/registry.ts`                   |
+| Claude interactive-tmux invoker                                                                                                     | `src/daemon/invokers/claude-invoker.ts`             |
+| Subprocess invoker (Codex/Cursor/etc.)                                                                                              | `src/daemon/invokers/subprocess-invoker.ts`         |
+| Tmux status counts and window attention marks (default-on publishing, explicit opt-out, serialized writes; pauses without a server) | `src/daemon/status-bar.ts`                          |
+| Notification trigger engine (debounce, gating, payload build)                                                                       | `src/daemon/notifier.ts`                            |
+| Unread/read decided on status edges (finish-time focus lookup, stale-verdict guard)                                                 | `src/daemon/attention-transitions.ts`               |
+| Notification backend resolution + delivery (dependency-free)                                                                        | `src/lib/notify.ts`                                 |
+| Daemon delivery + retraction wrapper                                                                                                | `src/daemon/notify-delivery.ts`                     |
+| Actionable-notification shared handler (safety rules)                                                                               | `src/daemon/notification-action.ts`                 |
+| Notification body context extraction                                                                                                | `src/daemon/notify-context.ts`                      |
+| Notification click/button jump routing                                                                                              | `src/daemon/notify-jump.ts`                         |
+| D-Bus notifier (buttons, inline reply, retract)                                                                                     | `src/lib/notify-dbus.ts`                            |
+| macOS `ccmux-notifier` helper app (Swift)                                                                                           | `notifier/`                                         |
+| Setup install/uninstall flow                                                                                                        | `src/commands/setup.ts`                             |
+| Shell completions (`completion` scripts + hidden `__complete` tree walk)                                                            | `src/commands/completion.ts`                        |

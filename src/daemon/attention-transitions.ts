@@ -125,16 +125,22 @@ export class AttentionTransitions {
    * tmux lookup is async, and the session can start a new turn (or finish
    * again) before it answers; the stamp check drops a verdict that belongs
    * to a finish the session has already moved past, so a stale lookup can
-   * never mark a new turn unread.
+   * never mark a new turn unread. The user can also acknowledge the finish
+   * while tmux answers (`ccmux switch` posts /seen right after switching),
+   * and a focus read taken before that ack must not overwrite it, so any
+   * attention change during the lookup drops the verdict too.
    */
   private async resolveFinish(sessionId: string, stamp: string): Promise<void> {
+    const { sessionManager } = this.deps;
+    const attentionRevision = sessionManager.getAttentionRevision(sessionId);
     const activePaneId = await this.deps.getActivePaneId().catch(() => null);
 
-    const session = this.deps.sessionManager.getSession(sessionId);
+    const session = sessionManager.getSession(sessionId);
     if (
       !session ||
       session.status !== "idle" ||
-      session.statusChangedAt !== stamp
+      session.statusChangedAt !== stamp ||
+      sessionManager.getAttentionRevision(sessionId) !== attentionRevision
     ) {
       return;
     }
@@ -143,6 +149,6 @@ export class AttentionTransitions {
     const state = tracker.isViewingSession(session, activePaneId)
       ? tracker.markSeen(sessionId)
       : "unread";
-    this.deps.sessionManager.setAttentionState(sessionId, state);
+    sessionManager.setAttentionState(sessionId, state);
   }
 }

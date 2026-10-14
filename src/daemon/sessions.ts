@@ -257,6 +257,15 @@ export class SessionManager extends EventEmitter {
   private nativeSessionResolvedAt: Map<string, number> = new Map();
 
   /**
+   * Bumped on every real `attentionState` change, keyed by session id. Lets
+   * an async decision taken against one attention state (a finish verdict
+   * waiting on tmux) tell that an acknowledgment landed in the meantime,
+   * even one that came and decayed back to the same value. Not on `Session`
+   * because no client reads it.
+   */
+  private attentionRevisions: Map<string, number> = new Map();
+
+  /**
    * Clear a pane-tracked session's per-run enrichment (status, activity,
    * log path, optionally native id). Used when the underlying process
    * changes so the row does not carry the previous run's identity — for
@@ -774,12 +783,20 @@ export class SessionManager extends EventEmitter {
     if (session.attentionState === attentionState) return false;
 
     session.attentionState = attentionState;
+    this.attentionRevisions.set(
+      sessionId,
+      this.getAttentionRevision(sessionId) + 1,
+    );
     if (attentionState === "read" || attentionState === null) {
       session.lastSeenAt = new Date().toISOString();
     }
     session.updatedAt = new Date();
     this.emit("change", { type: "updated", session } as SessionEvent);
     return true;
+  }
+
+  getAttentionRevision(sessionId: string): number {
+    return this.attentionRevisions.get(sessionId) ?? 0;
   }
 
   /**
@@ -975,6 +992,7 @@ export class SessionManager extends EventEmitter {
    */
   removeSession(sessionId: string): boolean {
     const existed = this.sessions.delete(sessionId);
+    this.attentionRevisions.delete(sessionId);
     if (existed) {
       this.emit("change", { type: "removed", sessionId } as SessionEvent);
     }

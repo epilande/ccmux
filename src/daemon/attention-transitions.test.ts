@@ -264,6 +264,39 @@ describe("AttentionTransitions", () => {
     expect(h.attention(id)).toBe("unread");
   });
 
+  it("keeps a seen-acknowledgment that lands while the finish lookup is pending", async () => {
+    // `ccmux switch` posts /seen right after switching; the lookup answered
+    // with the pane the user was on before, which must not undo the ack.
+    const id = h.createSession();
+    h.holdLookups();
+    h.sessionManager.updateSession(id, { status: "working" });
+    await tick();
+    h.sessionManager.updateSession(id, { status: "idle" });
+    expect(h.pendingLookups.length).toBe(1);
+
+    h.tracker.markSeen(id);
+    h.sessionManager.markSeen(id);
+    h.pendingLookups[0].resolve("%99");
+    await flush();
+
+    expect(h.attention(id)).toBe("read");
+  });
+
+  it("keeps an acknowledgment that came and decayed while the finish lookup is pending", async () => {
+    const id = h.createSession();
+    h.holdLookups();
+    h.sessionManager.updateSession(id, { status: "working" });
+    await tick();
+    h.sessionManager.updateSession(id, { status: "idle" });
+
+    h.sessionManager.markSeen(id);
+    h.sessionManager.setAttentionState(id, null);
+    h.pendingLookups[0].resolve("%99");
+    await flush();
+
+    expect(h.attention(id)).toBeNull();
+  });
+
   it("does not re-decide a finish on a later non-status update", async () => {
     const id = h.createSession();
     await h.turn(id);
