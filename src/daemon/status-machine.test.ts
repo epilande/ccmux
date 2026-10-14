@@ -690,6 +690,83 @@ describe("status-machine", () => {
     });
   });
 
+  describe("entries without a timestamp", () => {
+    const prompt: UserLogEntry = {
+      type: "user",
+      uuid: "u1",
+      parentUuid: null,
+      timestamp: "2024-01-15T12:00:00Z",
+      message: { role: "user", content: "Is 1000003 prime?" },
+    };
+    const untimestamped = (type: string): LogEntry => ({
+      type,
+      uuid: `${type}-1`,
+      parentUuid: null,
+    });
+    const metadata = [
+      "last-prompt",
+      "mode",
+      "permission-mode",
+      "atis-latch",
+      "ai-title",
+    ].map(untimestamped);
+    const assistant = (
+      timestamp: string,
+      content: AssistantLogEntry["message"]["content"],
+    ): AssistantLogEntry => ({
+      type: "assistant",
+      uuid: `a-${timestamp}`,
+      parentUuid: "u1",
+      timestamp,
+      message: { role: "assistant", content, stop_reason: "end_turn" },
+    });
+
+    it("keeps a first turn's activity through Claude's post-prompt metadata", () => {
+      const afterMetadata = deriveStateFromEntries([prompt, ...metadata]);
+      expect(afterMetadata.status).toBe("working");
+      expect(afterMetadata.lastActivityAt).toBe("2024-01-15T12:00:00Z");
+
+      const afterThinking = deriveStateFromEntries([
+        prompt,
+        ...metadata,
+        assistant("2024-01-15T12:00:05Z", [{ type: "thinking" }]),
+      ]);
+      expect(afterThinking.status).toBe("working");
+      expect(afterThinking.lastActivityAt).toBe("2024-01-15T12:00:05Z");
+
+      const afterText = deriveStateFromEntries([
+        prompt,
+        ...metadata,
+        assistant("2024-01-15T12:00:05Z", [{ type: "thinking" }]),
+        assistant("2024-01-15T12:00:16Z", [{ type: "text", text: "Yes." }]),
+      ]);
+      expect(afterText.status).toBe("idle");
+      expect(afterText.lastActivityAt).toBe("2024-01-15T12:00:16Z");
+    });
+
+    it("keeps the prompt's activity when each metadata entry arrives in its own read", () => {
+      let state = deriveStateFromEntries([prompt]);
+      for (const entry of metadata) {
+        state = processEntry(entry, state);
+        expect(state.lastActivityAt).toBe("2024-01-15T12:00:00Z");
+      }
+      expect(state.status).toBe("working");
+    });
+
+    it.each([
+      ["progress", { type: "progress", data: { type: "bash_progress" } }],
+      ["system", { type: "system", subtype: "unknown_subtype" }],
+      ["summary", { type: "summary", summary: "s" }],
+    ])("keeps lastActivityAt on an untimestamped %s entry", (_, fields) => {
+      const working = deriveStateFromEntries([prompt]);
+      const state = processEntry(
+        { uuid: "x", parentUuid: null, ...fields } as LogEntry,
+        working,
+      );
+      expect(state.lastActivityAt).toBe("2024-01-15T12:00:00Z");
+    });
+  });
+
   describe("deriveStateFromEntries", () => {
     it("should derive state from multiple entries", () => {
       const entries: LogEntry[] = [

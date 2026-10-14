@@ -94,6 +94,22 @@ export function processEntry(
   entry: LogEntry,
   currentState: SessionState,
 ): SessionState {
+  const next = processEntryByType(entry, currentState);
+  // Claude writes some entries with no `timestamp` (`mode`, `last-prompt`,
+  // `ai-title`, `file-history-snapshot`, ...), and on a first turn they land
+  // right after the prompt. The cascade reads `lastActivityAt` as the log's
+  // freshness, so erasing it there scores the log at 0 and lets a marker's
+  // idle from before the prompt win mid-turn.
+  if (entry.timestamp === undefined) {
+    return { ...next, lastActivityAt: currentState.lastActivityAt };
+  }
+  return next;
+}
+
+function processEntryByType(
+  entry: LogEntry,
+  currentState: SessionState,
+): SessionState {
   // Each case re-casts `entry`: LogEntry's open-ended final member
   // (BaseLogEntry & { type: string }) defeats discriminant narrowing on the
   // literal `type` values below, so TS won't narrow `entry` on its own.

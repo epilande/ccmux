@@ -8,7 +8,7 @@
 export interface BaseLogEntry {
   parentUuid: string | null;
   uuid: string;
-  timestamp: string;
+  timestamp?: string;
 }
 
 /**
