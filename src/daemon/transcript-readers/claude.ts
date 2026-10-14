@@ -15,12 +15,12 @@
  *
  * Not every `user` entry is a prompt, though. Only what
  * `classifyClaudeUserEntry` calls a `prompt` is read as the user's words:
- * slash-command markup and Claude's own bookkeeping (`isMeta` context, a
- * local command's record and output) are skipped. Emitting them verbatim
- * would put ccmux's own plumbing in the payload as the user's words, and
- * treating them as boundaries would credit a response to a prompt nobody
- * wrote, so responses separated only by that noise merge into one turn (see
- * `foldJsonlTurns`). `src/tui/components/session-columns.ts`
+ * slash-command markup, injected `isMeta` messages, and Claude's own
+ * bookkeeping (a local command's record and output) are skipped. Emitting
+ * them verbatim would put ccmux's own plumbing in the payload as the user's
+ * words, and treating them as boundaries would credit a response to a prompt
+ * nobody wrote, so responses separated only by that noise merge into one turn
+ * (see `foldJsonlTurns`). `src/tui/components/session-columns.ts`
  * (`stripCommandMarkup`) is the TUI's equivalent reduction of the same shapes
  * (it rewrites rather than drops, since a subtitle still owes the row a line).
  */

@@ -1339,6 +1339,100 @@ describe("status-machine", () => {
       expect(state.status).toBe("idle");
     });
 
+    // An injected entry that Claude answers with a turn of only thinking and
+    // text: no tool_use to establish `working` and no enqueue, so the entry
+    // itself is the only working signal before the end_turn.
+    it.each([
+      [
+        "a cross-session message",
+        'Another Claude session sent a message:\n<cross-session-message from="council:reviewer">LGTM</cross-session-message>',
+      ],
+      [
+        "a coordinator message",
+        "The coordinator sent a message while you were working:\nThe usage limit has reset. Continue where you left off.",
+      ],
+      [
+        "a background-task notification",
+        "[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.",
+      ],
+      [
+        "stop-hook feedback",
+        "Stop hook feedback:\ngit-sync: this turn left 1 file uncommitted (README.md). Verify, then commit and push, or say why not.",
+      ],
+    ])("runs a text-only turn started by %s", (_label, content) => {
+      const before = afterTurn();
+      const assistant = (
+        block: AssistantLogEntry["message"]["content"][number],
+        timestamp: string,
+        stop_reason?: string,
+      ): AssistantLogEntry => ({
+        type: "assistant",
+        uuid: timestamp,
+        parentUuid: null,
+        timestamp,
+        message: { role: "assistant", content: [block], stop_reason },
+      });
+
+      const injected = processEntry(
+        userEntry(content, "2024-01-01T12:01:00Z", true),
+        before,
+      );
+      const thinking = processEntry(
+        assistant(
+          { type: "thinking", thinking: "Nothing to change." } as {
+            type: string;
+          },
+          "2024-01-01T12:01:02Z",
+        ),
+        injected,
+      );
+      const done = processEntry(
+        assistant(
+          { type: "text", text: "Nothing left to do." },
+          "2024-01-01T12:01:03Z",
+          "end_turn",
+        ),
+        thinking,
+      );
+
+      // working -> idle is the edge AttentionTracker reads as a finished,
+      // unread response.
+      expect([injected.status, thinking.status, done.status]).toEqual([
+        "working",
+        "working",
+        "idle",
+      ]);
+      expect(injected.lastActivityAt).toBe("2024-01-01T12:01:00Z");
+      // Not the user's words.
+      expect(injected.lastPrompt).toBe(before.lastPrompt);
+      expect(injected.prompts).toEqual(before.prompts);
+      expect(injected.lastUserInputAt).toBe(before.lastUserInputAt);
+    });
+
+    it("keeps a pending plan/question wait through an injected entry", () => {
+      const waiting: SessionState = {
+        ...afterTurn(),
+        status: "waiting",
+        attentionType: "plan_approval",
+        pendingTool: "ExitPlanMode",
+        pendingToolIds: ["plan-1"],
+        inPlanMode: true,
+      };
+      const state = processEntry(
+        userEntry(
+          "The coordinator sent a message while you were working:\nhurry up",
+          "2024-01-01T12:01:00Z",
+          true,
+        ),
+        waiting,
+      );
+
+      expect(state.status).toBe("waiting");
+      expect(state.attentionType).toBe("plan_approval");
+      expect(state.pendingToolIds).toEqual(["plan-1"]);
+      expect(state.inPlanMode).toBe(true);
+    });
+
     it("keeps a pending plan/question wait through bookkeeping", () => {
       const waiting: SessionState = {
         ...afterTurn(),

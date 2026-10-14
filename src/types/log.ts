@@ -116,8 +116,9 @@ export interface UserMessage {
 export interface UserLogEntry extends BaseLogEntry {
   type: "user";
   message: UserMessage;
-  /** Claude's own injected context (command caveats, expanded skill
-   *  prompts, plugin notices), never something the user typed. */
+  /** Claude's own injected entries (command caveats, expanded skill prompts,
+   *  plugin notices, cross-session messages, stop-hook feedback), never
+   *  something the user typed, though some start a turn. */
   isMeta?: boolean;
   cwd?: string;
   version?: string;

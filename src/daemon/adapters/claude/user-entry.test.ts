@@ -58,16 +58,23 @@ describe("classifyClaudeUserEntry", () => {
     expect(classifyClaudeUserEntry(user(`\n${SKILL_RECORD}`))).toBe("command");
   });
 
-  it("reads every isMeta entry as bookkeeping, whatever its content", () => {
+  it("reads an isMeta message Claude answers with a turn as injected", () => {
+    for (const content of [
+      "Another Claude session sent a message:\n…",
+      "The coordinator sent a message while you were working:\n…",
+      "[SYSTEM NOTIFICATION - NOT USER INPUT]\n…",
+      "Stop hook feedback:\n…",
+      // Would read as a command if typed, but isMeta wins.
+      SKILL_RECORD,
+    ]) {
+      expect(classifyClaudeUserEntry(user(content, true))).toBe("injected");
+    }
+  });
+
+  it("reads the isMeta caveat and isMeta text arrays as bookkeeping", () => {
     expect(classifyClaudeUserEntry(user(CLEAR_CAVEAT, true))).toBe(
       "bookkeeping",
     );
-    // Text that would otherwise read as a prompt.
-    expect(
-      classifyClaudeUserEntry(
-        user("Another Claude session sent a message:\n…", true),
-      ),
-    ).toBe("bookkeeping");
     // A skill's expanded prompt and a plugin's notice arrive as text arrays,
     // which must not pass for tool results.
     expect(

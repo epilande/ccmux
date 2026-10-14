@@ -351,22 +351,28 @@ function processUserEntry(
   // prompt index. Nor `lastActivityAt`: the cascade reads it as the log's
   // freshness, and bumping it for an entry that says nothing about status
   // would let a stale log status outrank a newer marker.
-  if (classifyClaudeUserEntry(entry) === "bookkeeping") {
+  const kind = classifyClaudeUserEntry(entry);
+  if (kind === "bookkeeping") {
     return { ...currentState, cwd, project, version, gitBranch };
   }
 
   // When user provides input after ExitPlanMode, exit plan mode
   const inPlanMode =
-    currentState.pendingTool === "ExitPlanMode"
+    kind !== "injected" && currentState.pendingTool === "ExitPlanMode"
       ? false
       : currentState.inPlanMode;
 
-  // If content is an array, it's tool results
-  if (Array.isArray(content)) {
+  // Tool results resume the turn they interrupted. An injected message is
+  // handled the same way with no results: it starts a turn (which may be all
+  // thinking and text, so nothing else would mark it working), but it is not
+  // user input and must not clear a plan/question wait.
+  if (Array.isArray(content) || kind === "injected") {
     // Extract tool_use_ids from the results
-    const resultIds = (content as ToolResultContent[])
-      .filter((c) => c.type === "tool_result" && c.tool_use_id)
-      .map((c) => c.tool_use_id);
+    const resultIds = Array.isArray(content)
+      ? (content as ToolResultContent[])
+          .filter((c) => c.type === "tool_result" && c.tool_use_id)
+          .map((c) => c.tool_use_id)
+      : [];
 
     // Remove resolved tool IDs from pending list
     let remainingPendingIds = currentState.pendingToolIds || [];

@@ -14,9 +14,15 @@ export type ClaudeUserEntryKind =
    *  turn like a prompt, but its text is Claude's markup, not the user's
    *  words. */
   | "command"
+  /** An `isMeta` message Claude answers with a turn: a cross-session or
+   *  coordinator message, a background-task notification, stop-hook
+   *  feedback, a queued plugin prompt. It starts work like a prompt, but it
+   *  is not the user's words. */
+  | "injected"
   /** Claude's own bookkeeping, which never starts a turn: a local slash
-   *  command's record or output (`/clear`, `/model`) and every `isMeta`
-   *  injection. */
+   *  command's record, caveat or output (`/clear`, `/model`), and `isMeta`
+   *  text arrays (a plugin's notice, or a skill's expanded prompt and image
+   *  placeholders, which ride inside a turn something else started). */
   | "bookkeeping"
   /** Array content: tool results, which belong to the turn they interrupt. */
   | "tool-result";
@@ -57,16 +63,20 @@ export function classifyClaudeUserEntry(entry: {
   isMeta?: unknown;
   message?: { content?: unknown };
 }): ClaudeUserEntryKind {
-  // Checked before the content shape: injected context arrives as text arrays
-  // too (a skill's expanded prompt, a plugin's notice), which are not tool
-  // results.
-  if (entry.isMeta === true) return "bookkeeping";
   const content = entry.message?.content;
-  if (typeof content !== "string") return "tool-result";
+  const isMeta = entry.isMeta === true;
+  // isMeta is checked before the content shape: injected text arrays are not
+  // tool results. Every isMeta text array sampled across 2.1.269-2.1.299 is
+  // either passive or inside a running turn, while an isMeta string, the
+  // local-command caveat aside, was answered with a turn every time.
+  if (typeof content !== "string") {
+    return isMeta ? "bookkeeping" : "tool-result";
+  }
   const text = content.trimStart();
-  if (text.startsWith(COMMAND_PREFIX)) return "command";
   if (BOOKKEEPING_PREFIXES.some((prefix) => text.startsWith(prefix))) {
     return "bookkeeping";
   }
+  if (isMeta) return "injected";
+  if (text.startsWith(COMMAND_PREFIX)) return "command";
   return "prompt";
 }
