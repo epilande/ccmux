@@ -95,17 +95,6 @@ describe("extractLastAssistantTurn", () => {
     ).toBe(null);
   });
 
-  it("skips entries that parsed to non-objects (a literal null line)", () => {
-    // parseLogEntries pushes any successful JSON.parse result, so a JSONL
-    // line holding bare `null` reaches the extractor; it must not throw.
-    const entries = [
-      userPrompt("q"),
-      null as unknown as LogEntry,
-      assistantText("answer"),
-    ];
-    expect(extractLastAssistantTurn(entries)).toBe("answer");
-  });
-
   it("skips non-message entries (system, progress, summary)", () => {
     const entries: LogEntry[] = [
       userPrompt("q"),

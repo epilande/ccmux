@@ -110,29 +110,27 @@ function processEntryByType(
   entry: LogEntry,
   currentState: SessionState,
 ): SessionState {
-  // Each case re-casts `entry`: LogEntry's open-ended final member
-  // (BaseLogEntry & { type: string }) defeats discriminant narrowing on the
-  // literal `type` values below, so TS won't narrow `entry` on its own.
   switch (entry.type) {
     case "progress":
-      return processProgressEntry(entry as ProgressLogEntry, currentState);
+      return processProgressEntry(entry, currentState);
     case "result":
-      return processResultEntry(entry as ResultLogEntry, currentState);
+      return processResultEntry(entry, currentState);
     case "assistant":
-      return processAssistantEntry(entry as AssistantLogEntry, currentState);
+      return processAssistantEntry(entry, currentState);
     case "user":
-      return processUserEntry(entry as UserLogEntry, currentState);
+      return processUserEntry(entry, currentState);
     case "system":
-      return processSystemEntry(entry as SystemLogEntry, currentState);
+      return processSystemEntry(entry, currentState);
     case "summary":
-      return processSummaryEntry(entry as SummaryLogEntry, currentState);
+      return processSummaryEntry(entry, currentState);
     case "queue-operation":
-      return processQueueOperationEntry(
-        entry as QueueOperationLogEntry,
-        currentState,
-      );
-    default:
+      return processQueueOperationEntry(entry, currentState);
+    case "unknown":
       return { ...currentState, lastActivityAt: entry.timestamp };
+    default: {
+      const exhaustive: never = entry;
+      return exhaustive;
+    }
   }
 }
 

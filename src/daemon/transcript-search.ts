@@ -10,12 +10,7 @@
 import { parseLogEntries } from "./parser";
 import { parseEntries as parseCodexEntries } from "./adapters/codex/parse";
 import type { CodexEntry } from "./adapters/codex/parse";
-import type {
-  LogEntry,
-  AssistantLogEntry,
-  UserLogEntry,
-  TextBlock,
-} from "../types";
+import type { LogEntry, TextBlock } from "../types";
 
 /** Only the last N bytes of a transcript are scanned (a long-running session's
  *  rollout can be many MB; matching the whole thing per keystroke is wasteful). */
@@ -62,20 +57,17 @@ export function claudeEntryTexts(entry: LogEntry): RoleText[] {
   // Shape guards throughout: a JSON-valid but schema-invalid line (a user
   // entry with no `message`, a non-array assistant `content`, etc.) must
   // yield [] rather than throw, so one bad line can't drop a whole session's
-  // matches in `searchTranscript`.
-  // A JSON primitive line (a bare `null`, number, or boolean) parses to a
-  // non-object entry; guard before reading `entry.type` so one such line
-  // yields [] rather than throwing and dropping the whole session.
-  if (!entry || typeof entry !== "object") return [];
+  // matches in `searchTranscript`. (A bare `null`/primitive line never gets
+  // here: `parseLogEntries` drops non-object lines.)
   if (entry.type === "user") {
-    const message = (entry as UserLogEntry).message;
+    const message = entry.message;
     const content = message?.content;
     // Array-form user turns are tool results, not user text.
     if (typeof content !== "string") return [];
     return [{ role: "user", text: content }];
   }
   if (entry.type === "assistant") {
-    const content = (entry as AssistantLogEntry).message?.content;
+    const content = entry.message?.content;
     if (!Array.isArray(content)) return [];
     const texts: RoleText[] = [];
     for (const block of content) {
@@ -243,16 +235,16 @@ export async function searchTranscript(
       }
     };
 
-    // `entry?.timestamp`, not `entry.timestamp`: a bare `null`/primitive line
-    // parses to a non-object entry, and an eager property read here would
-    // throw into the outer catch and drop the whole session (the extractors
-    // guard their own reads, but this one runs before them).
     if (sess.agentType === "claude") {
       const entries: LogEntry[] = parseLogEntries(content);
       for (const entry of entries) {
-        collect(claudeEntryTexts(entry), entry?.timestamp);
+        collect(claudeEntryTexts(entry), entry.timestamp);
       }
     } else {
+      // `entry?.timestamp`, not `entry.timestamp`: a bare `null`/primitive
+      // line parses to a non-object entry, and an eager property read here
+      // would throw into the outer catch and drop the whole session (the
+      // extractor guards its own reads, but this one runs before it).
       const entries = parseCodexEntries(content);
       for (const entry of entries) {
         collect(codexEntryTexts(entry), entry?.timestamp);

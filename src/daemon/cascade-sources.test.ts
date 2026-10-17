@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { LogEntry } from "../types";
 import type { Session } from "../types/session";
+import { parseLogEntries } from "./parser";
 import { SessionManager } from "./sessions";
 import { deriveStateFromEntries } from "./status-machine";
 import {
@@ -509,13 +510,13 @@ describe("nativeLogSource", () => {
       timestamp: promptAt,
       message: { role: "user", content: "Is 1000003 prime?" },
     };
-    const metadata: LogEntry[] = [
-      "last-prompt",
-      "mode",
-      "permission-mode",
-      "atis-latch",
-      "ai-title",
-    ].map((type) => ({ type, uuid: `${type}-1`, parentUuid: null }));
+    const metadata = parseLogEntries(
+      ["last-prompt", "mode", "permission-mode", "atis-latch", "ai-title"]
+        .map((type) =>
+          JSON.stringify({ type, uuid: `${type}-1`, parentUuid: null }),
+        )
+        .join("\n"),
+    );
 
     const manager = new SessionManager();
     manager.createSession("sess-1", "/x/sess-1.jsonl");

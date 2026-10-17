@@ -1,6 +1,37 @@
 import { closeSync, openSync, readSync } from "fs";
-import type { LogEntry } from "../types";
+import type { BaseLogEntry, LogEntry } from "../types";
 import { deriveProject } from "./project-derivation";
+
+/** Keyed by every variant, so adding one to {@link LogEntry} without listing
+ *  it here fails to compile rather than quietly parsing it as unknown. */
+const KNOWN_LOG_ENTRY_TYPES: Record<
+  Exclude<LogEntry["type"], "unknown">,
+  true
+> = {
+  progress: true,
+  result: true,
+  assistant: true,
+  user: true,
+  summary: true,
+  system: true,
+  "queue-operation": true,
+};
+
+/**
+ * Narrow one parsed JSONL value onto the closed {@link LogEntry} union. A
+ * `type` outside the known variants becomes `{ type: "unknown", rawType }`
+ * (every other field kept), so consumers can switch exhaustively; a
+ * non-object line (a bare `null`, a number) is not an entry and is dropped.
+ */
+function toLogEntry(value: unknown): LogEntry | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const rawType = typeof record.type === "string" ? record.type : "";
+  if (Object.hasOwn(KNOWN_LOG_ENTRY_TYPES, rawType)) return value as LogEntry;
+  return { ...(value as BaseLogEntry), type: "unknown", rawType };
+}
 
 export function parseLogEntries(content: string): LogEntry[] {
   const lines = content.trim().split("\n");
@@ -8,12 +39,14 @@ export function parseLogEntries(content: string): LogEntry[] {
 
   for (const line of lines) {
     if (!line.trim()) continue;
+    let parsed: unknown;
     try {
-      const entry = JSON.parse(line) as LogEntry;
-      entries.push(entry);
+      parsed = JSON.parse(line);
     } catch {
-      // Skip malformed lines
+      continue; // Skip malformed lines
     }
+    const entry = toLogEntry(parsed);
+    if (entry) entries.push(entry);
   }
 
   return entries;
