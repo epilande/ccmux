@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import type { LogEntry } from "../types";
 import {
   parseLogEntries,
   extractSessionIdFromPath,
@@ -13,6 +12,13 @@ import {
   readFirstEntryTimestamp,
   readTranscriptCwd,
 } from "./parser";
+
+/** A typeless line as the parser returns it. */
+const untyped = (fields: Record<string, unknown>) => ({
+  ...fields,
+  type: "unknown",
+  rawType: "",
+});
 
 describe("parser", () => {
   let testDir: string;
@@ -48,6 +54,32 @@ invalid json
     it("should handle empty content", () => {
       const entries = parseLogEntries("");
       expect(entries).toHaveLength(0);
+    });
+
+    it("maps an unrecognised type onto the unknown variant, keeping its fields", () => {
+      const [entry] = parseLogEntries(
+        `{"type":"ai-title","uuid":"t1","parentUuid":null,"timestamp":"2024-01-01T00:00:00Z","aiTitle":"x"}`,
+      );
+      expect<unknown>(entry).toEqual({
+        type: "unknown",
+        rawType: "ai-title",
+        uuid: "t1",
+        parentUuid: null,
+        timestamp: "2024-01-01T00:00:00Z",
+        aiTitle: "x",
+      });
+    });
+
+    it("passes known types through untouched", () => {
+      const line = `{"type":"summary","uuid":"s1","parentUuid":null,"summary":"s"}`;
+      expect<unknown>(parseLogEntries(line)).toEqual([JSON.parse(line)]);
+    });
+
+    it("drops lines that are valid JSON but not an object", () => {
+      const entries = parseLogEntries(
+        `null\n42\n"text"\n[1]\n{"type":"result","uuid":"r"}`,
+      );
+      expect(entries.map((e) => e.type)).toEqual(["result"]);
     });
   });
 
@@ -233,10 +265,10 @@ invalid json
 
       const result = await readLogIncremental(path, 0);
 
-      expect(result.entries).toEqual([
-        { a: 1 },
-        { b: 2 },
-      ] as unknown as LogEntry[]);
+      expect<unknown>(result.entries).toEqual([
+        untyped({ a: 1 }),
+        untyped({ b: 2 }),
+      ]);
       expect(result.newOffset).toBe(Buffer.byteLength(content, "utf-8"));
     });
 
@@ -248,7 +280,7 @@ invalid json
 
       const result = await readLogIncremental(path, 0);
 
-      expect(result.entries).toEqual([{ a: 1 }] as unknown as LogEntry[]);
+      expect<unknown>(result.entries).toEqual([untyped({ a: 1 })]);
       expect(result.newOffset).toBe(Buffer.byteLength('{"a":1}\n', "utf-8"));
     });
 
@@ -272,9 +304,7 @@ invalid json
 
       const result = await readLogIncremental(path, 0);
 
-      expect(result.entries).toEqual([
-        { message: "🙂" },
-      ] as unknown as LogEntry[]);
+      expect<unknown>(result.entries).toEqual([untyped({ message: "🙂" })]);
       expect(result.newOffset).toBe(Buffer.byteLength(completeLine, "utf-8"));
     });
 
@@ -284,13 +314,16 @@ invalid json
       // First write: one complete line + partial
       await Bun.write(path, '{"a":1}\n{"b":2');
       const r1 = await readLogIncremental(path, 0);
-      expect(r1.entries).toEqual([{ a: 1 }] as unknown as LogEntry[]);
+      expect<unknown>(r1.entries).toEqual([untyped({ a: 1 })]);
 
       // Append: complete the partial line + add another
       const { appendFileSync } = await import("fs");
       appendFileSync(path, '}\n{"c":3}\n');
       const r2 = await readLogIncremental(path, r1.newOffset);
-      expect(r2.entries).toEqual([{ b: 2 }, { c: 3 }] as unknown as LogEntry[]);
+      expect<unknown>(r2.entries).toEqual([
+        untyped({ b: 2 }),
+        untyped({ c: 3 }),
+      ]);
     });
 
     it("should return empty when offset is at file size", async () => {

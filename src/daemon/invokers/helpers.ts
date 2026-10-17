@@ -1,11 +1,6 @@
 import { readFile } from "node:fs/promises";
 import type { AgentDef, InvokeMode } from "../../lib/agents";
-import type {
-  AssistantLogEntry,
-  LogEntry,
-  SystemLogEntry,
-  TextBlock,
-} from "../../types/log";
+import type { LogEntry, TextBlock } from "../../types/log";
 import type { InvokeErrorKind, InvokeFailure, InvokeInput } from "./types";
 import { substitutePlaceholders } from "../spawn-command";
 
@@ -25,13 +20,13 @@ export function scanForTurnEnd(entries: LogEntry[]): { text: string } | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
     if (e.type === "assistant") {
-      const msg = (e as AssistantLogEntry).message;
+      const msg = e.message;
       if (msg.stop_reason === "end_turn") {
         endIdx = i;
         break;
       }
     } else if (e.type === "system") {
-      const sub = (e as SystemLogEntry).subtype;
+      const sub = e.subtype;
       if (sub === "turn_duration" || sub === "stop_hook_summary") {
         endIdx = i;
         break;
@@ -46,7 +41,7 @@ export function scanForTurnEnd(entries: LogEntry[]): { text: string } | null {
   for (let i = endIdx; i >= 0; i--) {
     const e = entries[i];
     if (e.type === "assistant") {
-      const msg = (e as AssistantLogEntry).message;
+      const msg = e.message;
       const text = (msg.content ?? [])
         .filter((b): b is TextBlock => b.type === "text")
         .map((b) => b.text)

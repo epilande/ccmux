@@ -26,6 +26,14 @@ import type {
   ToolResultContent,
 } from "../types";
 import type { Session, SessionState } from "../types/session";
+import { parseLogEntries } from "./parser";
+
+/** One raw transcript line, read the way the daemon reads it. */
+function parseLine(raw: Record<string, unknown>): LogEntry {
+  const [entry] = parseLogEntries(JSON.stringify(raw));
+  if (!entry) throw new Error(`parser dropped ${JSON.stringify(raw)}`);
+  return entry;
+}
 
 describe("status-machine", () => {
   let testCwd: string;
@@ -698,11 +706,8 @@ describe("status-machine", () => {
       timestamp: "2024-01-15T12:00:00Z",
       message: { role: "user", content: "Is 1000003 prime?" },
     };
-    const untimestamped = (type: string): LogEntry => ({
-      type,
-      uuid: `${type}-1`,
-      parentUuid: null,
-    });
+    const untimestamped = (type: string): LogEntry =>
+      parseLine({ type, uuid: `${type}-1`, parentUuid: null });
     const metadata = [
       "last-prompt",
       "mode",
@@ -801,13 +806,13 @@ describe("status-machine", () => {
       message: { role: "user", content: `Stop hook feedback:\n${REASON}` },
     };
 
-    const blockingAttachment = {
+    const blockingAttachment = parseLine({
       type: "attachment",
       uuid: "att-1",
       parentUuid: "u-feedback",
       timestamp: "2024-01-15T12:00:01.813Z",
       attachment: { type: "hook_blocking_error", hookEvent: "Stop" },
-    } as LogEntry;
+    });
 
     const summary = (
       timestamp: string,
@@ -1484,12 +1489,13 @@ describe("status-machine", () => {
 
   describe("Coverage: unknown entry types", () => {
     it("should update lastActivityAt for unknown entry type", () => {
-      const entry: LogEntry = {
+      const entry = parseLine({
         type: "unknown_type",
         uuid: "123",
         parentUuid: null,
         timestamp: "2024-01-01T12:00:00Z",
-      };
+      });
+      expect(entry).toMatchObject({ type: "unknown", rawType: "unknown_type" });
 
       const state = processEntry(entry, createInitialState());
       expect(state.lastActivityAt).toBe("2024-01-01T12:00:00Z");

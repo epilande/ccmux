@@ -1,10 +1,5 @@
 import { readLogTail } from "../../daemon/parser";
-import type {
-  AssistantLogEntry,
-  LogEntry,
-  TextBlock,
-  UserLogEntry,
-} from "../../types/log";
+import type { LogEntry, TextBlock } from "../../types/log";
 
 /** How many tail entries to consider. Bounds the backwards file read. */
 const TAIL_ENTRIES = 50;
@@ -32,13 +27,8 @@ export function extractLastAssistantTurn(entries: LogEntry[]): string | null {
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    // parseLogEntries pushes any JSON.parse result, so a line holding a bare
-    // `null` (or another non-object) reaches here; reading `.type` on it
-    // would throw and reject the caller's promise.
-    if (entry == null || typeof entry !== "object") continue;
-
     if (entry.type === "assistant") {
-      const content = (entry as AssistantLogEntry).message?.content;
+      const content = entry.message?.content;
       const blocks = Array.isArray(content) ? content : [];
       const text = blocks
         .filter(
@@ -53,7 +43,7 @@ export function extractLastAssistantTurn(entries: LogEntry[]): string | null {
     }
 
     if (entry.type === "user") {
-      const content = (entry as UserLogEntry).message?.content;
+      const content = entry.message?.content;
       const isToolResult =
         Array.isArray(content) &&
         content.some(

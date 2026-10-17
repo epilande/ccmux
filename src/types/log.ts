@@ -156,6 +156,17 @@ export interface QueueOperationLogEntry {
 }
 
 /**
+ * Any entry whose `type` is not one of the variants above (`mode`,
+ * `last-prompt`, `ai-title`, `file-history-snapshot`, ...). The parser
+ * rewrites `type` to `"unknown"` and keeps the original in `rawType`, so the
+ * union stays closed and `switch (entry.type)` narrows.
+ */
+export interface UnknownLogEntry extends BaseLogEntry {
+  type: "unknown";
+  rawType: string;
+}
+
+/**
  * Union of all log entry types
  */
 export type LogEntry =
@@ -166,4 +177,4 @@ export type LogEntry =
   | SummaryLogEntry
   | SystemLogEntry
   | QueueOperationLogEntry
-  | (BaseLogEntry & { type: string });
+  | UnknownLogEntry;

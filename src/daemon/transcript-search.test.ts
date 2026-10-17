@@ -7,7 +7,7 @@ import {
   claudeEntryTexts,
   codexEntryTexts,
 } from "./transcript-search";
-import type { LogEntry } from "../types";
+import { parseLogEntries } from "./parser";
 import type { CodexEntry } from "./adapters/codex/parse";
 
 function jsonl(...objs: object[]): string {
@@ -118,10 +118,7 @@ describe("transcript-search", () => {
 
   describe("claudeEntryTexts", () => {
     it("extracts user string content and assistant text, skipping tools/results/thinking", () => {
-      const entries = claudeFixture()
-        .trim()
-        .split("\n")
-        .map((l) => JSON.parse(l) as LogEntry);
+      const entries = parseLogEntries(claudeFixture());
 
       const user = claudeEntryTexts(entries[0]);
       expect(user).toEqual([

@@ -31,12 +31,7 @@ import {
   classifyClaudePromptPane,
   matchesQuestionPickerSignature,
 } from "./pane-classify";
-import type {
-  AssistantLogEntry,
-  LogEntry,
-  ToolUseBlock,
-  UserLogEntry,
-} from "../types/log";
+import type { LogEntry, ToolUseBlock } from "../types/log";
 
 /** Minimal shape this module reads off a session (keeps it testable without
  *  the full `Session` type). */
@@ -421,7 +416,7 @@ function currentExitPlanModePlan(entries: LogEntry[]): string | null {
     // A live wait has none newer than its tool_use, so meeting one first proves
     // the newest ExitPlanMode was already resolved — fail closed to the pane.
     if (entry.type === "user") {
-      const content = (entry as UserLogEntry).message?.content;
+      const content = entry.message?.content;
       if (
         Array.isArray(content) &&
         content.some((item) => item?.type === "tool_result")
@@ -430,7 +425,7 @@ function currentExitPlanModePlan(entries: LogEntry[]): string | null {
       }
     }
     if (entry.type !== "assistant") continue;
-    const content = (entry as AssistantLogEntry).message?.content;
+    const content = entry.message?.content;
     if (!Array.isArray(content)) continue;
     for (let j = content.length - 1; j >= 0; j--) {
       const block = content[j];
