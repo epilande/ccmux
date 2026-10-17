@@ -8979,6 +8979,13 @@ describe("POST /spawn with --pr and --issue", () => {
    * to fail exactly these writes: `git worktree add -b` sets no upstream, so
    * it never takes the config lock, while every `git config` write does.
    *
+   * Git 2.56 retries a held config lock for `core.configLockTimeout` ms
+   * (default 1000) before failing, and `configurePRBranch` attempts all four
+   * writes on purpose, so the default spends ~4s waiting on a lock nobody
+   * will release and times the test out. The key pins the old single attempt;
+   * older git ignores it. It must be set BEFORE the lock exists, since
+   * setting it is itself a config write.
+   *
    * The keys are not independent — `remote` landing while `pushRemote` fails
    * leaves a fork's branch fetching from the fork and PUSHING TO ORIGIN — so
    * this must be a loud failure. It follows the post-setup convention: the
@@ -8995,6 +9002,7 @@ describe("POST /spawn with --pr and --issue", () => {
       headRepository: { name: "ccmux" },
       headRepositoryOwner: { login: "LiadOz" },
     });
+    runFixtureGit(repo, "config", "core.configLockTimeout", "0");
     writeFileSync(join(repo, ".git", "config.lock"), "");
     try {
       const res = await spawnInto(internals, {
