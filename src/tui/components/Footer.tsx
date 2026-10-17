@@ -3,6 +3,7 @@ import { Switch, Match } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { DEFAULT_GROUP_BY, type GroupBy } from "../../lib/preferences";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface FooterProps {
   searchMode: boolean;
@@ -196,48 +197,48 @@ export const Footer: Component<FooterProps> = (props) => {
     >
       <Switch>
         <Match when={props.helpMode}>
-          <text fg={theme.overlay}>? or Esc close</text>
+          <Text fg={theme.overlay}>? or Esc close</Text>
         </Match>
         <Match when={props.previewFocused}>
-          <text fg={theme.overlay}>tab/esc exit focus · keys sent to pane</text>
+          <Text fg={theme.overlay}>tab/esc exit focus · keys sent to pane</Text>
         </Match>
         <Match when={props.confirmMode}>
-          <text fg={theme.overlay}>y confirm · n/Esc cancel</text>
+          <Text fg={theme.overlay}>y confirm · n/Esc cancel</Text>
         </Match>
         <Match when={props.newSessionMode}>
-          <text fg={theme.overlay}>
+          <Text fg={theme.overlay}>
             {newSessionHintSegments(props.newSessionOption ?? "text")
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
-          </text>
+          </Text>
         </Match>
         <Match when={props.handoffDialogMode}>
-          <text fg={theme.overlay}>
+          <Text fg={theme.overlay}>
             {handoffDialogHintSegments()
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
-          </text>
+          </Text>
         </Match>
         <Match when={props.copyDialogMode}>
-          <text fg={theme.overlay}>
+          <Text fg={theme.overlay}>
             {copyDialogHintSegments()
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
-          </text>
+          </Text>
         </Match>
         <Match when={props.handoffPickMode}>
-          <text fg={theme.overlay}>
+          <Text fg={theme.overlay}>
             j/k pick target · enter continue · esc cancel
-          </text>
+          </Text>
         </Match>
         <Match when={props.searchMode}>
-          <text fg={theme.overlay}>
+          <Text fg={theme.overlay}>
             type to search · ↑/↓ or ^n/^p nav · enter{" "}
             {props.persistent ? "switch" : "select"} · esc cancel
-          </text>
+          </Text>
         </Match>
         <Match when={true}>
-          <text fg={theme.overlay}>{hints()}</text>
+          <Text fg={theme.overlay}>{hints()}</Text>
         </Match>
       </Switch>
     </box>

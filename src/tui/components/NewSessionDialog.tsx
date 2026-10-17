@@ -21,6 +21,7 @@ import {
 import { agentColorFor } from "./SessionItem";
 import { DropdownOverlay, DropdownTrigger } from "./DropdownField";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 /** Width of the label gutter: focus marker (1) + "Placement" (9, the
  *  longest label) + one column of air before the content. */
@@ -690,12 +691,12 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     return (
       <box flexDirection="row" width={LABEL_WIDTH} height={1}>
         <box width={1}>
-          <text fg={theme.blue}>{focused() ? "▎" : ""}</text>
+          <Text fg={theme.blue}>{focused() ? "▎" : ""}</Text>
         </box>
         <box width={LABEL_WIDTH - 1}>
-          <text fg={focused() ? theme.blue : theme.overlay}>
+          <Text fg={focused() ? theme.blue : theme.overlay}>
             {labelProps.text}
-          </text>
+          </Text>
         </box>
       </box>
     );
@@ -882,13 +883,13 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
           their values — this is a viewport problem, not a broken draft. */}
       <Show when={plan().tooShort}>
         <box height={1}>
-          <text fg={theme.peach}>{tooShortLabel()}</text>
+          <Text fg={theme.peach}>{tooShortLabel()}</Text>
         </box>
       </Show>
 
       <Show when={!plan().tooShort}>
         <box height={1}>
-          <text fg={theme.text}>
+          <Text fg={theme.text}>
             {/* The title is the mode indicator: it is the one row the eye
               lands on first, and "Move changes" (or "Fork") is what makes this
               dialog different from every other time it opens. */}
@@ -905,7 +906,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                       ? truncateText("New session in worktree", width() - 4)
                       : "New session"}
             </strong>
-          </text>
+          </Text>
         </box>
         <Show when={plan().showTitleSpacer}>
           <box height={1} />
@@ -926,9 +927,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     when={props.agents !== null}
                     fallback={
                       <box height={1}>
-                        <text fg={theme.overlay}>
+                        <Text fg={theme.overlay}>
                           {truncateText("Loading agents...", contentWidth())}
-                        </text>
+                        </Text>
                       </box>
                     }
                   >
@@ -940,7 +941,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                     <For each={agentErrorLines()}>
                       {(line) => (
                         <box height={1}>
-                          <text fg={theme.red}>{line}</text>
+                          <Text fg={theme.red}>{line}</Text>
                         </box>
                       )}
                     </For>
@@ -1013,10 +1014,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
               choice to offer. */}
             <box flexDirection="row" height={1}>
               <box width={LABEL_WIDTH} paddingLeft={1}>
-                <text fg={theme.overlay}>Where</text>
+                <Text fg={theme.overlay}>Where</Text>
               </box>
               <box width={1 + CONTROL_GAP} />
-              <text fg={theme.green}>{lockedDestinationLabel()}</text>
+              <Text fg={theme.green}>{lockedDestinationLabel()}</Text>
             </box>
           </Show>
 
@@ -1071,7 +1072,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             </box>
             <Show when={nameHint()}>
               <box flexShrink={0} marginLeft={1}>
-                <text fg={theme.overlay}>{nameHint()}</text>
+                <Text fg={theme.overlay}>{nameHint()}</Text>
               </box>
             </Show>
           </box>
@@ -1088,10 +1089,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             {/* Not a field: derived, never focused, so it only pads past the
               marker column to stay aligned with the labels above. */}
             <box width={LABEL_WIDTH} paddingLeft={1}>
-              <text fg={theme.overlay}>Directory</text>
+              <Text fg={theme.overlay}>Directory</Text>
             </box>
             <box width={1 + CONTROL_GAP} />
-            <text fg={theme.subtext}>{cwdLabel()}</text>
+            <Text fg={theme.subtext}>{cwdLabel()}</Text>
           </box>
         </Show>
 
@@ -1103,10 +1104,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
             the directory alone can hold several. */}
           <box flexDirection="row" height={1}>
             <box width={LABEL_WIDTH} paddingLeft={1}>
-              <text fg={theme.overlay}>{modeNote().label}</text>
+              <Text fg={theme.overlay}>{modeNote().label}</Text>
             </box>
             <box width={1 + CONTROL_GAP} />
-            <text fg={modeNote().color}>{modeNote().text}</text>
+            <Text fg={modeNote().color}>{modeNote().text}</Text>
           </box>
         </Show>
 
@@ -1136,7 +1137,7 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 else props.onCancel();
               }}
             >
-              <text fg={theme.text}>Cancel</text>
+              <Text fg={theme.text}>Cancel</Text>
             </box>
             <box width={2} />
             <box
@@ -1152,9 +1153,9 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
                 else props.onSubmit();
               }}
             >
-              <text fg={theme.base}>
+              <Text fg={theme.base}>
                 <strong>{confirmVerb()}</strong>
-              </text>
+              </Text>
             </box>
           </box>
           <box height={1} />

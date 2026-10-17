@@ -1,6 +1,7 @@
 import type { Component } from "solid-js";
 import type { ConnectionState } from "../utils/sse";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface HeaderProps {
   sessionCount: number;
@@ -33,21 +34,21 @@ export const Header: Component<HeaderProps> = (props) => {
   return (
     <box width="100%" height={1} paddingLeft={1} paddingRight={1}>
       <box flexDirection="row" width="100%">
-        <text fg={c(dotColor(props.connectionState))}>● </text>
-        <text fg={c(theme.text)}>
+        <Text fg={c(dotColor(props.connectionState))}>● </Text>
+        <Text fg={c(theme.text)}>
           <b>Sessions</b>
-        </text>
-        <text fg={c(theme.overlay)}>
+        </Text>
+        <Text fg={c(theme.overlay)}>
           {" "}
           ({props.sessionCount}
           {props.totalCount != null ? `/${props.totalCount}` : ""})
-        </text>
-        {props.hideIdle && <text fg={c(theme.yellow)}> [active]</text>}
+        </Text>
+        {props.hideIdle && <Text fg={c(theme.yellow)}> [active]</Text>}
         {props.invokeInFlight ? (
-          <text fg={c(theme.peach)}> · {props.invokeInFlight} invoking</text>
+          <Text fg={c(theme.peach)}> · {props.invokeInFlight} invoking</Text>
         ) : null}
         {props.daemonDegraded ? (
-          <text fg={c(theme.yellow)}> ⚠ daemon degraded: scans failing</text>
+          <Text fg={c(theme.yellow)}> ⚠ daemon degraded: scans failing</Text>
         ) : null}
       </box>
     </box>

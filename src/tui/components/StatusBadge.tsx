@@ -10,6 +10,7 @@ import type { IconStyle } from "../../lib/icons";
 import type { StatusMode } from "../../lib/preferences";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface StatusBadgeProps {
   status: SessionStatus;
@@ -85,5 +86,5 @@ export const StatusBadge: Component<StatusBadgeProps> = (props) => {
     return `${icon()} ${mode === "short" ? labelText.slice(0, 4) : labelText.padEnd(7)}`;
   };
 
-  return <text fg={props.dimmed ? theme.border : color()}>{label()}</text>;
+  return <Text fg={props.dimmed ? theme.border : color()}>{label()}</Text>;
 };

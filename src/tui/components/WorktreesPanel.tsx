@@ -60,6 +60,7 @@ import { useStatusIcon } from "../utils/useStatusIcon";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { IconStyle } from "../../lib/icons";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 /**
  * The picker's Worktrees surface (issue #102), which grew out of the
@@ -1683,18 +1684,18 @@ const RemovalConfirm: Component<{
       justifyContent="center"
       alignItems="center"
     >
-      <text fg={theme.text}>
+      <Text fg={theme.text}>
         <strong>Remove worktrees?</strong>
-      </text>
+      </Text>
       <box height={1} />
       {/* Red only when uncommitted work is actually going, so the one
           irreversible case does not read like the routine one. */}
-      <text fg={props.destructive ? theme.red : theme.subtext}>
+      <Text fg={props.destructive ? theme.red : theme.subtext}>
         {truncateText(props.headline, boxWidth() - 2)}
-      </text>
+      </Text>
       <For each={props.details}>
         {(line) => (
-          <text fg={theme.overlay}>{truncateText(line, boxWidth() - 2)}</text>
+          <Text fg={theme.overlay}>{truncateText(line, boxWidth() - 2)}</Text>
         )}
       </For>
       <box height={1} />
@@ -1705,10 +1706,10 @@ const RemovalConfirm: Component<{
             if (event.button === MouseButton.LEFT) props.onConfirm();
           }}
         >
-          <text fg={theme.green}>
+          <Text fg={theme.green}>
             <strong>Y</strong>
-          </text>
-          <text fg={theme.overlay}> confirm </text>
+          </Text>
+          <Text fg={theme.overlay}> confirm </Text>
         </box>
         <box
           flexDirection="row"
@@ -1716,10 +1717,10 @@ const RemovalConfirm: Component<{
             if (event.button === MouseButton.LEFT) props.onCancel();
           }}
         >
-          <text fg={theme.red}>
+          <Text fg={theme.red}>
             <strong>N</strong>
-          </text>
-          <text fg={theme.overlay}> cancel</text>
+          </Text>
+          <Text fg={theme.overlay}> cancel</Text>
         </box>
       </box>
     </box>
@@ -3349,13 +3350,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                 // The scope leads, in the panel's brightest ink: it is the
                 // subject the chips beside it are two views OF.
                 return (
-                  <text fg={theme.text}>
+                  <Text fg={theme.text}>
                     <strong>{part.text}</strong>
-                  </text>
+                  </Text>
                 );
               }
               if (part.kind === "text") {
-                return <text fg={theme.overlay}>{part.text}</text>;
+                return <Text fg={theme.overlay}>{part.text}</Text>;
               }
               const tab = part.tab;
               return (
@@ -3385,7 +3386,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                 >
                   <For each={tab.segments}>
                     {(segment: RowSegment) => (
-                      <text
+                      <Text
                         fg={
                           !tab.active && hoveredTab() === tab.view
                             ? theme.subtext
@@ -3393,7 +3394,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                         }
                       >
                         {segment.text}
-                      </text>
+                      </Text>
                     )}
                   </For>
                 </box>
@@ -3409,16 +3410,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       <box flexGrow={1} flexDirection="column">
         <Show when={phase() === "loading"}>
           <box paddingTop={1}>
-            <text fg={theme.subtext}>Reading worktrees...</text>
+            <Text fg={theme.subtext}>Reading worktrees...</Text>
           </box>
         </Show>
 
         <Show when={phase() === "error"}>
           <box paddingTop={1} flexDirection="column">
-            <text fg={theme.red}>
+            <Text fg={theme.red}>
               {truncateText(error() ?? "", contentWidth())}
-            </text>
-            <text fg={theme.overlay}>r retry · q close</text>
+            </Text>
+            <Text fg={theme.overlay}>r retry · q close</Text>
           </box>
         </Show>
 
@@ -3427,9 +3428,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             when={hasContent()}
             fallback={
               <box paddingTop={1}>
-                <text fg={emptyState().fg}>
+                <Text fg={emptyState().fg}>
                   {truncateText(emptyState().text, contentWidth())}
-                </text>
+                </Text>
               </box>
             }
           >
@@ -3527,10 +3528,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                             the bar's own cell shows half a cell of surface
                             poking out LEFT of the stroke. */}
                         <box height={1} width="100%" flexDirection="row">
-                          <text> </text>
-                          <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                          <Text> </Text>
+                          <Text fg={isCursor() ? theme.mauve : theme.overlay}>
                             {isCursor() ? CURSOR_BAR : RAIL}
-                          </text>
+                          </Text>
                           <box
                             flexGrow={1}
                             height={1}
@@ -3539,7 +3540,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                               isCursor() ? theme.surface : undefined
                             }
                           >
-                            <text> </text>
+                            <Text> </Text>
                             <For
                               each={fitSegments(
                                 primarySegments(entry, {
@@ -3553,14 +3554,14 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                               )}
                             >
                               {(segment) => (
-                                <text fg={segment.fg}>{segment.text}</text>
+                                <Text fg={segment.fg}>{segment.text}</Text>
                               )}
                             </For>
                           </box>
                         </box>
                         <Show when={detail().length > 0}>
                           <box height={1} width="100%" flexDirection="row">
-                            <text> </text>
+                            <Text> </Text>
                             {/* A detail line always hangs off its own line
                                 1, so it always carries the rail, and it
                                 indents to whatever marker that line 1 used.
@@ -3568,9 +3569,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                                 two-line cursor row wears the bar on both
                                 lines — and, as on line 1, the highlight
                                 starts on the column after it. */}
-                            <text fg={isCursor() ? theme.mauve : theme.overlay}>
+                            <Text fg={isCursor() ? theme.mauve : theme.overlay}>
                               {isCursor() ? CURSOR_BAR : RAIL}
-                            </text>
+                            </Text>
                             <box
                               flexGrow={1}
                               height={1}
@@ -3579,9 +3580,9 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                                 isCursor() ? theme.surface : undefined
                               }
                             >
-                              <text fg={theme.overlay}>
+                              <Text fg={theme.overlay}>
                                 {` ${" ".repeat(markerWidth(hasCheckbox))}`}
-                              </text>
+                              </Text>
                               <For
                                 each={fitSegments(
                                   detail(),
@@ -3589,7 +3590,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                                 )}
                               >
                                 {(segment) => (
-                                  <text fg={segment.fg}>{segment.text}</text>
+                                  <Text fg={segment.fg}>{segment.text}</Text>
                                 )}
                               </For>
                             </box>
@@ -3612,16 +3613,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     <box flexDirection="column">
                       <Show when={showsGroupHeaders(merged())}>
                         <box height={1} flexDirection="row">
-                          <text fg={theme.mauve}>
+                          <Text fg={theme.mauve}>
                             <strong>{headerName()}</strong>
-                          </text>
+                          </Text>
                           {/* The rule is what makes the boundary scannable
                               on a tall multi-repo list without spending a
                               blank line on it; muted so the bold name stays
                               the loudest thing on the line. */}
-                          <text fg={theme.overlay}>
+                          <Text fg={theme.overlay}>
                             {headerRule(headerName(), listWidth())}
-                          </text>
+                          </Text>
                         </box>
                       </Show>
                       {/* One group, two views. The repo header above is
@@ -3640,13 +3641,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                                 it. */}
                             <Show when={split().removable.length > 0}>
                               <box height={1} flexDirection="row">
-                                <text fg={theme.overlay}> </text>
-                                <text fg={theme.overlay}>
+                                <Text fg={theme.overlay}> </Text>
+                                <Text fg={theme.overlay}>
                                   {dividerText(
                                     split().removable.length,
                                     listWidth() - 1,
                                   )}
-                                </text>
+                                </Text>
                               </box>
                             </Show>
                             <For each={split().removable}>
@@ -3679,19 +3680,19 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               tail exists to replace. */}
           <Show when={scanError()}>
             <box height={1}>
-              <text fg={theme.yellow}>
+              <Text fg={theme.yellow}>
                 {truncateText(
                   `Prune scan failed: ${scanError()}`,
                   contentWidth(),
                 )}
-              </text>
+              </Text>
             </box>
           </Show>
         </Show>
 
         <Show when={phase() === "running"}>
           <box paddingTop={1}>
-            <text fg={theme.peach}>Pruning...</text>
+            <Text fg={theme.peach}>Pruning...</Text>
           </box>
         </Show>
 
@@ -3704,16 +3705,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               {(outcome) => (
                 <box flexDirection="column">
                   <box height={1}>
-                    <text fg={outcome.removed ? theme.green : theme.red}>
+                    <Text fg={outcome.removed ? theme.green : theme.red}>
                       {`${outcome.removed ? "✓" : "✗"} ${outcome.path}`}
-                    </text>
+                    </Text>
                   </box>
                   <For each={outcome.steps}>
                     {(step) => (
                       <box height={1} paddingLeft={4}>
-                        <text fg={step.ok ? theme.subtext : theme.red}>
+                        <Text fg={step.ok ? theme.subtext : theme.red}>
                           {`${step.step}: ${step.detail}`}
-                        </text>
+                        </Text>
                       </box>
                     )}
                   </For>
@@ -3731,20 +3732,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             fallback={
               // Dimmed but present while the confirm owns the keyboard: the
               // keys are still the panel's, they are just not answerable yet.
-              <text fg={phase() === "confirm" ? theme.surface : theme.overlay}>
+              <Text fg={phase() === "confirm" ? theme.surface : theme.overlay}>
                 {hintLine()}
-              </text>
+              </Text>
             }
           >
             {(message: () => string) => (
-              <text fg={theme.green}>
+              <Text fg={theme.green}>
                 {truncateText(message(), contentWidth())}
-              </text>
+              </Text>
             )}
           </Show>
         </Show>
         <Show when={phase() === "done"}>
-          <text fg={theme.overlay}>j/k scroll · r reload · q close</text>
+          <Text fg={theme.overlay}>j/k scroll · r reload · q close</Text>
         </Show>
       </box>
       <Show when={phase() === "confirm"}>

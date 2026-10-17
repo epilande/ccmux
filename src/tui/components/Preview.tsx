@@ -38,6 +38,7 @@ import {
   truncateMiddle,
   truncateText,
 } from "../utils/format";
+import { Text } from "./Text";
 
 /**
  * One row of the preview's Agents section: activity spinner, the agent's
@@ -68,11 +69,11 @@ const SubagentRow: Component<{
   });
   return (
     <box flexDirection="row">
-      <text fg={theme.peach}>{"  " + icon()}</text>
+      <Text fg={theme.peach}>{"  " + icon()}</Text>
       <box flexGrow={1} paddingLeft={1}>
-        <text fg={theme.text}>{formatSubagentName(props.sub.agentId)}</text>
+        <Text fg={theme.text}>{formatSubagentName(props.sub.agentId)}</Text>
       </box>
-      <text fg={theme.overlay}>{runtime()}</text>
+      <Text fg={theme.overlay}>{runtime()}</Text>
     </box>
   );
 };
@@ -144,22 +145,22 @@ const BackgroundPeek: Component<{ session: EnrichedSession }> = (props) => {
     <scrollbox flexGrow={1} stickyScroll={false}>
       <box flexDirection="column">
         <Show when={props.session.lastPrompt}>
-          <text fg={theme.overlay}>Task</text>
-          <text fg={theme.subtext}>{props.session.lastPrompt!}</text>
-          <text fg={theme.border}>{""}</text>
+          <Text fg={theme.overlay}>Task</Text>
+          <Text fg={theme.subtext}>{props.session.lastPrompt!}</Text>
+          <Text fg={theme.border}>{""}</Text>
         </Show>
         <Show
           when={props.session.backgroundDetail}
-          fallback={<text fg={theme.overlay}>No summary yet</text>}
+          fallback={<Text fg={theme.overlay}>No summary yet</Text>}
         >
-          <text fg={theme.text}>{props.session.backgroundDetail!}</text>
+          <Text fg={theme.text}>{props.session.backgroundDetail!}</Text>
         </Show>
         <Show when={progress()}>
-          <text fg={theme.subtext}>{progress()!}</text>
+          <Text fg={theme.subtext}>{progress()!}</Text>
         </Show>
         <Show when={result()}>
-          <text fg={theme.border}>{""}</text>
-          <text fg={theme.subtext}>{result()!}</text>
+          <Text fg={theme.border}>{""}</Text>
+          <Text fg={theme.subtext}>{result()!}</Text>
         </Show>
         {/* Stable wrapper: the transcript resolves async, and a bare <Show>
             appearing after first render would be appended to the END of the
@@ -167,25 +168,25 @@ const BackgroundPeek: Component<{ session: EnrichedSession }> = (props) => {
             The always-mounted box pins its slot in the column order. */}
         <box flexDirection="column">
           <Show when={transcript()}>
-            <text fg={theme.border}>{""}</text>
-            <text fg={theme.overlay}>Last reply</text>
-            <text fg={theme.subtext}>{transcript()!}</text>
+            <Text fg={theme.border}>{""}</Text>
+            <Text fg={theme.overlay}>Last reply</Text>
+            <Text fg={theme.subtext}>{transcript()!}</Text>
           </Show>
         </box>
         <Show when={prs().length > 0}>
-          <text fg={theme.border}>{""}</text>
-          <text fg={theme.subtext}>Pull requests:</text>
+          <Text fg={theme.border}>{""}</Text>
+          <Text fg={theme.subtext}>Pull requests:</Text>
           <For each={prs()}>
             {(pr) => (
-              <text fg={theme.mauve}>
+              <Text fg={theme.mauve}>
                 {"  "}
                 {`#${pr.id}`} {pr.href}
-              </text>
+              </Text>
             )}
           </For>
         </Show>
-        <text fg={theme.border}>{""}</text>
-        <text fg={theme.overlay}>{footer()}</text>
+        <Text fg={theme.border}>{""}</Text>
+        <Text fg={theme.overlay}>{footer()}</Text>
       </box>
     </scrollbox>
   );
@@ -471,7 +472,7 @@ export const Preview: Component<PreviewProps> = (props) => {
     >
       <Show
         when={props.session}
-        fallback={<text fg={theme.overlay}>Select a session to preview</text>}
+        fallback={<Text fg={theme.overlay}>Select a session to preview</Text>}
       >
         {/* Each header field is one locked row. Directory and metadata used
             to wrap inside a title()?5:4 budget; Yoga then shrank the
@@ -481,13 +482,13 @@ export const Preview: Component<PreviewProps> = (props) => {
         <box height={title() ? 5 : 4} flexDirection="column" flexShrink={0}>
           <box flexDirection="row" height={1} flexShrink={0}>
             <box flexGrow={1}>
-              <text fg={theme.text} wrapMode="none">
+              <Text fg={theme.text} wrapMode="none">
                 <b>{truncateText(props.session!.project, projectWidth())}</b>
-              </text>
+              </Text>
             </box>
-            <text fg={statusColor()} wrapMode="none" flexShrink={0}>
+            <Text fg={statusColor()} wrapMode="none" flexShrink={0}>
               {statusIcon()} {statusText()}
-            </text>
+            </Text>
           </box>
           {/* Stable wrapper: a summary can land after first render (enrich
               arrives over SSE), and a bare <Show> mounted late would append
@@ -498,50 +499,50 @@ export const Preview: Component<PreviewProps> = (props) => {
               four-row header does not keep a blank gap. */}
           <box height={title() ? 1 : 0} flexDirection="column" flexShrink={0}>
             <Show when={title()}>
-              <text fg={theme.text} wrapMode="none">
+              <Text fg={theme.text} wrapMode="none">
                 {truncateText(title() ?? "", separatorWidth())}
-              </text>
+              </Text>
             </Show>
           </box>
           <box height={1} flexShrink={0}>
-            <text fg={theme.subtext} wrapMode="none">
+            <Text fg={theme.subtext} wrapMode="none">
               {truncateMiddle(
                 shortenCwd(props.session!.paneCwd ?? props.session!.cwd),
                 separatorWidth(),
               )}
-            </text>
+            </Text>
           </box>
           <box height={1} flexShrink={0}>
-            <text fg={theme.overlay} wrapMode="none">
+            <Text fg={theme.overlay} wrapMode="none">
               {truncateText(metadataLine(), separatorWidth())}
-            </text>
+            </Text>
           </box>
           <box height={1} flexShrink={0}>
-            <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
+            <Text fg={theme.border}>{"─".repeat(separatorWidth())}</Text>
           </box>
         </box>
 
         <Show when={liveSubagents().length > 0}>
           <box flexDirection="column" flexShrink={0}>
-            <text fg={theme.subtext}>
+            <Text fg={theme.subtext}>
               <b>Agents ({liveSubagents().length})</b>
-            </text>
+            </Text>
             <For each={liveSubagents().slice(0, AGENTS_SHOWN_MAX)}>
               {(sub) => <SubagentRow sub={sub} iconStyle={props.iconStyle} />}
             </For>
             <Show when={liveSubagents().length > AGENTS_SHOWN_MAX}>
-              <text fg={theme.overlay}>
+              <Text fg={theme.overlay}>
                 {"  "}+{liveSubagents().length - AGENTS_SHOWN_MAX} more
-              </text>
+              </Text>
             </Show>
-            <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
+            <Text fg={theme.border}>{"─".repeat(separatorWidth())}</Text>
           </box>
         </Show>
 
         <Show when={props.session!.tmuxPane}>
           <Show
             when={content()}
-            fallback={<text fg={theme.overlay}>Loading...</text>}
+            fallback={<Text fg={theme.overlay}>Loading...</Text>}
           >
             <scrollbox
               flexGrow={1}
@@ -549,7 +550,7 @@ export const Preview: Component<PreviewProps> = (props) => {
               stickyStart="bottom"
               ref={(r: ScrollBoxRenderable) => props.onScrollboxRef?.(r)}
             >
-              <text
+              <Text
                 fg={theme.text}
                 wrapMode="none"
                 ref={(r: TextRenderable) => (textRef = r)}
@@ -561,7 +562,7 @@ export const Preview: Component<PreviewProps> = (props) => {
         <Show when={!props.session!.tmuxPane}>
           <Show
             when={props.session!.trackingMode === "background"}
-            fallback={<text fg={theme.overlay}>No tmux pane associated</text>}
+            fallback={<Text fg={theme.overlay}>No tmux pane associated</Text>}
           >
             <BackgroundPeek session={props.session!} />
           </Show>

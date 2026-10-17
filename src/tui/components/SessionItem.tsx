@@ -54,6 +54,7 @@ import {
   truncateText,
   truncateHighlighted,
 } from "../utils/format";
+import { Text } from "./Text";
 
 export interface SessionItemHighlights {
   project?: string | null;
@@ -347,12 +348,16 @@ interface FieldRenderContext {
   maxProjectLen: number;
 }
 
-function dimColor(ctx: FieldRenderContext, color?: string): string | undefined {
+/**
+ * `color` is required: an `undefined` fg on a `<text>` falls back to
+ * OpenTUI's opaque white, invisible on light themes (#143).
+ */
+function dimColor(ctx: FieldRenderContext, color: string): string {
   return ctx.dimmed ? theme.border : color;
 }
 
 /** Fade task text without erasing agent, completion, or PR state colors. */
-function contentColor(ctx: FieldRenderContext): string | undefined {
+function contentColor(ctx: FieldRenderContext): string {
   return dimColor(ctx, ctx.ageFaded ? theme.subtext : theme.text);
 }
 
@@ -457,7 +462,7 @@ const PromptCell: Component<{
       <Show when={sourceTag()}>
         {(tag: () => string) => (
           <box width={tag().length + 3} flexShrink={0}>
-            <text fg={dimColor(ctx, theme.overlay)}>{`[${tag()}]`}</text>
+            <Text fg={dimColor(ctx, theme.overlay)}>{`[${tag()}]`}</Text>
           </box>
         )}
       </Show>
@@ -469,11 +474,11 @@ const PromptCell: Component<{
             fallback={
               <Show
                 when={transcriptLine()}
-                fallback={<text fg={contentColor(ctx)}>{text()}</text>}
+                fallback={<Text fg={contentColor(ctx)}>{text()}</Text>}
               >
-                <text fg={dimColor(ctx, theme.overlay)}>
+                <Text fg={dimColor(ctx, theme.overlay)}>
                   {transcriptLine()}
-                </text>
+                </Text>
               </Show>
             }
           >
@@ -529,9 +534,9 @@ const FieldCell: Component<{
     case "index":
       return (
         <box width={width}>
-          <text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)}>
             {ctx.index < 9 ? `${ctx.index + 1}` : " "}
-          </text>
+          </Text>
         </box>
       );
     case "status": {
@@ -631,13 +636,13 @@ const FieldCell: Component<{
             }
           >
             <Show when={fitted().prefix}>
-              <text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</text>
+              <Text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</Text>
             </Show>
-            <text fg={dimColor(ctx, theme.text)}>
+            <Text fg={dimColor(ctx, theme.text)}>
               <Bold when={ctx.selected || !!ctx.isActiveSession}>
                 {fitted().dirname}
               </Bold>
-            </text>
+            </Text>
           </Show>
           <Show when={ctx.session.gitBranch}>
             {(branch: () => string) => (
@@ -647,19 +652,19 @@ const FieldCell: Component<{
                   displayWidth(branch()) <= ctx.maxBranchLen
                 }
                 fallback={
-                  <text fg={dimColor(ctx, theme.blue)}>
+                  <Text fg={dimColor(ctx, theme.blue)}>
                     {fitted().branchLabel}
-                  </text>
+                  </Text>
                 }
               >
-                <text fg={dimColor(ctx, theme.blue)}>:</text>
+                <Text fg={dimColor(ctx, theme.blue)}>:</Text>
                 <HighlightedText
                   text={ctx.highlights!.gitBranch!}
                   highlightColor={dimColor(ctx, theme.yellow)}
                   baseColor={dimColor(ctx, theme.blue)}
                 />
                 <Show when={ctx.session.isWorktree}>
-                  <text fg={dimColor(ctx, theme.blue)}>+</text>
+                  <Text fg={dimColor(ctx, theme.blue)}>+</Text>
                 </Show>
               </Show>
             )}
@@ -671,39 +676,39 @@ const FieldCell: Component<{
       const raw = entry.mode === "short" ? ctx.agentShortLabel : ctx.agentLabel;
       return (
         <box width={width}>
-          <text fg={dimColor(ctx, ctx.agentColor)}>
+          <Text fg={dimColor(ctx, ctx.agentColor)}>
             {alignText(raw, width, side)}
-          </text>
+          </Text>
         </box>
       );
     }
     case "version":
       return (
         <box width={width}>
-          <text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)}>
             {alignText(ctx.versionLabel, width, side)}
-          </text>
+          </Text>
         </box>
       );
     case "pane":
       return (
         <box width={width}>
-          <text
+          <Text
             fg={dimColor(
               ctx,
               ctx.isActivePane ? theme.rosewater : theme.subtext,
             )}
           >
             {alignText(ctx.paneInfo, width, side)}
-          </text>
+          </Text>
         </box>
       );
     case "time":
       return (
         <box width={width}>
-          <text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)}>
             {alignText(ctx.timeLabel, width, side)}
-          </text>
+          </Text>
         </box>
       );
     case "prompt":
@@ -735,9 +740,9 @@ const FieldCell: Component<{
             <Show
               when={ctx.highlights?.summary}
               fallback={
-                <text fg={contentColor(ctx)}>
+                <Text fg={contentColor(ctx)}>
                   {truncateText(summary() ?? "", ctx.maxFlexLen(row))}
-                </text>
+                </Text>
               }
             >
               <HighlightedText
@@ -755,9 +760,9 @@ const FieldCell: Component<{
     }
     case "cwd":
       return (
-        <text fg={dimColor(ctx, theme.overlay)}>
+        <Text fg={dimColor(ctx, theme.overlay)}>
           {shortenCwd(ctx.session.paneCwd ?? ctx.session.cwd)}
-        </text>
+        </Text>
       );
     case "branch": {
       // Same `+` worktree marker the default project cell appends
@@ -774,7 +779,7 @@ const FieldCell: Component<{
         const marker = ctx.session.isWorktree ? "+" : "";
         return branch ? branch + marker : "";
       };
-      return <text fg={dimColor(ctx, theme.blue)}>{label()}</text>;
+      return <Text fg={dimColor(ctx, theme.blue)}>{label()}</Text>;
     }
     case "pr": {
       const label = () => prLabel(ctx.session, entry.mode);
@@ -785,7 +790,7 @@ const FieldCell: Component<{
       // crush it out of the row.
       return (
         <box width={label().length} flexShrink={0}>
-          <text fg={dimColor(ctx, color())}>{label()}</text>
+          <Text fg={dimColor(ctx, color())}>{label()}</Text>
         </box>
       );
     }
@@ -870,29 +875,29 @@ const RowRender: Component<{
         >
           <Show when={props.ctx.attentionLabel}>
             {(label: () => string) => (
-              <text fg={props.ctx.attentionColor}>
+              <Text fg={props.ctx.attentionColor}>
                 {props.ctx.sidebar
                   ? "!"
                   : truncateText(label(), ATTENTION_LABEL_MAX)}
-              </text>
+              </Text>
             )}
           </Show>
           <Show
             when={!props.ctx.sidebar && subagentCountLabel(props.ctx.session)}
           >
             {(label: () => string) => (
-              <text fg={props.ctx.dimmed ? theme.border : theme.teal}>
+              <Text fg={props.ctx.dimmed ? theme.border : theme.teal}>
                 {label()}
-              </text>
+              </Text>
             )}
           </Show>
           {/* Last of the three, and the only one that is not about what the
               session is doing: a handoff waiting for this row to go idle. */}
           <Show when={handoffBadge(props.ctx.session)}>
             {(badge: () => string) => (
-              <text fg={props.ctx.dimmed ? theme.border : theme.mauve}>
+              <Text fg={props.ctx.dimmed ? theme.border : theme.mauve}>
                 {badge()}
-              </text>
+              </Text>
             )}
           </Show>
         </box>
@@ -1223,7 +1228,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
           height={rowHeight()}
         >
           <Index each={Array.from({ length: rowHeight() })}>
-            {() => <text fg={agentColor()}>▎</text>}
+            {() => <Text fg={agentColor()}>▎</Text>}
           </Index>
         </box>
       </Show>
@@ -1265,19 +1270,19 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             SessionList's `sessionLines` changes. */}
         <Show when={bandTarget()}>
           <box paddingLeft={2} height={1}>
-            <text fg={dimColor(ctx, theme.subtext)}>
+            <Text fg={dimColor(ctx, theme.subtext)}>
               {abbreviateTarget(
                 props.session.tmuxTarget ?? "",
                 Math.max(1, effectiveWidth() - 7),
               )}
-            </text>
+            </Text>
           </box>
         </Show>
         <For each={promptBlock()}>
           {(line) => (
             <box flexDirection="row">
               <box width={PROMPT_BLOCK_INDENT} flexShrink={0} />
-              <text fg={dimColor(ctx, theme.overlay)}>{line}</text>
+              <Text fg={dimColor(ctx, theme.overlay)}>{line}</Text>
             </box>
           )}
         </For>

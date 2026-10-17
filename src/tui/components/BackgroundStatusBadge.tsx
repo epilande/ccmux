@@ -5,6 +5,7 @@ import type { StatusMode } from "../../lib/preferences";
 import { getBackgroundIcon } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface BackgroundStatusBadgeProps {
   status: SessionStatus;
@@ -33,5 +34,5 @@ export const BackgroundStatusBadge: Component<BackgroundStatusBadgeProps> = (
     const text = props.status;
     return `${icon()} ${mode === "short" ? text.slice(0, 4) : text.padEnd(7)}`;
   };
-  return <text fg={props.dimmed ? theme.border : color()}>{label()}</text>;
+  return <Text fg={props.dimmed ? theme.border : color()}>{label()}</Text>;
 };

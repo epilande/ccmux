@@ -3,6 +3,7 @@ import { createMemo, For } from "solid-js";
 import { MouseButton } from "@opentui/core";
 import { displayWidth, truncateText } from "../utils/format";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 /**
  * The dropdown the new-session dialog's option fields share: a one-row pill
@@ -72,12 +73,12 @@ export const DropdownTrigger: Component<DropdownTriggerProps> = (props) => (
       if (event.button === MouseButton.LEFT) props.onOpen();
     }}
   >
-    <text fg={props.color ?? theme.text}>
+    <Text fg={props.color ?? theme.text}>
       {truncateText(props.value, Math.max(1, props.maxWidth))}
-    </text>
+    </Text>
     <box flexGrow={1} />
     <box width={1}>
-      <text fg={theme.overlay}>▾</text>
+      <Text fg={theme.overlay}>▾</Text>
     </box>
   </box>
 );
@@ -170,22 +171,22 @@ export const DropdownOverlay: Component<DropdownOverlayProps> = (props) => {
               }}
             >
               <box width={2}>
-                <text fg={theme.green}>
+                <Text fg={theme.green}>
                   {index() === props.selected ? "▎" : ""}
-                </text>
+                </Text>
               </box>
               {/* Only the first nine get a number key. */}
               <box width={2}>
-                <text fg={theme.overlay}>
+                <Text fg={theme.overlay}>
                   {index() < 9 ? `${index() + 1}` : ""}
-                </text>
+                </Text>
               </box>
-              <text fg={option.color ?? theme.text}>
+              <Text fg={option.color ?? theme.text}>
                 {truncateText(
                   option.label,
                   Math.max(1, width() - OPTION_CHROME),
                 )}
-              </text>
+              </Text>
             </box>
           );
         }}

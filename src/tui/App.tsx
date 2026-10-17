@@ -130,6 +130,7 @@ import { createFlashScheduler } from "./utils/pane-flash";
 import { createIdleGcScheduler } from "./utils/idle-gc";
 import { setSpinnerPaused } from "./utils/useStatusIcon";
 import { markStartup, reportStartup } from "../lib/startup-timing";
+import { Text } from "./components/Text";
 
 /** Long enough to read a sentence that sends the user to the README. The
  *  shared-session refusal is the only place a user hears that a popup on a
@@ -4129,18 +4130,18 @@ export function App(props: AppProps) {
         <Show when={handoffSource()}>
           {(from: () => EnrichedSession) => (
             <box paddingLeft={1} height={1}>
-              <text fg={theme.mauve}>
+              <Text fg={theme.mauve}>
                 {props.sidebar
                   ? `${HANDOFF_BADGE} pick target · enter · esc`
                   : `${HANDOFF_BADGE} Hand off from ${from().tmuxTarget ?? handoffLabel(from())} · pick a target`}
-              </text>
+              </Text>
             </box>
           )}
         </Show>
 
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
-            <text fg={theme.red}>Error: {store.state.error}</text>
+            <Text fg={theme.red}>Error: {store.state.error}</Text>
           </box>
         </Show>
 

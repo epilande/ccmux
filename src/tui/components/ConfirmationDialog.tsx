@@ -6,6 +6,7 @@ import type { Session } from "../../types";
 import type { ConfirmAction } from "../store";
 import { truncateText } from "../utils/format";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 const MAX_WIDTH = 50;
 const MIN_WIDTH = 24;
@@ -80,13 +81,13 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
       justifyContent="center"
       alignItems="center"
     >
-      <text fg={theme.text}>
+      <Text fg={theme.text}>
         <strong>{truncateText(title(), Math.max(1, width() - 4))}</strong>
-      </text>
+      </Text>
       <box height={1} />
-      <text fg={theme.subtext}>
+      <Text fg={theme.subtext}>
         {truncateText(subtitle(), Math.max(1, width() - 4))}
-      </text>
+      </Text>
       <box height={1} />
       <box flexDirection="row">
         <box
@@ -95,10 +96,10 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
             if (event.button === MouseButton.LEFT) props.onConfirm?.();
           }}
         >
-          <text fg={theme.green}>
+          <Text fg={theme.green}>
             <strong>Y</strong>
-          </text>
-          <text fg={theme.overlay}> confirm </text>
+          </Text>
+          <Text fg={theme.overlay}> confirm </Text>
         </box>
         <box
           flexDirection="row"
@@ -106,10 +107,10 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
             if (event.button === MouseButton.LEFT) props.onCancel?.();
           }}
         >
-          <text fg={theme.red}>
+          <Text fg={theme.red}>
             <strong>N</strong>
-          </text>
-          <text fg={theme.overlay}> cancel</text>
+          </Text>
+          <Text fg={theme.overlay}> cancel</Text>
         </box>
       </box>
     </box>

@@ -10,6 +10,7 @@ import { MouseButton, type MouseEvent } from "@opentui/core";
 import { displayWidth, truncateText } from "../utils/format";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface GroupHeaderProps {
   label: string;
@@ -146,7 +147,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         }
       }}
     >
-      <text>
+      <Text>
         <For each={parts()}>
           {(part) => (
             <span style={{ fg: part.color }}>
@@ -156,7 +157,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
             </span>
           )}
         </For>
-      </text>
+      </Text>
     </box>
   );
 };

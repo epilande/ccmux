@@ -4,6 +4,7 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import { truncateText } from "../utils/format";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 export interface ContextMenuItem {
   /**
@@ -199,9 +200,9 @@ export const ContextMenu: Component<ContextMenuProps> = (props) => {
             }}
           >
             <box flexGrow={1}>
-              <text fg={item.color}>{fittedLabel(item.label, item.hint)}</text>
+              <Text fg={item.color}>{fittedLabel(item.label, item.hint)}</Text>
             </box>
-            <text fg={theme.overlay}>{item.hint}</text>
+            <Text fg={theme.overlay}>{item.hint}</Text>
           </box>
         )}
       </For>

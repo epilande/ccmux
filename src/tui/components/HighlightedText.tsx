@@ -1,5 +1,6 @@
 import type { Component } from "solid-js";
 import { For } from "solid-js";
+import { Text } from "./Text";
 
 interface HighlightedTextProps {
   text: string;
@@ -43,7 +44,7 @@ export const HighlightedText: Component<HighlightedTextProps> = (props) => {
   return (
     // `wrapMode="none"` because the row is one line tall: a wrap would hide
     // the tail (a whole trailing word) instead of clipping it mid-word.
-    <text fg={props.baseColor} wrapMode="none">
+    <Text fg={props.baseColor} wrapMode="none">
       <For each={segments()}>
         {(segment) =>
           segment.bold ? (
@@ -53,6 +54,6 @@ export const HighlightedText: Component<HighlightedTextProps> = (props) => {
           )
         }
       </For>
-    </text>
+    </Text>
   );
 };

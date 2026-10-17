@@ -1,5 +1,6 @@
 import type { Component } from "solid-js";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface SearchInputProps {
   value: string;
@@ -19,9 +20,9 @@ export const SearchInput: Component<SearchInputProps> = (props) => {
       borderColor={theme.border}
       flexDirection="row"
     >
-      <text fg={theme.overlay} width={2}>
+      <Text fg={theme.overlay} width={2}>
         /{" "}
-      </text>
+      </Text>
       <input
         value={props.value}
         onInput={props.onChange}

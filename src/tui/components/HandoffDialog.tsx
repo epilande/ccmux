@@ -6,6 +6,7 @@ import { displayWidth, truncateMiddle, truncateText } from "../utils/format";
 import { turnsLabel } from "../turns-selection";
 import { MAX_HANDOFF_NOTE_CHARS } from "../../daemon/handoff";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 const MAX_WIDTH = 52;
 const MIN_WIDTH = 24;
@@ -229,23 +230,23 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
     return (
       <box flexDirection="row" height={1}>
         <box width={LABEL_WIDTH} paddingLeft={1}>
-          <text fg={theme.overlay}>{rowProps.label}</text>
+          <Text fg={theme.overlay}>{rowProps.label}</Text>
         </box>
         <box width={1 + CONTROL_GAP} />
         <Show when={fitted().context}>
-          <text fg={theme.subtext}>{fitted().context}</text>
+          <Text fg={theme.subtext}>{fitted().context}</Text>
         </Show>
         <Show when={fitted().context && fitted().agent}>
           <box width={TOKEN_SEP_WIDTH} />
         </Show>
         <Show when={fitted().agent}>
-          <text fg={rowProps.endpoint.agentColor}>{fitted().agent}</text>
+          <Text fg={rowProps.endpoint.agentColor}>{fitted().agent}</Text>
         </Show>
         <Show when={fitted().pane && (fitted().context || fitted().agent)}>
           <box width={TOKEN_SEP_WIDTH} />
         </Show>
         <Show when={fitted().pane}>
-          <text fg={theme.text}>{fitted().pane}</text>
+          <Text fg={theme.text}>{fitted().pane}</Text>
         </Show>
       </box>
     );
@@ -264,12 +265,12 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
     return (
       <box flexDirection="row" width={LABEL_WIDTH} height={1}>
         <box width={1}>
-          <text fg={theme.blue}>{focused() ? "▎" : ""}</text>
+          <Text fg={theme.blue}>{focused() ? "▎" : ""}</Text>
         </box>
         <box width={LABEL_WIDTH - 1}>
-          <text fg={focused() ? theme.blue : theme.overlay}>
+          <Text fg={focused() ? theme.blue : theme.overlay}>
             {labelProps.text}
-          </text>
+          </Text>
         </box>
       </box>
     );
@@ -296,9 +297,9 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
         {/* A bare mode indicator, the New session title's rule: the endpoints
           are compound labels, and folding one into a title sentence is what
           made it read as two unrelated tokens. The To row names the target. */}
-        <text fg={theme.text}>
+        <Text fg={theme.text}>
           <strong>Hand off</strong>
-        </text>
+        </Text>
       </box>
       <Show when={plan().spacers}>
         <box height={1} />
@@ -325,9 +326,9 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
             props.field === "turns" ? theme.border : theme.surface
           }
         >
-          <text fg={theme.text}>
+          <Text fg={theme.text}>
             {truncateText(turnsLabel(props.turns), controlWidth())}
-          </text>
+          </Text>
         </box>
       </box>
 
@@ -405,7 +406,7 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
               if (event.button === MouseButton.LEFT) props.onCancel();
             }}
           >
-            <text fg={theme.text}>Cancel</text>
+            <Text fg={theme.text}>Cancel</Text>
           </box>
           <box width={2} />
           <box
@@ -419,9 +420,9 @@ export const HandoffDialog: Component<HandoffDialogProps> = (props) => {
               if (event.button === MouseButton.LEFT) props.onSubmit();
             }}
           >
-            <text fg={theme.base}>
+            <Text fg={theme.base}>
               <strong>Send</strong>
-            </text>
+            </Text>
           </box>
         </box>
         <box height={1} />
