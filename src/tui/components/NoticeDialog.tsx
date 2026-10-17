@@ -4,6 +4,7 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
 import { truncateText, wrapText } from "../utils/format";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 const MAX_WIDTH = 72;
 const MIN_WIDTH = 24;
@@ -88,23 +89,23 @@ export const NoticeDialog: Component<NoticeDialogProps> = (props) => {
       <box height={1}>
         {/* The shared title colour: dialog titles say WHAT this box is, and
           severity lives in the message lines, not the headline. */}
-        <text fg={theme.text}>
+        <Text fg={theme.text}>
           <strong>{truncateText(props.title, contentWidth())}</strong>
-        </text>
+        </Text>
       </box>
       <box height={1} />
       <For each={lines()}>
         {(line) => (
           <box height={1}>
-            <text fg={theme.text}>{line}</text>
+            <Text fg={theme.text}>{line}</Text>
           </box>
         )}
       </For>
       <box height={1} />
       <box height={1}>
-        <text fg={theme.overlay}>
+        <Text fg={theme.overlay}>
           {truncateText("any key to dismiss", contentWidth())}
-        </text>
+        </Text>
       </box>
     </box>
   );

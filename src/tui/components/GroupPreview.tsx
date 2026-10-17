@@ -13,6 +13,7 @@ import { getMarkerKey } from "../../daemon/sessions";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { formatRelativeTime, formatVersion, shortenCwd } from "../utils/format";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 interface GroupPreviewProps {
   header: { label: string; count: number; members: FilteredSession[] };
@@ -92,17 +93,17 @@ const SessionRow: Component<{
   return (
     <box flexDirection="column" paddingBottom={1}>
       <box flexDirection="row" height={1} gap={1}>
-        <text fg={color()}>{icon()}</text>
-        <text fg={theme.text}>
+        <Text fg={color()}>{icon()}</Text>
+        <Text fg={theme.text}>
           <b>{label()}</b>
-        </text>
+        </Text>
         <box flexGrow={1} />
-        <text fg={theme.overlay}>{timeStr()}</text>
+        <Text fg={theme.overlay}>{timeStr()}</Text>
       </box>
       <Show when={meta()}>
         {(m: () => string) => (
           <box height={1} paddingLeft={3}>
-            <text fg={theme.subtext}>{m()}</text>
+            <Text fg={theme.subtext}>{m()}</Text>
           </box>
         )}
       </Show>
@@ -188,15 +189,15 @@ const WorktreeRow: Component<{
 
   return (
     <box flexDirection="row" height={1} gap={1}>
-      <text fg={getStatusColor(effective().status, effective().attentionType)}>
+      <Text fg={getStatusColor(effective().status, effective().attentionType)}>
         {icon()}
-      </text>
-      <text fg={theme.text}>{props.entry.name}</text>
+      </Text>
+      <Text fg={theme.text}>{props.entry.name}</Text>
       <Show when={props.entry.session.gitBranch}>
-        {(branch: () => string) => <text fg={theme.blue}>{branch()}</text>}
+        {(branch: () => string) => <Text fg={theme.blue}>{branch()}</Text>}
       </Show>
       <Show when={props.entry.count > 1}>
-        <text fg={theme.overlay}>{`×${props.entry.count}`}</text>
+        <Text fg={theme.overlay}>{`×${props.entry.count}`}</Text>
       </Show>
     </box>
   );
@@ -235,22 +236,22 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
     >
       <box height={3} flexDirection="column">
         <box flexDirection="row" gap={1}>
-          <text fg={theme.text}>
+          <Text fg={theme.text}>
             <b>{props.header.label}</b>
-          </text>
-          <text fg={theme.subtext}>({props.header.count} sessions)</text>
+          </Text>
+          <Text fg={theme.subtext}>({props.header.count} sessions)</Text>
         </box>
         <box flexDirection="row" gap={2}>
           <Show when={summary().working > 0}>
-            <text fg={theme.peach}>
+            <Text fg={theme.peach}>
               {workingIcon()} {summary().working} working
-            </text>
+            </Text>
           </Show>
           <For each={summaryParts()}>
-            {(part) => <text fg={part.color}>{part.text}</text>}
+            {(part) => <Text fg={part.color}>{part.text}</Text>}
           </For>
         </box>
-        <text fg={theme.border}>{"─".repeat(separatorWidth())}</text>
+        <Text fg={theme.border}>{"─".repeat(separatorWidth())}</Text>
       </box>
 
       <scrollbox
@@ -260,9 +261,9 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
         <box flexDirection="column" paddingTop={1}>
           <Show when={worktrees().length > 0}>
             <box flexDirection="column" paddingBottom={1}>
-              <text fg={theme.subtext}>
+              <Text fg={theme.subtext}>
                 <b>Worktrees</b>
-              </text>
+              </Text>
               <For each={worktrees()}>
                 {(entry) => (
                   <WorktreeRow entry={entry} iconStyle={props.iconStyle} />

@@ -5,6 +5,7 @@ import { MouseButton } from "@opentui/core";
 import { truncateText } from "../utils/format";
 import { turnsLabel } from "../turns-selection";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 const MAX_WIDTH = 46;
 const MIN_WIDTH = 20;
@@ -97,11 +98,11 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
       paddingRight={1}
     >
       <box height={1}>
-        <text fg={theme.text}>
+        <Text fg={theme.text}>
           <strong>
             {truncateText(`Copy from ${props.label}`, contentWidth())}
           </strong>
-        </text>
+        </Text>
       </box>
       <Show when={plan().spacers}>
         <box height={1} />
@@ -115,12 +116,12 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
         paddingRight={1}
         backgroundColor={theme.border}
       >
-        <text fg={theme.text}>
+        <Text fg={theme.text}>
           {truncateText(
             turnsLabel(props.turns),
             Math.max(1, contentWidth() - 2),
           )}
-        </text>
+        </Text>
       </box>
 
       <Show when={plan().buttons}>
@@ -140,7 +141,7 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
               if (event.button === MouseButton.LEFT) props.onCancel();
             }}
           >
-            <text fg={theme.text}>Cancel</text>
+            <Text fg={theme.text}>Cancel</Text>
           </box>
           <box width={2} />
           <box
@@ -154,9 +155,9 @@ export const CopyDialog: Component<CopyDialogProps> = (props) => {
               if (event.button === MouseButton.LEFT) props.onSubmit();
             }}
           >
-            <text fg={theme.base}>
+            <Text fg={theme.base}>
               <strong>Copy</strong>
-            </text>
+            </Text>
           </box>
         </box>
         <box height={1} />

@@ -4,6 +4,7 @@ import { createMemo } from "solid-js";
 import { theme } from "../theme";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { truncateText, wrapText } from "../utils/format";
+import { Text } from "./Text";
 
 const KEY_COL_WIDTH = 14;
 const COL_WIDTH = 38;
@@ -111,12 +112,12 @@ const renderShortcut = (
   return (
     <box height={descLines.length} flexDirection="row" flexShrink={0}>
       <box width={KEY_COL_WIDTH} height={1} flexShrink={0}>
-        <text fg={theme.mauve}>{item.key.padEnd(KEY_COL_WIDTH)}</text>
+        <Text fg={theme.mauve}>{item.key.padEnd(KEY_COL_WIDTH)}</Text>
       </box>
       <box flexDirection="column" width={descWidth} flexShrink={0}>
         {descLines.map((line) => (
           <box height={1}>
-            <text fg={theme.subtext}>{line}</text>
+            <Text fg={theme.subtext}>{line}</Text>
           </box>
         ))}
       </box>
@@ -130,9 +131,9 @@ const renderColumn = (columnGroups: Group[], colWidth: number): JSX.Element => (
       <>
         {gi > 0 && <box height={1} />}
         <box height={1}>
-          <text fg={theme.blue}>
+          <Text fg={theme.blue}>
             <strong>{group.section}</strong>
-          </text>
+          </Text>
         </box>
         {group.items.map((item) => renderShortcut(item, colWidth))}
       </>
@@ -163,20 +164,20 @@ const renderCompactColumn = (
       <>
         {gi > 0 && <box height={1} />}
         <box height={1}>
-          <text fg={theme.blue}>
+          <Text fg={theme.blue}>
             <strong>{group.section}</strong>
-          </text>
+          </Text>
         </box>
         {group.items.map((item) => {
           const descLines = wrapText(item.desc, contentWidth);
           return (
             <>
               <box height={1}>
-                <text fg={theme.mauve}>{item.key}</text>
+                <Text fg={theme.mauve}>{item.key}</Text>
               </box>
               {descLines.map((line) => (
                 <box height={1}>
-                  <text fg={theme.subtext}>{line}</text>
+                  <Text fg={theme.subtext}>{line}</Text>
                 </box>
               ))}
             </>
@@ -193,9 +194,9 @@ const HelpLayout: ParentComponent<{
 }> = (props) => (
   <>
     <box justifyContent="center" width="100%" height={1}>
-      <text fg={theme.text}>
+      <Text fg={theme.text}>
         <strong>Keyboard Shortcuts</strong>
-      </text>
+      </Text>
     </box>
 
     <scrollbox
@@ -206,7 +207,7 @@ const HelpLayout: ParentComponent<{
     </scrollbox>
 
     <box justifyContent="center" width="100%" height={1} flexShrink={0}>
-      <text fg={theme.overlay}>{props.hint}</text>
+      <Text fg={theme.overlay}>{props.hint}</Text>
     </box>
   </>
 );

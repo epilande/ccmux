@@ -51,6 +51,7 @@ import {
 import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { socketErrorMessage } from "../../lib/tmux-socket";
+import { Text } from "./Text";
 
 interface SessionListProps {
   items: FlatItem[];
@@ -394,9 +395,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <>
           {index > 0 && (
             <box height={1} paddingLeft={1} paddingRight={1}>
-              <text fg={theme.border}>
+              <Text fg={theme.border}>
                 {"─".repeat(Math.max(0, effectiveWidth() - 5))}
-              </text>
+              </Text>
             </box>
           )}
           <GroupHeader
@@ -463,12 +464,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
             <box paddingLeft={1} paddingTop={1}>
               <Show
                 when={props.socketError}
-                fallback={<text fg={theme.overlay}>No sessions found</text>}
+                fallback={<Text fg={theme.overlay}>No sessions found</Text>}
               >
                 {(error: () => TmuxSocketError) => (
-                  <text fg={theme.red}>
+                  <Text fg={theme.red}>
                     {socketErrorMessage(error().attemptedSocket)}
-                  </text>
+                  </Text>
                 )}
               </Show>
             </box>

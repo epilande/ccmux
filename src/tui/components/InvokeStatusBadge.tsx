@@ -5,6 +5,7 @@ import type { InvocationStatus } from "../../types";
 import { getInvokeTerminalIcon } from "../../lib/icons";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { theme } from "../theme";
+import { Text } from "./Text";
 
 /** Lifecycle state of a client-synthesized subprocess invoke row. Alias of
  *  the shared {@link InvocationStatus}. */
@@ -68,5 +69,5 @@ export const InvokeStatusBadge: Component<InvokeStatusBadgeProps> = (props) => {
     const text = INVOKE_LABELS[props.status];
     return `${icon()} ${mode === "short" ? text.slice(0, 4) : text.padEnd(7)}`;
   };
-  return <text fg={props.dimmed ? theme.border : color()}>{label()}</text>;
+  return <Text fg={props.dimmed ? theme.border : color()}>{label()}</Text>;
 };
