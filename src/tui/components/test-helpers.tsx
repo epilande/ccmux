@@ -1,5 +1,6 @@
 import { expect } from "bun:test";
-import type { CliRenderer } from "@opentui/core";
+import type { CliRenderer, Renderable } from "@opentui/core";
+import { ScrollBoxRenderable } from "@opentui/core";
 import { createMockKeys } from "@opentui/core/testing";
 import type { EnrichedSession, Session } from "../../types";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
@@ -185,4 +186,57 @@ export function deliverEscape(renderer: CliRenderer): void {
   createMockKeys(renderer).pressEscape();
   flush.call(internals.stdinParser, Number.MAX_SAFE_INTEGER);
   drain.call(internals);
+}
+
+/** Every scrollbox mounted under `renderer`, in tree order. */
+export function findScrollBoxes(renderer: CliRenderer): ScrollBoxRenderable[] {
+  const found: ScrollBoxRenderable[] = [];
+  const walk = (node: Renderable) => {
+    if (node instanceof ScrollBoxRenderable) found.push(node);
+    for (const child of node.getChildren()) walk(child);
+  };
+  walk(renderer.root);
+  return found;
+}
+
+/**
+ * The vertical thumb `box` drew into `frame`, next to the one its geometry
+ * calls for, both in half-cells (the slider's unit: `█` is two, `▀`/`▄` one).
+ *
+ * `expected` is OpenTUI's own thumb formula fed the real viewport and content
+ * heights, so a slider holding a stale or clamped `viewPortSize` (see
+ * `utils/scrollbar-thumb.ts`) draws a different `drawn`. It is 0 while the
+ * content fits and the bar hides.
+ */
+export function scrollbarThumb(
+  frame: string,
+  box: ScrollBoxRenderable,
+): { drawn: number; expected: number } {
+  const slider = box.verticalScrollBar.slider;
+  const drawn = frame
+    .split("\n")
+    .slice(slider.y, slider.y + slider.height)
+    .map((line) => [...line][slider.x])
+    .reduce((n, c) => n + (c === "█" ? 2 : c === "▀" || c === "▄" ? 1 : 0), 0);
+  const viewport = box.viewport.height;
+  const content = box.scrollHeight;
+  const expected =
+    content <= viewport
+      ? 0
+      : Math.max(1, Math.floor((slider.height * 2 * viewport) / content));
+  return { drawn, expected };
+}
+
+/**
+ * Assert `box` shows a thumb, sized to its content rather than to whatever
+ * the slider last clamped to, and return it.
+ */
+export function expectContentSizedThumb(
+  frame: string,
+  box: ScrollBoxRenderable,
+): number {
+  const { drawn, expected } = scrollbarThumb(frame, box);
+  expect(expected).toBeGreaterThan(0);
+  expect(drawn).toBe(expected);
+  return drawn;
 }
