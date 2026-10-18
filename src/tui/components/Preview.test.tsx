@@ -7,7 +7,12 @@ import { testRender } from "@opentui/solid";
 import { RGBA, type CapturedFrame } from "@opentui/core";
 import { theme } from "../theme";
 import { TickContext } from "../store";
-import { mockEnrichedSession } from "./test-helpers";
+import {
+  expectContentSizedThumb,
+  findScrollBoxes,
+  mockEnrichedSession,
+  scrollbarThumb,
+} from "./test-helpers";
 import type { EnrichedSession } from "../../types";
 
 // Mock capturePane before importing Preview. Spread the real module so
@@ -841,5 +846,123 @@ describe("BackgroundPeek", () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain("The answer is 42.");
     expect(frame).not.toContain("Last reply");
+  });
+});
+
+describe("Preview scrollbar thumb", () => {
+  const lines = (n: number) =>
+    Array.from({ length: n }, (_, i) => `line ${i}`).join("\n");
+
+  async function mount(session: () => EnrichedSession, refreshKey = () => 0) {
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <Preview
+            session={session()}
+            width={40}
+            focused={false}
+            refreshKey={refreshKey()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 40, height: 20 },
+    );
+  }
+
+  /**
+   * Polls past the ~80ms capture debounce until the scrollbox holds `marker`,
+   * then renders twice more: one pass lays out and fires the resize
+   * listeners, one draws.
+   */
+  async function frame(marker: string) {
+    let found = false;
+    for (let i = 0; i < 30 && !found; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      await setup.renderOnce();
+      found = setup.captureCharFrame().includes(marker);
+    }
+    expect(found).toBe(true);
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    return { frame: setup.captureCharFrame(), box: box! };
+  }
+
+  describe("live pane", () => {
+    const pane = () => mockEnrichedSession({ tmuxPane: "%1" });
+
+    it("sizes the thumb to the capture on first render", async () => {
+      captureImpl = async () => lines(20);
+      await mount(pane);
+      const f = await frame("line 19");
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("follows a capture that grows past the viewport", async () => {
+      let content = lines(3);
+      captureImpl = async () => content;
+      const [refreshKey, setRefreshKey] = createSignal(0);
+      await mount(pane, refreshKey);
+      let f = await frame("line 2");
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      content = lines(60);
+      setRefreshKey(1);
+      f = await frame("line 59");
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("re-sizes across a resize round trip", async () => {
+      captureImpl = async () => lines(20);
+      await mount(pane);
+      setup.resize(40, 40);
+      let f = await frame("line 19");
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      setup.resize(40, 20);
+      f = await frame("line 19");
+      const small = expectContentSizedThumb(f.frame, f.box);
+      setup.resize(40, 40);
+      f = await frame("line 19");
+      expect(scrollbarThumb(f.frame, f.box)).toEqual({ drawn: 0, expected: 0 });
+      setup.resize(40, 20);
+      f = await frame("line 19");
+      expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+    });
+  });
+
+  describe("background peek", () => {
+    const peek = (n: number) =>
+      mockBackgroundSession({ status: "working", backgroundDetail: lines(n) });
+
+    it("sizes the thumb to the summary on first render", async () => {
+      await mount(() => peek(20));
+      const f = await frame("line 0");
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("follows a summary that grows past the viewport", async () => {
+      const [session, setSession] = createSignal(peek(2));
+      await mount(session);
+      let f = await frame("line 1");
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      setSession(peek(60));
+      f = await frame("line 0");
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("re-sizes across a resize round trip", async () => {
+      await mount(() => peek(20));
+      setup.resize(40, 40);
+      let f = await frame("line 0");
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      setup.resize(40, 20);
+      f = await frame("line 0");
+      const small = expectContentSizedThumb(f.frame, f.box);
+      setup.resize(40, 40);
+      f = await frame("line 0");
+      expect(scrollbarThumb(f.frame, f.box)).toEqual({ drawn: 0, expected: 0 });
+      setup.resize(40, 20);
+      f = await frame("line 0");
+      expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+    });
   });
 });

@@ -8,6 +8,9 @@ import {
   mockEnrichedSession,
   emptySummary,
   membersFromSummary,
+  expectContentSizedThumb,
+  findScrollBoxes,
+  scrollbarThumb,
 } from "./test-helpers";
 import { buildFlatItems, type FlatItem, type GroupBy } from "../utils/grouping";
 
@@ -513,6 +516,67 @@ async function renderEmptyWithSocketError(
   await setup.renderOnce();
   return setup.captureCharFrame();
 }
+
+describe("SessionList scrollbar thumb", () => {
+  const list = (n: number): FlatItem[] => [
+    makeHeader("proj", n),
+    ...Array.from({ length: n }, (_, i) =>
+      makeSessionItem(`s${i}`, "proj", { cwd: `/code/s${i}` }),
+    ),
+  ];
+
+  async function mount(items: () => FlatItem[], height: number) {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList items={items()} selectedIndex={0} previewWidth={30} />
+        </TickContext.Provider>
+      ),
+      { width: 80, height },
+    );
+  }
+
+  /** Two passes: one lays out and fires the resize listeners, one draws. */
+  async function frame() {
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    return { frame: setup.captureCharFrame(), box: box! };
+  }
+
+  it("sizes the thumb to the list on first render", async () => {
+    // Over one viewport and under two: the range OpenTUI clamps to half.
+    await mount(() => list(15), 12);
+    const f = await frame();
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("follows the list as it grows past the viewport", async () => {
+    const [items, setItems] = createSignal(list(3));
+    await mount(items, 12);
+    let f = await frame();
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    setItems(list(40));
+    f = await frame();
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("re-sizes across a resize round trip", async () => {
+    await mount(() => list(15), 30);
+    let f = await frame();
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    setup.resize(80, 12);
+    f = await frame();
+    const small = expectContentSizedThumb(f.frame, f.box);
+    setup.resize(80, 30);
+    f = await frame();
+    expect(scrollbarThumb(f.frame, f.box)).toEqual({ drawn: 0, expected: 0 });
+    setup.resize(80, 12);
+    f = await frame();
+    expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+  });
+});
 
 describe("SessionList", () => {
   it("renders empty state message", async () => {

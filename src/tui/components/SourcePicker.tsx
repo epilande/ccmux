@@ -17,6 +17,7 @@ import { getDaemonUrl } from "../../lib/config";
 import type { IconStyle } from "../../lib/icons";
 import { theme } from "../theme";
 import { truncateText } from "../utils/format";
+import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { useStatusIcon } from "../utils/useStatusIcon";
@@ -781,6 +782,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
               flexGrow={1}
               ref={(r: ScrollBoxRenderable) => {
                 listBox = r;
+                syncScrollbarThumb(r);
                 const bump = () => setScrollboxLayout((v) => v + 1);
                 r.viewport.on("resize", bump);
                 r.content.on("resize", bump);

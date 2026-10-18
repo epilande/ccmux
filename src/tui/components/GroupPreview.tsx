@@ -1,6 +1,7 @@
 import type { Component } from "solid-js";
 import { createMemo, For, Show } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
+import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../../types";
 import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
@@ -256,7 +257,10 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
 
       <scrollbox
         flexGrow={1}
-        ref={(r: ScrollBoxRenderable) => props.onScrollboxRef?.(r)}
+        ref={(r: ScrollBoxRenderable) => {
+          syncScrollbarThumb(r);
+          props.onScrollboxRef?.(r);
+        }}
       >
         <box flexDirection="column" paddingTop={1}>
           <Show when={worktrees().length > 0}>

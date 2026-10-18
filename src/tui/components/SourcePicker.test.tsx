@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockKeys } from "@opentui/core/testing";
-import { deliverEscape } from "./test-helpers";
+import {
+  deliverEscape,
+  expectContentSizedThumb,
+  findScrollBoxes,
+  scrollbarThumb,
+} from "./test-helpers";
 import type { CapturedSpan } from "@opentui/core";
 import type { IssueListResponse, OpenIssue } from "../../daemon/issue-list";
 import type { OpenPR, PRListResponse } from "../../daemon/pr-list";
@@ -1214,6 +1219,72 @@ describe("SourcePicker filter", () => {
     // narrowing rather than losing your place.
     expect(harness.picked.issues[0]?.number).toBe(144);
     expect(harness.picked.prs).toHaveLength(0);
+  });
+});
+
+describe("SourcePicker scrollbar thumb", () => {
+  const prs = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      openPR({ number: 100 + i, headRefOid: `sha-${i}` }),
+    );
+  const issues = (n: number) =>
+    Array.from({ length: n }, (_, i) => openIssue({ number: 500 + i }));
+
+  /** Two passes: one lays out and fires the resize listeners, one draws. */
+  async function thumbFrame(harness: { frame: () => Promise<string> }) {
+    await harness.frame();
+    const frame = await harness.frame();
+    const [box] = findScrollBoxes(setup!.renderer);
+    return { frame, box: box! };
+  }
+
+  it("sizes the thumb to the list on first render", async () => {
+    const harness = await mountSettled({ prs: prs(25) });
+    const f = await thumbFrame(harness);
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("follows the list as a late source grows it past the viewport", async () => {
+    const late = Promise.withResolvers<Response>();
+    const harness = await mount({
+      prs: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: prs(1) }],
+          errors: [],
+        } satisfies PRListResponse),
+      issues: () => late.promise,
+      worktrees: async () =>
+        json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [] }],
+        } satisfies WorktreeListResponse),
+    });
+    let f = await thumbFrame(harness);
+    expect(f.frame).toContain("#100");
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    late.resolve(
+      json({
+        repos: [{ repoRoot: "/repo", repoName: "repo", issues: issues(40) }],
+        errors: [],
+      } satisfies IssueListResponse),
+    );
+    f = await thumbFrame(harness);
+    expect(f.frame).toContain("#500");
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("re-sizes across a resize round trip", async () => {
+    const harness = await mountSettled({ prs: prs(25), height: 60 });
+    let f = await thumbFrame(harness);
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    setup!.resize(90, 24);
+    f = await thumbFrame(harness);
+    const small = expectContentSizedThumb(f.frame, f.box);
+    setup!.resize(90, 60);
+    f = await thumbFrame(harness);
+    expect(scrollbarThumb(f.frame, f.box)).toEqual({ drawn: 0, expected: 0 });
+    setup!.resize(90, 24);
+    f = await thumbFrame(harness);
+    expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
   });
 });
 

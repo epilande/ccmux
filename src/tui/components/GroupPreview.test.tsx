@@ -7,6 +7,9 @@ import {
   mockEnrichedSession,
   emptySummary,
   membersFromSummary,
+  expectContentSizedThumb,
+  findScrollBoxes,
+  scrollbarThumb,
 } from "./test-helpers";
 import type { StatusSummary } from "../utils/grouping";
 import type { EnrichedSession } from "../../types";
@@ -237,5 +240,74 @@ describe("GroupPreview", () => {
     );
     expect(frame).toContain("dev:1");
     expect(frame).toContain("dev:2");
+  });
+});
+
+describe("GroupPreview scrollbar thumb", () => {
+  const sessionsOf = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      mockEnrichedSession({ id: `s${i}`, tmuxTarget: `dev:${i}` }),
+    );
+
+  async function mount(sessions: () => EnrichedSession[], height: number) {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <GroupPreview
+            header={{
+              label: "proj",
+              count: sessions().length,
+              members: membersFromSummary({
+                ...emptySummary(),
+                idle: sessions().length,
+              }),
+            }}
+            sessions={sessions()}
+            width={40}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 40, height },
+    );
+  }
+
+  /** Two passes: one lays out and fires the resize listeners, one draws. */
+  async function frame() {
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    return { frame: setup.captureCharFrame(), box: box! };
+  }
+
+  it("sizes the thumb to the session list on first render", async () => {
+    await mount(() => sessionsOf(6), 20);
+    const f = await frame();
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("follows the session list as it grows past the viewport", async () => {
+    const [sessions, setSessions] = createSignal(sessionsOf(1));
+    await mount(sessions, 20);
+    let f = await frame();
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    setSessions(sessionsOf(20));
+    f = await frame();
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("re-sizes across a resize round trip", async () => {
+    await mount(() => sessionsOf(6), 60);
+    let f = await frame();
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    setup.resize(40, 20);
+    f = await frame();
+    const small = expectContentSizedThumb(f.frame, f.box);
+    setup.resize(40, 60);
+    f = await frame();
+    expect(scrollbarThumb(f.frame, f.box)).toEqual({ drawn: 0, expected: 0 });
+    setup.resize(40, 20);
+    f = await frame();
+    expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
   });
 });

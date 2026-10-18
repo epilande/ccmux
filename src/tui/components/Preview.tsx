@@ -9,6 +9,7 @@ import {
   onCleanup,
 } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
+import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import type {
   StyledText,
   TextRenderable,
@@ -142,7 +143,11 @@ const BackgroundPeek: Component<{ session: EnrichedSession }> = (props) => {
       : "enter: attach agent";
 
   return (
-    <scrollbox flexGrow={1} stickyScroll={false}>
+    <scrollbox
+      flexGrow={1}
+      stickyScroll={false}
+      ref={(r: ScrollBoxRenderable) => syncScrollbarThumb(r)}
+    >
       <box flexDirection="column">
         <Show when={props.session.lastPrompt}>
           <Text fg={theme.overlay}>Task</Text>
@@ -548,7 +553,10 @@ export const Preview: Component<PreviewProps> = (props) => {
               flexGrow={1}
               stickyScroll={true}
               stickyStart="bottom"
-              ref={(r: ScrollBoxRenderable) => props.onScrollboxRef?.(r)}
+              ref={(r: ScrollBoxRenderable) => {
+                syncScrollbarThumb(r);
+                props.onScrollboxRef?.(r);
+              }}
             >
               <Text
                 fg={theme.text}

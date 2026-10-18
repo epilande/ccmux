@@ -2,7 +2,12 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { HelpOverlay } from "./HelpOverlay";
-import { squish } from "./test-helpers";
+import {
+  expectContentSizedThumb,
+  findScrollBoxes,
+  scrollbarThumb,
+  squish,
+} from "./test-helpers";
 
 function escapeRe(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -378,5 +383,46 @@ describe("HelpOverlay sidebar compact wrap (issue #200)", () => {
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     expectWrappedHelpEntry(frame, "p", "Cycle prompt", "(inline/row/off)");
+  });
+});
+
+describe("HelpOverlay scrollbar thumb", () => {
+  /** Two passes: one lays out and fires the resize listeners, one draws. */
+  async function frame() {
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    return { frame: setup.captureCharFrame(), box: box! };
+  }
+
+  it("sizes the thumb to the shortcuts on first render", async () => {
+    setup = await testRender(() => <HelpOverlay />, { width: 100, height: 24 });
+    const f = await frame();
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("sizes the sidebar's thumb to the shortcuts on first render", async () => {
+    setup = await testRender(() => <HelpOverlay sidebar />, {
+      width: 40,
+      height: 40,
+    });
+    const f = await frame();
+    expectContentSizedThumb(f.frame, f.box);
+  });
+
+  it("re-sizes as a resize reflows the shortcuts and back", async () => {
+    // Narrowing to one column also grows the content under the viewport.
+    setup = await testRender(() => <HelpOverlay />, { width: 120, height: 70 });
+    let f = await frame();
+    expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+    setup.resize(60, 24);
+    f = await frame();
+    const small = expectContentSizedThumb(f.frame, f.box);
+    setup.resize(120, 70);
+    f = await frame();
+    expect(scrollbarThumb(f.frame, f.box)).toEqual({ drawn: 0, expected: 0 });
+    setup.resize(60, 24);
+    f = await frame();
+    expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
   });
 });

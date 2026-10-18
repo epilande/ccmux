@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { RGBA, type CapturedFrame, type CapturedSpan } from "@opentui/core";
 import { createMockKeys, createMockMouse } from "@opentui/core/testing";
-import { deliverEscape } from "./test-helpers";
+import {
+  deliverEscape,
+  expectContentSizedThumb,
+  findScrollBoxes,
+  scrollbarThumb,
+} from "./test-helpers";
 import {
   mkdirSync,
   mkdtempSync,
@@ -5903,5 +5908,122 @@ describe("WorktreesPanel o key", () => {
     keys.pressKey("o");
     expect(await frame()).toContain("no PR on this row");
     expect(openedUrls).toEqual([]);
+  });
+});
+
+describe("WorktreesPanel scrollbar thumbs", () => {
+  const many = (n: number) => [
+    mainRow(),
+    ...Array.from({ length: n - 1 }, (_, i) =>
+      row({ path: `/repo/wt/r${i}`, name: `r${i}`, branch: `feat/r${i}` }),
+    ),
+  ];
+  /** Failed removals, so the panel stays on its results. */
+  const failed = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      outcome({
+        path: `/repo/wt/r${i}`,
+        removed: false,
+        steps: [{ step: "remove worktree", ok: false, detail: "locked" }],
+      }),
+    );
+
+  /** Two passes: one lays out and fires the resize listeners, one draws. */
+  async function thumbFrame(harness: { frame: () => Promise<string> }) {
+    await harness.frame();
+    const frame = await harness.frame();
+    const [box] = findScrollBoxes(setup!.renderer);
+    return { frame, box: box! };
+  }
+
+  describe("list", () => {
+    it("sizes the thumb to the list on first render", async () => {
+      const harness = await mountSettled(listOf(many(25)));
+      const f = await thumbFrame(harness);
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("follows the list as a reload grows it past the viewport", async () => {
+      let rows = many(2);
+      const harness = await mountPanel({
+        list: async () => json(listOf(rows)),
+        scan: async () => json(emptyScan),
+      });
+      let f = await thumbFrame(harness);
+      expect(f.frame).toContain("main checkout");
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      rows = many(40);
+      harness.keys.pressKey("r");
+      f = await thumbFrame(harness);
+      expect(f.frame).toContain("feat/r10");
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("re-sizes across a resize round trip", async () => {
+      const harness = await mountSettled(listOf(many(25)), emptyScan, {
+        height: 60,
+      });
+      let f = await thumbFrame(harness);
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      harness.resize(90, 24);
+      f = await thumbFrame(harness);
+      const small = expectContentSizedThumb(f.frame, f.box);
+      harness.resize(90, 60);
+      f = await thumbFrame(harness);
+      expect(scrollbarThumb(f.frame, f.box)).toEqual({
+        drawn: 0,
+        expected: 0,
+      });
+      harness.resize(90, 24);
+      f = await thumbFrame(harness);
+      expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+    });
+  });
+
+  describe("removal results", () => {
+    async function results(height: number) {
+      const harness = await mountPanel(
+        {
+          list: async () => json(listOf([mainRow(), row()])),
+          scan: async () => json({ candidates: [candidate()], skipped: [] }),
+          prune: async () => json(runResult(failed(12))),
+        },
+        { height },
+      );
+      await harness.frame();
+      harness.keys.pressKey("j");
+      harness.keys.pressKey(" ");
+      harness.keys.pressKey("x");
+      await harness.frame();
+      harness.keys.pressKey("y");
+      await harness.frame();
+      return harness;
+    }
+
+    it("sizes the thumb to the outcomes on first render", async () => {
+      const harness = await results(24);
+      const f = await thumbFrame(harness);
+      expect(f.frame).toContain("/repo/wt/r0");
+      expectContentSizedThumb(f.frame, f.box);
+    });
+
+    it("re-sizes across a resize round trip", async () => {
+      const harness = await results(60);
+      let f = await thumbFrame(harness);
+      expect(f.frame).toContain("/repo/wt/r11");
+      expect(scrollbarThumb(f.frame, f.box).expected).toBe(0);
+      harness.resize(90, 24);
+      f = await thumbFrame(harness);
+      const small = expectContentSizedThumb(f.frame, f.box);
+      harness.resize(90, 60);
+      f = await thumbFrame(harness);
+      expect(scrollbarThumb(f.frame, f.box)).toEqual({
+        drawn: 0,
+        expected: 0,
+      });
+      harness.resize(90, 24);
+      f = await thumbFrame(harness);
+      expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+    });
   });
 });
