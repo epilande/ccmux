@@ -27,32 +27,30 @@ import { getDaemonUrl } from "../../lib/config";
 import type { IconStyle } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
 import { theme } from "../theme";
-import { truncateText } from "../utils/format";
+import { padStartWidth, truncateText } from "../utils/format";
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
-import { describeChecks, describeReview, isPRRowKey } from "./pr-rows";
-import {
-  fitSegments,
-  oneLine,
-  scrollTargetFor,
-  type Phrase,
-  type VisualLayout,
-} from "./row-segments";
+import { isPRRowKey } from "./pr-rows";
+import { oneLine, scrollTargetFor, type VisualLayout } from "./row-segments";
 import {
   buildSourceRepos,
   checkedOutPathFor,
   emptyStateText,
   filterRepos,
+  fitSourceRow,
   hasRows,
   isIssueRowKey,
   pickerRows,
+  sourceCellWidths,
+  sourceRowCells,
   sourceRowDim,
   sourceRowLabel,
   sourceRowMarker,
   type SourceRepo,
   type SourceRow,
+  type SourceRowCells,
 } from "./source-picker-rows";
 import { Text } from "./Text";
 
@@ -63,6 +61,8 @@ import { Text } from "./Text";
 /** Independent of the list read, so a slow GitHub cannot hold up the local
  *  worktrees that mark a row as already checked out. */
 const LIST_TIMEOUT_MS = 20_000;
+/** Content columns below which a row's author is left out of its middle. */
+const AUTHOR_MIN_WIDTH = 96;
 export function sourceAge(
   createdAt: string | null | undefined,
   now = Date.now(),
@@ -864,6 +864,39 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       />
     </Show>
   );
+  /** One width per fixed right cell across every visible row. */
+  const cellWidths = createMemo(() =>
+    sourceCellWidths(
+      rows().map((row) =>
+        sourceRowCells(
+          row,
+          sourceAge(row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt),
+          false,
+        ),
+      ),
+    ),
+  );
+  const fixedCellsWidth = () => {
+    const { ci, review, age } = cellWidths();
+    return [ci, review, age].reduce((n, w) => n + (w ? w + 1 : 0), 0);
+  };
+  /** A row's fixed cells at the list's widths, blank where it has none. */
+  const fixedCells = (cells: SourceRowCells) => {
+    const { ci, review, age } = cellWidths();
+    return [
+      {
+        width: ci,
+        text: cells.ci?.text ?? "",
+        fg: cells.ci?.fg ?? theme.overlay,
+      },
+      {
+        width: review,
+        text: cells.review?.text ?? "",
+        fg: cells.review?.fg ?? theme.overlay,
+      },
+      { width: age, text: cells.age, fg: theme.overlay },
+    ].filter((cell) => cell.width > 0);
+  };
   const sourceNotice = () =>
     prError() ??
     issueError() ??
@@ -874,65 +907,40 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const isCursor = () => cursorKey() === row.key;
     const index = () => rows().findIndex((r) => r.key === row.key) + 1;
     const source = () => (row.kind === "pr" ? row.pr : row.issue);
-    const metadata = () => {
-      const phrases: Phrase[] = [];
-      if (row.kind === "pr") {
-        const checks = describeChecks(row.pr);
-        const review = describeReview(row.pr);
-        if (checks)
-          phrases.push({
-            ...checks,
-            text: `CI ${row.pr.ciStatus === "passing" ? "✓" : row.pr.ciStatus === "failing" ? "✗" : "◐"}`,
-          });
-        if (review)
-          phrases.push({
-            ...review,
-            text:
-              row.pr.reviewDecision === "CHANGES_REQUESTED"
-                ? "changes"
-                : "approved",
-          });
-        if (row.pr.isDraft) phrases.push({ text: "draft", fg: theme.subtext });
-      }
-      const labels = row.kind === "pr" ? row.pr.labels : row.issue.labels;
-      if (labels?.length)
-        phrases.push({ text: labels.join(","), fg: theme.subtext });
-      if (row.kind === "pr" && row.pr.headRefName)
-        phrases.push({ text: row.pr.headRefName, fg: theme.blue });
-      if (source().author && listWidth() >= 96)
-        phrases.push({ text: `@${source().author}`, fg: theme.overlay });
-      const age = sourceAge(source().createdAt);
-      if (age) phrases.push({ text: age, fg: theme.overlay });
-      // Status gets the first columns; author and long branch names yield
-      // before a check result. Fit before painting to prevent wrapping.
-      return fitSegments(
-        phrases.map((phrase, index) => ({
-          ...phrase,
-          text: `${index ? " · " : ""}${oneLine(phrase.text)}`,
-        })),
-        Math.max(
-          0,
-          Math.floor((listWidth() - 6) * (listWidth() < 50 ? 0.3 : 0.55)),
-        ),
-      );
-    };
-    const rightWidth = () =>
-      metadata().reduce((sum, phrase) => sum + displayWidth(phrase.text), 0);
-    const label = () => {
-      const budget = Math.max(1, listWidth() - 6 - rightWidth());
+    const cells = createMemo(() =>
+      sourceRowCells(
+        row,
+        sourceAge(source().createdAt),
+        listWidth() >= AUTHOR_MIN_WIDTH,
+      ),
+    );
+    // CI, review and age are fixed cells sized for the list, like the
+    // session list's right-side columns; labels, branch and author are the
+    // flexible middle and yield first (`fitSourceRow`), before the title.
+    const fitted = createMemo(() => {
       const checkout = row.checkedOutName
-        ? truncateText(
-            ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`,
-            Math.floor(budget / 2),
-          )
+        ? ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`
         : "";
-      return (
-        truncateText(
-          `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`,
-          Math.max(1, budget - displayWidth(checkout)),
-        ) + checkout
+      const title = `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`;
+      const fit = fitSourceRow(
+        title + checkout,
+        cells().middle,
+        Math.max(1, listWidth() - 6 - fixedCellsWidth()),
       );
-    };
+      // The checkout suffix changes what Enter does, so it keeps up to half
+      // the title's room and the title truncates before it.
+      const suffix = checkout
+        ? truncateText(checkout, Math.floor(fit.titleRoom / 2))
+        : "";
+      return {
+        label:
+          truncateText(
+            title,
+            Math.max(1, fit.titleRoom - displayWidth(suffix)),
+          ) + suffix,
+        middle: fit.middle,
+      };
+    });
     const sessions = () =>
       worktrees()
         ?.repos.flatMap((r) => r.worktrees)
@@ -966,11 +974,18 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         >{`${marks().has(row.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
         <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
         <Text fg={sourceRowDim(row) ? theme.subtext : theme.text}>
-          {label()}
+          {fitted().label}
         </Text>
         <box flexGrow={1} />
-        <For each={metadata()}>
+        <For each={fitted().middle}>
           {(phrase) => <Text fg={phrase.fg}>{phrase.text}</Text>}
+        </For>
+        <For each={fixedCells(cells())}>
+          {(cell) => (
+            <Text
+              fg={cell.fg}
+            >{` ${padStartWidth(cell.text, cell.width)}`}</Text>
+          )}
         </For>
       </box>
     );

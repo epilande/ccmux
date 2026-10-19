@@ -1613,3 +1613,35 @@ describe("Start status glyphs", () => {
     expect(line).not.toContain("◆");
   });
 });
+
+it("lines CI and age up across rows, with the middle yielding before the title", async () => {
+  const day = 86_400_000;
+  const h = await mountSettled({
+    width: 96,
+    prs: [
+      openPR({
+        number: 7,
+        title: "short",
+        ciStatus: "passing",
+        headRefName: "a",
+        createdAt: new Date(Date.now() - 3 * day).toISOString(),
+      }),
+      openPR({
+        number: 8,
+        title: "a much longer title that takes most of the row on its own",
+        ciStatus: "failing",
+        headRefName: "a-branch-name-long-enough-to-yield",
+        createdAt: new Date(Date.now() - 120 * day).toISOString(),
+      }),
+    ],
+  });
+  const lines = (await h.frame()).split("\n");
+  const seven = lines.find((l) => l.includes("#7 short"))!;
+  const eight = lines.find((l) => l.includes("#8 a much"))!;
+  // Fixed cells: CI starts, and age ends, on the same column on both rows.
+  expect(seven.indexOf("CI ✓")).toBe(eight.indexOf("CI ✗"));
+  expect(seven.indexOf("3d") + 2).toBe(eight.indexOf("120d") + 4);
+  // The long title kept its words; the branch yielded instead.
+  expect(eight).toContain("takes most of the row on its own");
+  expect(eight).not.toContain("a-branch-name-long-enough-to-yield");
+});
