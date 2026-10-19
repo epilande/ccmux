@@ -503,6 +503,11 @@ interface TUIState {
   promptDisplay: PromptDisplay;
   previewFocused: boolean;
   showHelp: boolean;
+  /**
+   * The repo the CURRENT view is narrowed to, or null for all repos. It is
+   * the view's own: `W`/`N` narrow only the view they open (see
+   * `baseScope`), and `s` changes it for every view.
+   */
   scope: string | null;
   markedSessions: Set<string>;
   /**
@@ -866,6 +871,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   const [pinnedGroups, setPinnedGroups] = createSignal<string[]>(
     options.pinnedGroups ?? [],
   );
+  /**
+   * The scope to return to, set while the current view was opened by a
+   * `W`/`N` jump (or a return to one) narrowed to a repo other than the
+   * user's own scope. Null means no jump is in effect, which is always the
+   * case on Sessions: leaving the narrowed view restores this.
+   */
+  const [jumpBase, setJumpBase] = createSignal<{ scope: string | null } | null>(
+    null,
+  );
+  /** The scope the user chose with `s`: what every view uses unless a jump
+   *  narrowed the current one. Sessions always shows this one. */
+  const baseScope = (): string | null => {
+    const jump = jumpBase();
+    return jump ? jump.scope : state.scope;
+  };
 
   // Debounced persistence for UI state (avoids disk writes on every keypress)
   const persistStateFn = options.onPersistState ?? setUIState;
@@ -1150,8 +1170,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   // Derived: status-filtered sessions (hide idle toggle, keeps unread/read visible)
   const statusFilteredSessions = trackedMemo("statusFilteredSessions", () => {
     const all = sortedSessions();
-    const sorted = state.scope
-      ? all.filter((s) => (s.mainRepoRoot ?? s.worktreeRoot) === state.scope)
+    // The BASE scope, not the current view's: a `W`/`N` jump narrows the
+    // view it opened, and the session list it will return to (and the
+    // strip's count of it) must not narrow with it.
+    const scope = baseScope();
+    const sorted = scope
+      ? all.filter((s) => (s.mainRepoRoot ?? s.worktreeRoot) === scope)
       : all;
     if (!state.hideIdle) return sorted;
     const filtered = sorted.filter(
@@ -1393,6 +1417,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return rows;
   });
 
+  /**
+   * Waiting sessions the scope hides. The band says how many, so narrowing
+   * to one repo can never quietly hide a session that needs the user.
+   */
+  const outOfScopeWaiting = trackedMemo("outOfScopeWaiting", () => {
+    const scope = baseScope();
+    if (!scope) return 0;
+    return sortedSessions().filter(
+      (s) =>
+        s.status === "waiting" && (s.mainRepoRoot ?? s.worktreeRoot) !== scope,
+    ).length;
+  });
+
   const flatItems = trackedMemo("flatItems", () => {
     const isSearching = state.searchQuery.trim().length > 0;
     return buildFlatItems(
@@ -1402,6 +1439,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       isSearching,
       pinnedGroups(),
       attentionBand,
+      outOfScopeWaiting(),
     );
   });
 
@@ -1621,6 +1659,27 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       next.delete(id);
       return next;
     });
+  }
+
+  /**
+   * Open a view on `repo`. A repo other than the base scope is a jump: it
+   * narrows this view only, and the base is remembered for the way back.
+   * Opening on the base itself ends any jump (`h`/`l` open the next view
+   * this way, which is how leaving a narrowed view restores the base).
+   */
+  function openScoped(repo: string | null) {
+    const base = baseScope();
+    setJumpBase(repo === base ? null : { scope: base });
+    changeScope(repo);
+  }
+
+  /** Back on Sessions (no other view open): a jump ends with its view. */
+  function restoreBaseOnSessions() {
+    if (state.worktrees || state.sourcePicker) return;
+    const jump = jumpBase();
+    if (!jump) return;
+    setJumpBase(null);
+    changeScope(jump.scope);
   }
 
   function changeScope(repo: string | null) {
@@ -2600,7 +2659,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", false);
     },
 
+    /** An explicit scope change (`s`): it becomes the scope for every view,
+     *  so it also ends any jump that had narrowed the current one. */
     setScope(repo: string | null) {
+      setJumpBase(null);
       changeScope(repo);
       if (state.sourcePicker) setState("sourcePicker", "repo", repo);
     },
@@ -2629,7 +2691,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         startWidened?: boolean;
       } = {},
     ) {
-      changeScope(opts.startWidened ? null : repo);
+      openScoped(opts.startWidened ? null : repo);
       setState("sourcePicker", null);
       setState("worktrees", {
         repo,
@@ -2641,6 +2703,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideWorktrees() {
       setState("worktrees", null);
+      restoreBaseOnSessions();
     },
 
     showSourcePicker(
@@ -2651,7 +2714,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         origin?: SourcePickerOrigin | null;
       } = {},
     ) {
-      changeScope(repo);
+      openScoped(repo);
       setState("worktrees", null);
       setState("sourcePicker", {
         repo,
@@ -2663,6 +2726,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideSourcePicker() {
       setState("sourcePicker", null);
+      restoreBaseOnSessions();
     },
 
     resizePreview(delta: number) {
@@ -2898,6 +2962,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
   return {
     state,
+    baseScope,
     sortedSessions,
     filteredSessions,
     flatItems,
