@@ -73,7 +73,12 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 
-import type { IconStyle } from "../../lib/icons";
+import {
+  DOT_SPINNER_FRAMES,
+  getStatusIcon,
+  type IconStyle,
+} from "../../lib/icons";
+import { getStatusColor } from "./StatusBadge";
 
 import { theme } from "../theme";
 import { Text } from "./Text";
@@ -197,17 +202,6 @@ export function worktreeHoldsPath(
   return deepest === root;
 }
 
-function statusColor(status: SessionStatus): string {
-  switch (status) {
-    case "working":
-      return theme.peach;
-    case "waiting":
-      return theme.red;
-    case "idle":
-      return theme.overlay;
-  }
-}
-
 function prColor(pr: PRState): string {
   switch (pr.state) {
     case "OPEN":
@@ -247,7 +241,9 @@ export function describeSessions(
   const status = leadStatus(sessions);
   const count = sessions.filter((session) => session.status === status).length;
   if (compact)
-    return `${sessions.length} (${count}${status === "waiting" ? "◆" : status === "working" ? "◐" : "●"})`;
+    // The session list's own glyphs: `◆` is the background-agent row's.
+    // Working is the spinner's first frame, its static form.
+    return `${sessions.length} (${count}${status === "working" ? DOT_SPINNER_FRAMES[0] : getStatusIcon(status, null)})`;
   return count === sessions.length
     ? `${count} agents ${status}`
     : `${sessions.length} agents, ${count} ${status}`;
@@ -1132,19 +1128,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     note() || scanError() || (!scan() ? "scanning…" : undefined);
   const renderRow = (entry: WorktreePanelRow) => {
     const status = () => leadStatus(rowSessions(entry));
-    const spinner = useStatusIcon(
+    // The session list's icon for the same status, in the user's style.
+    const icon = useStatusIcon(
       () => status(),
       () => null,
-      () => "dot",
+      () => props.iconStyle,
     );
-    const glyph = () =>
-      !rowSessions(entry).length
-        ? " "
-        : status() === "waiting"
-          ? "◆"
-          : status() === "working"
-            ? spinner()
-            : "●";
+    const glyph = () => (rowSessions(entry).length ? icon() || " " : " ");
     const index = () => rows().findIndex((r) => r.key === entry.key) + 1;
     const right = () =>
       truncateText(
@@ -1240,9 +1230,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         <Text
           fg={theme.overlay}
         >{`${marks().has(entry.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
-        <Text fg={status() === "idle" ? theme.overlay : statusColor(status())}>
-          {glyph()}{" "}
-        </Text>
+        <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
         <For each={segments()}>
           {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
         </For>

@@ -25,6 +25,7 @@ import type { WorktreeListResponse } from "../../daemon/worktree-list";
 import { describeHttpFailure } from "../../daemon/worktree-prune";
 import { getDaemonUrl } from "../../lib/config";
 import type { IconStyle } from "../../lib/icons";
+import { getStatusColor } from "./StatusBadge";
 import { theme } from "../theme";
 import { truncateText } from "../utils/format";
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
@@ -942,19 +943,13 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         : sessions().some((s) => s.status === "working")
           ? "working"
           : "idle";
-    const spinner = useStatusIcon(
+    // The session list's icon for the same status, in the user's style.
+    const icon = useStatusIcon(
       status,
       () => null,
-      () => "dot",
+      () => props.iconStyle,
     );
-    const glyph = () =>
-      !sessions().length
-        ? " "
-        : status() === "waiting"
-          ? "◆"
-          : status() === "working"
-            ? spinner()
-            : "●";
+    const glyph = () => (sessions().length ? icon() || " " : " ");
     return (
       <box
         height={1}
@@ -969,17 +964,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         <Text
           fg={theme.overlay}
         >{`${marks().has(row.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
-        <Text
-          fg={
-            status() === "waiting"
-              ? theme.red
-              : status() === "working"
-                ? theme.peach
-                : theme.overlay
-          }
-        >
-          {glyph()}{" "}
-        </Text>
+        <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
         <Text fg={sourceRowDim(row) ? theme.subtext : theme.text}>
           {label()}
         </Text>

@@ -1586,3 +1586,30 @@ it("opening help consumes a pending z prefix before the next restart", async () 
   await h.keys.pressKey("r");
   expect(restarted).toEqual(["s1"]);
 });
+
+describe("Start status glyphs", () => {
+  it("draws a waiting checkout with the session list's icon, not the background diamond", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "waiting",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+    });
+    const line =
+      (await harness.frame()).split("\n").find((l) => l.includes("#156")) ?? "";
+    expect(line).toContain("■");
+    expect(line).not.toContain("◆");
+  });
+});

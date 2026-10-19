@@ -30,6 +30,7 @@ import {
   resetScanCache,
   pruneFullySucceeded,
   cachedScanFor,
+  describeSessions,
 } from "./WorktreesPanel";
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -1147,5 +1148,36 @@ describe("Worktrees scrollbar thumb", () => {
     await h.frame();
     // 74 * 37 / 46 = 59.5, floored to 59, where the clamp would again draw 37.
     expect(thumb(await h.frame())).toBe(59);
+  });
+});
+
+describe("status glyphs", () => {
+  it("draws a waiting worktree with the session list's icon, not the background diamond", async () => {
+    const h = await mount({
+      width: 120,
+      rows: [
+        mainRow(),
+        row({ sessions: [session({ id: "s2", status: "waiting" })] }),
+      ],
+      scan: async () => ({ candidates: [], skipped: [] }),
+    });
+    const line =
+      (await h.frame()).split("\n").find((l) => l.includes("alpha")) ?? "";
+    expect(line).toContain("■");
+    expect(line).not.toContain("◆");
+  });
+
+  it("uses the same glyphs in the compact agent count", () => {
+    const waiting = [
+      session({ status: "waiting" }),
+      session({ id: "s2", status: "idle" }),
+    ];
+    expect(describeSessions(waiting, true)).toBe("2 (1■)");
+    expect(
+      describeSessions(
+        [session({ status: "working" }), session({ id: "s2" })],
+        true,
+      ),
+    ).toBe("2 (1◐)");
   });
 });
