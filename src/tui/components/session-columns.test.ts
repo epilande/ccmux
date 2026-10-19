@@ -19,6 +19,9 @@ import {
   isFlexTextField,
   columnHeaderCells,
   hasHeaderLabels,
+  prColumnWidth,
+  sizePrColumn,
+  PR_COLUMN_MAX,
   showColumnHeader,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
@@ -702,24 +705,51 @@ describe("applyPromptDisplay", () => {
   it("inline flattens row 2 onto row 1 in the picker", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
     expect(cols.row1.left.map((e) => e.field)).toContain("summary");
-    // pr tucks onto row 1 next to the branch, not the far-right metadata.
-    expect(cols.row1.left.map((e) => e.field)).toContain("pr");
-    expect(cols.row1.right.map((e) => e.field)).not.toContain("pr");
+    // pr heads row 1's right side, where a list-sized width anchors it as a
+    // column the header can label (see `sizePrColumn`).
+    expect(cols.row1.left.map((e) => e.field)).not.toContain("pr");
+    expect(cols.row1.right[0]?.field).toBe("pr");
     expect(cols.row2.left).toEqual([]);
     expect(cols.row2.right).toEqual([]);
   });
 
-  it("inline puts pr right after project and the summary last on row 1 left", () => {
+  it("inline puts the summary last on row 1 left and pr ahead of agent", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
-    const left = cols.row1.left.map((e) => e.field);
-    expect(left).toEqual(["index", "status", "project", "pr", "summary"]);
+    expect(cols.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+      "summary",
+    ]);
+    expect(cols.row1.right.map((e) => e.field)).toEqual([
+      "pr",
+      "agent",
+      "version",
+      "pane",
+      "time",
+    ]);
+  });
+
+  it("keeps a custom row-2 trailing cell other than pr after project", () => {
+    const resolved = resolveColumns(120, {
+      row2: { left: ["summary"], right: ["cwd", "pr"] },
+    });
+    const cols = applyPromptDisplay(resolved, "inline", false);
+    expect(cols.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+      "cwd",
+      "summary",
+    ]);
+    expect(cols.row1.right[0]?.field).toBe("pr");
   });
 
   it("inline forces pr to short (no `PR ` prefix) even at wide widths", () => {
     // At 120 (>= lg) the row2 pr default resolves to `full`; inline collapse
-    // must still drop the prefix so the bare `#id` rides next to the branch.
+    // must still drop the prefix, which the header's `pr` label replaces.
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
-    const pr = cols.row1.left.find((e) => e.field === "pr");
+    const pr = cols.row1.right.find((e) => e.field === "pr");
     expect(pr?.mode).toBe("short");
   });
 
@@ -795,10 +825,10 @@ describe("applyPromptDisplay", () => {
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 
-  it("inline appends pr then prompt when row 1 has no project cell", () => {
+  it("inline appends the prompt and heads the right with pr when row 1 has no project cell", () => {
     // Custom row 1 without `project`: flattenToRow1's projectIdx === -1 branch
-    // appends the row-2 metadata (pr) and then the prompt to the end of the
-    // left side, rather than inserting them after a project anchor.
+    // appends the prompt to the end of the left side, rather than inserting
+    // it after a project anchor; pr goes right either way.
     const resolved = resolveColumns(120, {
       row1: { left: ["index", "status"] },
     });
@@ -806,11 +836,10 @@ describe("applyPromptDisplay", () => {
     expect(cols.row1.left.map((e) => e.field)).toEqual([
       "index",
       "status",
-      "pr",
       "summary",
     ]);
     // pr is still forced to short even without a project anchor.
-    expect(cols.row1.left.find((e) => e.field === "pr")?.mode).toBe("short");
+    expect(cols.row1.right.find((e) => e.field === "pr")?.mode).toBe("short");
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 });
@@ -1848,11 +1877,37 @@ describe("columnHeaderCells", () => {
   });
 
   it("stops the left side at the first intrinsic-width cell", () => {
-    // Inline mode tucks `pr` and the summary after `project`; neither has a
-    // fixed start, so neither gets a label.
+    // Inline mode puts the summary after `project`; it has no fixed start,
+    // so it gets no label.
     const fields = columnHeaderCells(inline(160)).left.map((c) => c.field);
-    expect(fields).not.toContain("pr");
     expect(fields).not.toContain("summary");
+  });
+
+  it("labels the pr column once the list has sized it", () => {
+    // Unsized, the inline `pr` is intrinsic-width and ends the right walk.
+    expect(columnHeaderCells(inline(160)).right.map((c) => c.field)).toEqual([
+      "agent",
+      "version",
+      "pane",
+      "time",
+    ]);
+    const sized = sizePrColumn(
+      applyPromptDisplay(resolveColumns(160), "inline", false),
+      4,
+    );
+    expect(
+      columnHeaderCells(sized.row1).right.map((c) => [
+        c.field,
+        c.text,
+        c.width,
+      ]),
+    ).toEqual([
+      ["pr", "pr", 4],
+      ["agent", "agent", 8],
+      ["version", "version", 10],
+      ["pane", "pane", 12],
+      ["time", "age", 4],
+    ]);
   });
 
   it("blanks a label that would not fit its cell rather than cutting it", () => {
@@ -1924,5 +1979,60 @@ describe("showColumnHeader", () => {
   it("always and never override the grouping", () => {
     expect(showColumnHeader("always", "project")).toBe(true);
     expect(showColumnHeader("never", "none")).toBe(false);
+  });
+});
+
+describe("sizePrColumn", () => {
+  const inline = () => applyPromptDisplay(resolveColumns(160), "inline", false);
+  const withPRs = (...ids: string[]) =>
+    mockEnrichedSession({
+      branchPRs: ids.map((id) => ({
+        id,
+        href: `https://github.com/o/r/pull/${id}`,
+      })),
+    });
+
+  it("sizes the column to the widest badge in the list", () => {
+    const sessions = [withPRs("7"), withPRs("206"), withPRs()];
+    expect(prColumnWidth(sessions, "short")).toBe(4);
+    const sized = sizePrColumn(inline(), 4);
+    expect(sized.row1.right[0]).toEqual({
+      field: "pr",
+      mode: "short",
+      width: 4,
+    });
+    expect(entryRightWidth(sized.row1.right[0]!)).toBe(4);
+  });
+
+  it("counts the stale marker and caps a long run of PRs", () => {
+    expect(
+      prColumnWidth(
+        [
+          mockEnrichedSession({
+            branchPRs: [{ id: "7", href: "h", stale: true }],
+          }),
+        ],
+        "short",
+      ),
+    ).toBe(4);
+    expect(
+      prColumnWidth([withPRs("1001", "1002", "1003", "1004")], "short"),
+    ).toBe(PR_COLUMN_MAX);
+  });
+
+  it("drops the cell when no row has a PR, rather than reserving a blank column", () => {
+    expect(prColumnWidth([withPRs(), withPRs()], "short")).toBe(0);
+    const sized = sizePrColumn(inline(), 0);
+    expect(sized.row1.right.map((e) => e.field)).toEqual([
+      "agent",
+      "version",
+      "pane",
+      "time",
+    ]);
+  });
+
+  it("leaves a layout with no right-side pr alone", () => {
+    const resolved = resolveColumns(160);
+    expect(sizePrColumn(resolved, 4)).toBe(resolved);
   });
 });

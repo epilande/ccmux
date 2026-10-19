@@ -40,6 +40,12 @@ const DEFAULT_MODES: Partial<Record<ColumnField, string>> = {
 export interface ResolvedEntry {
   field: ColumnField;
   mode?: string;
+  /**
+   * A width the LIST settled for this cell, overriding the field's own (see
+   * {@link sizePrColumn}). Absent for every cell whose width is a property of
+   * the field alone.
+   */
+  width?: number;
 }
 
 /** A row's resolved layout: ordered left and right entry arrays. */
@@ -183,8 +189,8 @@ const DEFAULT_COLUMNS: ColumnsConfig = {
   // branch metadata; the summary cell shrinks (see SessionItem) so long text
   // truncates instead of pushing the PR ids off-screen. The `PR ` prefix is
   // dropped (`short`) below the `lg` breakpoint to save room on smaller
-  // screens; inline collapse drops it too (see `flattenToRow1`), so the bare
-  // colored `#id` rides next to the branch instead of reading as "PR".
+  // screens; inline collapse drops it too (see `flattenToRow1`), where the
+  // column header's `pr` label already says what the bare colored `#id` is.
   row2: {
     left: ["summary"],
     right: [{ field: "pr", mode: { default: "short", lg: "full" } }],
@@ -298,11 +304,14 @@ export function stripPrompt(cols: ResolvedColumns): ResolvedColumns {
  * instead of earning its own row.
  */
 function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
-  // `pr` (row 2's trailing metadata) tucks in right after `project` so it
-  // reads as the branch metadata it is, rather than floating past the
-  // timestamp at the far right; the prompt becomes the flexible filler at the
-  // end of the left side. A field already on row 1 is dropped so nothing is
-  // doubled.
+  // `pr` (row 2's trailing metadata) heads the right side, ahead of `agent`,
+  // where the list pins it to one width (`sizePrColumn`) so it is a column
+  // the header can label. After `project` it read as branch metadata, but
+  // that cell's width varies per row, so the `#id` drifted with it and no
+  // label could sit over it honestly. Row 2's other trailing metadata (a
+  // custom layout's) still tucks in after `project`. The prompt becomes the
+  // flexible filler at the end of the left side. A field already on row 1 is
+  // dropped so nothing is doubled.
   const present = new Set(
     [...cols.row1.left, ...cols.row1.right].map((e) => e.field),
   );
@@ -324,7 +333,9 @@ function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
       flexTaken = true;
       return true;
     });
-  const meta = fresh(cols.row2.right);
+  const trailing = fresh(cols.row2.right);
+  const pr = trailing.filter((e) => e.field === "pr");
+  const meta = trailing.filter((e) => e.field !== "pr");
   const prompt = fresh(cols.row2.left);
   const projectIdx = cols.row1.left.findIndex((e) => e.field === "project");
   const left =
@@ -336,14 +347,56 @@ function flattenToRow1(cols: ResolvedColumns): ResolvedColumns {
           ...cols.row1.left.slice(projectIdx + 1),
           ...prompt,
         ];
-  // The single line has no room for the `PR ` prefix, and the bare colored
-  // `#id` reads fine tucked next to the branch, so force `pr` to short.
+  // The single line has no room for the `PR ` prefix, and the header's `pr`
+  // label says what a bare colored `#id` is, so force `pr` to short.
   const shortenPr = (entries: ResolvedEntry[]): ResolvedEntry[] =>
     entries.map((e) => (e.field === "pr" ? { ...e, mode: "short" } : e));
   return {
-    row1: { left: shortenPr(left), right: shortenPr(cols.row1.right) },
+    row1: {
+      left: shortenPr(left),
+      right: shortenPr([...pr, ...cols.row1.right]),
+    },
     row2: { left: [], right: [] },
   };
+}
+
+/** Widest a list-sized `pr` column grows; a longer badge truncates. */
+export const PR_COLUMN_MAX = 12;
+
+/**
+ * Pin row 1's right-side `pr` cell to one width for the whole list.
+ *
+ * A badge is a different width on every row (`#7`, `#206 ~`, `#49 #51`, or
+ * nothing), and on the right side every cell left of it moves with it. Sized
+ * once here, to the widest badge any row draws, the column and the cells
+ * beside it line up on every row, and the column header can label it. With
+ * no PR on any row the cell is dropped, rather than reserving a blank column
+ * the prompt could have used.
+ *
+ * Row 1's right side only: that is where a fixed width anchors the cell. A
+ * `pr` on the left, after the intrinsic `project`, drifts either way.
+ */
+export function sizePrColumn(
+  cols: ResolvedColumns,
+  width: number,
+): ResolvedColumns {
+  if (!cols.row1.right.some((e) => e.field === "pr")) return cols;
+  const right = width
+    ? cols.row1.right.map((e) => (e.field === "pr" ? { ...e, width } : e))
+    : cols.row1.right.filter((e) => e.field !== "pr");
+  return { ...cols, row1: { ...cols.row1, right } };
+}
+
+/** The width {@link sizePrColumn} needs to fit every one of `sessions`'
+ *  badges in `mode`, capped at {@link PR_COLUMN_MAX}. */
+export function prColumnWidth(
+  sessions: EnrichedSession[],
+  mode: string | undefined,
+): number {
+  let widest = 0;
+  for (const session of sessions)
+    widest = Math.max(widest, displayWidth(prLabel(session, mode)));
+  return Math.min(PR_COLUMN_MAX, widest);
 }
 
 /**
@@ -967,6 +1020,7 @@ export function fitProjectCell(
 
 /** Width allocated to a resolved entry on a "right side" (right-aligned column). */
 export function entryRightWidth(entry: ResolvedEntry): number {
+  if (entry.width !== undefined) return entry.width;
   switch (entry.field) {
     case "status":
       return entry.mode === "full" ? 9 : entry.mode === "short" ? 6 : 1;
