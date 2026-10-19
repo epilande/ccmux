@@ -1181,3 +1181,66 @@ describe("status glyphs", () => {
     ).toBe("2 (1◐)");
   });
 });
+
+describe("table layout", () => {
+  it("lines names, branches and agent counts up down the list", async () => {
+    const h = await mount({
+      width: 120,
+      rows: [
+        mainRow(),
+        row({
+          path: "/repo/wt/a",
+          name: "a",
+          branch: "feat/short",
+          sessions: [session()],
+        }),
+        row({
+          path: "/repo/wt/longer-name",
+          name: "longer-name",
+          branch: "feat/a-longer-branch",
+          sessions: [session(), session({ id: "s2", status: "waiting" })],
+        }),
+      ],
+      scan: async () => ({ candidates: [], skipped: [] }),
+    });
+    const lines = (await h.frame()).split("\n");
+    const short = lines.find((l) => l.includes(" a +"))!;
+    const long = lines.find((l) => l.includes("longer-name +"))!;
+    // The branch column starts on the same column on both rows.
+    expect(short.indexOf("feat/short")).toBe(long.indexOf("feat/a-longer"));
+    // The agents column is right-aligned to one edge.
+    const end = (line: string, text: string) =>
+      line.indexOf(text) + text.length;
+    expect(end(short, "Claude")).toBe(end(long, "1 waiting"));
+  });
+
+  it("leaves the main + N worktrees facts off the group header", async () => {
+    const h = await mount({
+      width: 120,
+      rows: [mainRow(), row()],
+      facts: {
+        headerPR: true,
+        repos: [
+          {
+            repoRoot: "/repo",
+            repoName: "repo",
+            worktrees: {
+              updatedAt: 1,
+              stale: false,
+              value: {
+                repoRoot: "/repo",
+                repoName: "repo",
+                worktrees: [
+                  { path: "/repo", branch: "main", isMain: true },
+                  { path: "/repo/wt/alpha", branch: "alpha", isMain: false },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      scan: async () => ({ candidates: [], skipped: [] }),
+    });
+    expect(await h.frame()).not.toContain("main + 1 worktree");
+  });
+});

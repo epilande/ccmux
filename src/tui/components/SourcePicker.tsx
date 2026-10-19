@@ -1,6 +1,5 @@
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { GroupHeader } from "./GroupHeader";
-import { factsText } from "../utils/repo-facts";
 import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
 import type { PanelEffects } from "./WorktreesPanel";
@@ -1099,11 +1098,6 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
                       // Rows here have no right padding, so neither does
                       // the header: its rule ends where they do.
                       flushRight
-                      facts={factsText(
-                        props.facts?.repos.find(
-                          (r) => r.repoRoot === repo.repoRoot,
-                        ),
-                      )}
                       collapsed={collapsed().has(repo.repoRoot)}
                       selected={headerRepo()?.repoRoot === repo.repoRoot}
                       members={[]}

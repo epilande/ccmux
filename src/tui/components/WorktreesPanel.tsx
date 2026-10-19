@@ -1,11 +1,6 @@
 import { wrapText } from "../utils/format";
 import { GroupHeader } from "./GroupHeader";
-import {
-  factsText,
-  badgeText,
-  branchPRs,
-  badgeColor,
-} from "../utils/repo-facts";
+import { badgeText, branchPRs, badgeColor } from "../utils/repo-facts";
 import { getAgentDisplayName } from "../../lib/agents";
 import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
@@ -55,7 +50,7 @@ import type {
 
 import type { SessionStatus } from "../../types/session";
 
-import { displayWidth, truncateText } from "../utils/format";
+import { displayWidth, padStartWidth, truncateText } from "../utils/format";
 
 import {
   fitSegments,
@@ -315,6 +310,28 @@ export function rowBranch(entry: PanelRow): string {
     return "";
   }
   return row.branch;
+}
+
+/** Columns a row spends before its name: active bar, index, glyph, and a
+ *  margin. */
+const ROW_PREFIX = 6;
+/** Widest the name and branch columns grow; longer cells truncate. */
+const NAME_COLUMN_MAX = 28;
+const BRANCH_COLUMN_MAX = 32;
+
+/** A row's name cell, worktree marker included. */
+export function nameText(entry: WorktreePanelRow): string {
+  return entry.row.isMain ? "⌂ main checkout" : `${entry.row.name} +`;
+}
+
+/** The name cell fitted to `width`, truncating the name and never the
+ *  worktree marker after it. */
+function fitName(entry: WorktreePanelRow, width: number): string {
+  if (entry.row.isMain) return truncateText(nameText(entry), width);
+  const marker = " +";
+  return (
+    truncateText(entry.row.name, Math.max(1, width - marker.length)) + marker
+  );
 }
 
 export function plural(count: number, one: string, many: string): string {
@@ -1089,8 +1106,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         }
     }
   });
-  const facts = (root: string) =>
-    props.facts?.repos.find((r) => r.repoRoot === root);
   const cachedPRs = (entry: WorktreePanelRow) =>
     branchPRs(
       {
@@ -1126,6 +1141,39 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   };
   const footerNote = () =>
     note() || scanError() || (!scan() ? "scanning…" : undefined);
+  /** The agents cell's text for a row, at this width. */
+  const agentsText = (entry: WorktreePanelRow) =>
+    describeSessions(rowSessions(entry), width() < 100);
+  /** The branch cell's text for a row: empty where the group header
+   *  already carries the shared branch. */
+  const branchText = (entry: WorktreePanelRow) =>
+    groupBranch(entry.row.repoRoot) ? "" : rowBranch(entry);
+  /**
+   * Column widths, sized once for the visible rows the way the session
+   * list's are, so names, branches and agent counts line up down the list.
+   * The name and branch columns take the widest row up to a cap and a share
+   * of the row; the agents column is right-aligned at the right edge; the
+   * per-row facts (PR, dirty, lock, tracking) flex in between.
+   */
+  const columns = createMemo(() => {
+    const visible = rows();
+    const widest = (texts: string[], cap: number) =>
+      Math.min(
+        cap,
+        texts.reduce((n, t) => Math.max(n, displayWidth(t)), 0),
+      );
+    const agents = widest(visible.map(agentsText), Math.floor(width() / 3));
+    const room = Math.max(0, width() - ROW_PREFIX - (agents ? agents + 1 : 0));
+    const name = widest(
+      visible.map(nameText),
+      Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
+    );
+    const branch = widest(
+      visible.map(branchText),
+      Math.min(BRANCH_COLUMN_MAX, Math.floor(room * 0.3)),
+    );
+    return { name, branch, agents, room };
+  });
   const renderRow = (entry: WorktreePanelRow) => {
     const status = () => leadStatus(rowSessions(entry));
     // The session list's icon for the same status, in the user's style.
@@ -1136,26 +1184,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     );
     const glyph = () => (rowSessions(entry).length ? icon() || " " : " ");
     const index = () => rows().findIndex((r) => r.key === entry.key) + 1;
-    const right = () =>
-      truncateText(
-        describeSessions(rowSessions(entry), width() < 100),
-        Math.floor(width() / 3),
-      );
-    const segments = () => {
+    const facts = () => {
       const dirty = dirtyPhrases(entry.row);
       const skip = entry.skip?.reason;
-      const metadata = [
+      const phrases = [
         ...(entry.candidate
-          ? [{ text: `  ${describeReason(entry.candidate)}`, fg: theme.yellow }]
+          ? [{ text: describeReason(entry.candidate), fg: theme.yellow }]
           : !groupBranch(entry.row.repoRoot) && cachedBadge(entry)
-            ? [
-                {
-                  text: `  ${cachedBadge(entry)}`,
-                  fg: badgeColor(cachedPRs(entry)),
-                },
-              ]
+            ? [{ text: cachedBadge(entry), fg: badgeColor(cachedPRs(entry)) }]
             : entry.pr && !groupBranch(entry.row.repoRoot)
-              ? [{ text: `  ${describePR(entry.pr)}`, fg: prColor(entry.pr) }]
+              ? [{ text: describePR(entry.pr), fg: prColor(entry.pr) }]
               : []),
         ...(dirty.length
           ? dirty
@@ -1163,56 +1201,33 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             ? [DIRTY_UNCOUNTED]
             : []
         ).map((text) => ({
-          text: `  ${text}`,
+          text,
           fg: entry.candidate ? theme.yellow : theme.subtext,
         })),
-        ...(entry.row.locked ? [{ text: "  locked", fg: theme.yellow }] : []),
+        ...(entry.row.locked ? [{ text: "locked", fg: theme.yellow }] : []),
         ...(skip &&
         !(entry.row.locked && skip === "locked") &&
         !(entry.row.detached && skip === "detached HEAD") &&
         !(rowSessions(entry).length && /^an agent is /.test(skip))
           ? [
               {
-                text: `  ${skip.replace(/^an agent is /, "agent ")}`,
+                text: skip.replace(/^an agent is /, "agent "),
                 fg: theme.subtext,
               },
             ]
           : []),
         ...(!entry.candidate && formatTracking(entry.row)
-          ? [{ text: `  ${formatTracking(entry.row)}`, fg: theme.blue }]
+          ? [{ text: formatTracking(entry.row), fg: theme.blue }]
           : []),
       ];
-      const budget = Math.max(1, width() - 6 - displayWidth(right()));
-      const wanted = metadata.reduce(
-        (n, part) => n + displayWidth(part.text),
-        0,
+      const { name, branch, room } = columns();
+      return fitSegments(
+        phrases.map((phrase, i) => ({
+          ...phrase,
+          text: `${i ? "  " : ""}${phrase.text}`,
+        })),
+        Math.max(0, room - name - (branch ? branch + 2 : 0) - 2),
       );
-      const identityBudget = Math.max(10, budget - wanted);
-      const identity = fitSegments(
-        [
-          {
-            text: entry.row.isMain
-              ? "⌂ main checkout"
-              : `${truncateText(entry.row.name, identityBudget - 2)} +`,
-            fg: entry.row.isMain ? theme.text : theme.blue,
-          },
-          ...(!groupBranch(entry.row.repoRoot) && rowBranch(entry)
-            ? [{ text: `  ${rowBranch(entry)}`, fg: theme.subtext }]
-            : []),
-        ],
-        identityBudget,
-      );
-      return [
-        ...identity,
-        ...fitSegments(
-          metadata,
-          Math.max(
-            0,
-            budget -
-              identity.reduce((n, part) => n + displayWidth(part.text), 0),
-          ),
-        ),
-      ];
     };
     return (
       <box
@@ -1231,11 +1246,31 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           fg={theme.overlay}
         >{`${marks().has(entry.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
         <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
-        <For each={segments()}>
+        <box width={columns().name} flexShrink={0}>
+          <Text fg={entry.row.isMain ? theme.text : theme.blue}>
+            {fitName(entry, columns().name)}
+          </Text>
+        </box>
+        <Show when={columns().branch}>
+          <box width={columns().branch + 2} flexShrink={0} paddingLeft={2}>
+            <Text fg={theme.subtext}>
+              {truncateText(branchText(entry), columns().branch)}
+            </Text>
+          </box>
+        </Show>
+        <box width={2} flexShrink={0} />
+        <For each={facts()}>
           {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
         </For>
         <box flexGrow={1} />
-        <Text fg={theme.subtext}>{right()}</Text>
+        <Show when={columns().agents}>
+          <Text fg={theme.subtext}>
+            {padStartWidth(
+              truncateText(agentsText(entry), columns().agents),
+              columns().agents,
+            )}
+          </Text>
+        </Show>
       </box>
     );
   };
@@ -1327,7 +1362,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                     width={headerWidth()}
                     flushRight
                     sharedBranch={groupBranch(item.repoRoot)}
-                    facts={factsText(facts(item.repoRoot))}
                     prBadgeColor={
                       item.rows[0]
                         ? cachedPRs(item.rows[0]).length
