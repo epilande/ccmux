@@ -1405,7 +1405,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             sidebar={props.compact}
             reviewable={props.reviewable}
             note={footerNote()}
-            noteColor={note() || scanError() ? theme.yellow : theme.overlay}
+            noteColor={note() || scanError() ? theme.yellow : theme.subtext}
           />
         }
       >
@@ -1418,11 +1418,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                 width={width()}
                 reviewable={props.reviewable}
                 note={footerNote()}
-                noteColor={note() || scanError() ? theme.yellow : theme.overlay}
+                noteColor={note() || scanError() ? theme.yellow : theme.subtext}
               />
             }
           >
-            <Text fg={theme.overlay}>
+            <Text fg={theme.subtext}>
               {phase() === "dirty"
                 ? "y include · n skip · esc cancel"
                 : CONFIRM_HINTS}

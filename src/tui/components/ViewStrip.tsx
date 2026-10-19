@@ -90,7 +90,7 @@ export function rightSegments(
       shrink: 0,
     });
   if (status.hideIdle)
-    signals.push({ forms: ["active", ""], fg: theme.overlay, shrink: 1 });
+    signals.push({ forms: ["active", ""], fg: theme.subtext, shrink: 1 });
   const level = signals.map(() => 0);
   const steps = signals
     .map((s, i) => ({ i, shrink: s.shrink }))
@@ -129,7 +129,7 @@ export function rightSegments(
  * them: its rule stub is the accent bar (`━━` in `theme.blue` where the
  * others are `──` in `theme.border`), its name is bold, and its name is the
  * text color where the others are subtext. The count rides after the name in
- * the overlay color (`·2`, or `·2/8` while a scope, `f` or a search hides
+ * the subtext color (`·2`, or `·2/8` while a scope, `f` or a search hides
  * rows) so the name reads alone. Each count is taken in its OWN view's scope:
  * a `W`/`N` jump narrows only the view it opened, so the other tabs count in
  * the base scope they will show when reached. The scope carries a `scope:`
@@ -236,7 +236,7 @@ export const ViewStrip: Component<
     const nodes: RightSegment[][] = signals.map((seg) => [seg]);
     if (scope)
       nodes.push([
-        { text: SCOPE_PREFIX, fg: theme.overlay },
+        { text: SCOPE_PREFIX, fg: theme.subtext },
         { text: scope, fg: props.scope ? theme.blue : theme.subtext },
       ]);
     nodes.forEach((node, i) =>
@@ -274,7 +274,7 @@ export const ViewStrip: Component<
             </Text>
             {/* Guarded: an empty text node still paints one column. */}
             <Show when={countText(view)}>
-              <Text fg={theme.overlay}>{countText(view)}</Text>
+              <Text fg={theme.subtext}>{countText(view)}</Text>
             </Show>
             <Text> </Text>
           </box>

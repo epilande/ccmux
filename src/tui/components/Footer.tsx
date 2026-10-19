@@ -194,11 +194,11 @@ export const HintLine: Component<{
   return (
     <Text wrapMode="none">
       <Show when={line().note}>
-        <span style={{ fg: props.noteColor ?? theme.overlay }}>
+        <span style={{ fg: props.noteColor ?? theme.subtext }}>
           {line().note}
         </span>
       </Show>
-      <span style={{ fg: theme.overlay }}>{line().hints}</span>
+      <span style={{ fg: theme.subtext }}>{line().hints}</span>
     </Text>
   );
 };
@@ -270,42 +270,42 @@ export const Footer: Component<FooterProps> = (props) => {
     <FooterBar>
       <Switch>
         <Match when={props.helpMode}>
-          <Text fg={theme.overlay}>? or Esc close</Text>
+          <Text fg={theme.subtext}>? or Esc close</Text>
         </Match>
         <Match when={props.previewFocused}>
-          <Text fg={theme.overlay}>tab/esc exit focus · keys sent to pane</Text>
+          <Text fg={theme.subtext}>tab/esc exit focus · keys sent to pane</Text>
         </Match>
         <Match when={props.confirmMode}>
-          <Text fg={theme.overlay}>{CONFIRM_HINTS}</Text>
+          <Text fg={theme.subtext}>{CONFIRM_HINTS}</Text>
         </Match>
         <Match when={props.newSessionMode}>
-          <Text fg={theme.overlay}>
+          <Text fg={theme.subtext}>
             {newSessionHintSegments(props.newSessionOption ?? "text")
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
           </Text>
         </Match>
         <Match when={props.handoffDialogMode}>
-          <Text fg={theme.overlay}>
+          <Text fg={theme.subtext}>
             {handoffDialogHintSegments()
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
           </Text>
         </Match>
         <Match when={props.copyDialogMode}>
-          <Text fg={theme.overlay}>
+          <Text fg={theme.subtext}>
             {copyDialogHintSegments()
               .map((segment) => `${segment.key} ${segment.gloss}`)
               .join(HINT_SEPARATOR)}
           </Text>
         </Match>
         <Match when={props.handoffPickMode}>
-          <Text fg={theme.overlay}>
+          <Text fg={theme.subtext}>
             j/k pick target · enter continue · esc cancel
           </Text>
         </Match>
         <Match when={props.searchMode}>
-          <Text fg={theme.overlay}>{SEARCH_HINTS}</Text>
+          <Text fg={theme.subtext}>{SEARCH_HINTS}</Text>
         </Match>
         <Match when={true}>
           <HintLine

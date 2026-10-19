@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
 import {
@@ -724,6 +726,15 @@ describe("SessionList column header", () => {
     const paneEnd = header.indexOf("pane") + "pane".length;
     const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
     expect(paneEnd).toBe(targetEnd);
+  });
+
+  it("draws the labels in subtext", async () => {
+    await renderHeaderCase({ columnHeader: true });
+    const label = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((span) => span.text.includes("version"));
+    expect(label?.fg.toInts()).toEqual(RGBA.fromHex(theme.subtext).toInts());
   });
 
   it("keeps the labels that fit when the preview narrows the list", async () => {

@@ -428,10 +428,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
   // The head is the quietest line on screen on purpose: the strip above it
   // owns weight and accent, rows own semantic color, and the head is told
-  // apart by being dimmer than both (the overlay color, lowercase). Caps,
+  // apart by being dimmer than both (the subtext color, lowercase). Caps,
   // bold, underline and a rule beneath were all tried; each either fought
-  // the strip for its cue or cost a row.
-  const headerFg = () => (props.dimmed ? theme.border : theme.overlay);
+  // the strip for its cue or cost a row. Not the overlay color: that is
+  // under 4.5:1 on base in every built-in theme (2.3:1 in latte), and these
+  // labels are read, not decoration.
+  const headerFg = () => (props.dimmed ? theme.border : theme.subtext);
 
   /**
    * Header cells for THIS layout, or null when no line should draw. Read off

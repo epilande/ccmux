@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { Footer, fitHints, footerHints, hintLine } from "./Footer";
 import { ACTIONS } from "../actions";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { DEFAULT_GROUP_BY, type GroupBy } from "../../lib/preferences";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -74,6 +76,15 @@ describe("Footer", () => {
     const frame = await renderFooter({ previewFocused: true });
     expect(frame).toContain("exit focus");
     expect(frame).toContain("keys sent to pane");
+  });
+
+  it("draws its hints in subtext, which stays legible on light themes", async () => {
+    await renderFooter({});
+    const line = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((span) => span.text.includes("q quit"));
+    expect(line?.fg.toInts()).toEqual(RGBA.fromHex(theme.subtext).toInts());
   });
 
   it("glosses enter with the same verb as every other view", async () => {

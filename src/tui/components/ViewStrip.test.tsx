@@ -327,9 +327,12 @@ it("shows degraded and in-flight invokes only while they hold", async () => {
 it("counts hidden rows as ·n/total and flags hide-idle apart from search", async () => {
   const idle = await strip(96, { total: 8, hideIdle: true });
   expect(idle).toContain("Sessions ·3/8 ──");
-  expect(fgOf("3/8")).toEqual(hex(theme.overlay));
+  // Subtext, not overlay: read text, and overlay is under 4.5:1 on base in
+  // every built-in theme.
+  expect(fgOf("3/8")).toEqual(hex(theme.subtext));
   expect(idle).toEndWith("─ active · scope: all repos ──");
-  expect(fgOf("active")).toEqual(hex(theme.overlay));
+  expect(fgOf("active")).toEqual(hex(theme.subtext));
+  expect(fgOf("scope: ")).toEqual(hex(theme.subtext));
   setup.renderer.destroy();
   const search = await strip(96, { total: 8 });
   expect(search).toContain("Sessions ·3/8 ──");

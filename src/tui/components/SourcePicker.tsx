@@ -848,7 +848,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     <Show
       when={!filtering()}
       fallback={
-        <Text fg={theme.overlay}>
+        <Text fg={theme.subtext}>
           {truncateText(SEARCH_HINTS, contentWidth())}
         </Text>
       }
@@ -859,7 +859,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         sidebar={props.compact}
         reviewable={props.reviewable}
         note={note() ?? sourceNotice() ?? undefined}
-        noteColor={note() ? theme.yellow : theme.overlay}
+        noteColor={note() ? theme.yellow : theme.subtext}
       />
     </Show>
   );
@@ -1059,7 +1059,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
             <Text fg={theme.red}>
               {truncateText(error() ?? "", contentWidth())}
             </Text>
-            <Text fg={theme.overlay}>R retry · q back</Text>
+            <Text fg={theme.subtext}>R retry · q back</Text>
           </box>
         </Show>
 
