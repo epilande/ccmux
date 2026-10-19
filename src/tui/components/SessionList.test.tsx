@@ -651,6 +651,7 @@ describe("SessionList column header", () => {
     sidebar?: boolean;
     promptLines?: number;
     summary?: string | null;
+    showPreview?: boolean;
   }) {
     const [tick] = createSignal(0);
     const items = [
@@ -672,6 +673,7 @@ describe("SessionList column header", () => {
             columnHeader={opts.columnHeader}
             sidebar={opts.sidebar}
             promptLines={opts.promptLines}
+            showPreview={opts.showPreview}
           />
         </TickContext.Provider>
       ),
@@ -722,6 +724,21 @@ describe("SessionList column header", () => {
     const paneEnd = header.indexOf("pane") + "pane".length;
     const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
     expect(paneEnd).toBe(targetEnd);
+  });
+
+  it("keeps the labels that fit when the preview narrows the list", async () => {
+    // 100 columns with a 30% preview: the list lays out at 70, below `md`,
+    // but the terminal is not, so the smaller layout's labels still draw.
+    const lines = await renderHeaderCase({
+      columnHeader: true,
+      width: 100,
+      showPreview: true,
+    });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"));
+    expect(header).toBeDefined();
+    expect(header).toContain("status");
+    // The two-column short agent code has no room for its label.
+    expect(header).not.toContain("agent");
   });
 
   it("stays off when not asked, in the sidebar, and below md", async () => {

@@ -4206,11 +4206,7 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             ageFadeAfter={store.state.ageFadeAfter}
-            columnHeader={showColumnHeader(
-              store.state.columnHeader,
-              store.state.groupBy,
-              store.flatItems().some((item) => item.type === "header"),
-            )}
+            columnHeader={showColumnHeader(store.state.columnHeader)}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry

@@ -31,6 +31,8 @@ import {
   resolveLayout,
   applyPromptDisplay,
   columnHeaderCells,
+  labelsToolCell,
+  TOOL_LABEL,
   prColumnWidth,
   sizePrColumn,
   hasHeaderLabels,
@@ -46,7 +48,7 @@ import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { Text } from "./Text";
 import { socketErrorMessage } from "../../lib/tmux-socket";
-import { padStartWidth } from "../utils/format";
+import { displayWidth, padStartWidth } from "../utils/format";
 
 interface SessionListProps {
   items: FlatItem[];
@@ -65,8 +67,8 @@ interface SessionListProps {
   sidebar?: boolean;
   /**
    * Draw the column-header line above the rows. The list still withholds it
-   * below the `md` breakpoint, where the cells it would label are gone, and
-   * when the resolved layout leaves nothing to label.
+   * on a terminal below the `md` breakpoint, and when the resolved layout
+   * leaves nothing to label.
    */
   columnHeader?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
@@ -443,10 +445,20 @@ export const SessionList: Component<SessionListProps> = (props) => {
   const headerCells = createMemo(() => {
     if (!props.columnHeader || props.sidebar) return null;
     const md = props.breakpoints?.md ?? DEFAULT_BREAKPOINTS.md;
-    if (effectiveWidth() < md) return null;
+    // The TERMINAL's width, not the list's: with the preview open the list
+    // lays out a smaller breakpoint, whose labels still fit or blank cell by
+    // cell (`labelFor`). Only a line with nothing left to label is withheld.
+    if (dims().width < md) return null;
     const row1 = blockActive() ? withBlock().row1 : layout().row1;
     const cells = columnHeaderCells(row1);
-    return hasHeaderLabels(cells) ? cells : null;
+    const tool = labelsToolCell(
+      row1,
+      cells,
+      props.items.flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session] : [],
+      ),
+    );
+    return hasHeaderLabels(cells) || tool ? { ...cells, tool } : null;
   });
 
   return (
@@ -456,7 +468,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       flexShrink={1}
     >
       <Show when={props.items.length > 0 && headerCells()}>
-        {(cells: () => HeaderCells) => (
+        {(cells: () => HeaderCells & { tool: boolean }) => (
           // Same geometry as a row: the item's 1-column padding either side
           // (the left one is where the active `▎` draws), cells one gap
           // apart, right-side labels right-aligned in their fixed boxes.
@@ -483,6 +495,13 @@ export const SessionList: Component<SessionListProps> = (props) => {
             </For>
             <Show when={!cells().left.some((c) => c.width === 0)}>
               <box flexGrow={1} flexShrink={1} />
+            </Show>
+            {/* Ends where every row's tool cell ends: one gap before the
+                first right-side cell. */}
+            <Show when={cells().tool}>
+              <box width={displayWidth(TOOL_LABEL)} flexShrink={0}>
+                <Text fg={headerFg()}>{TOOL_LABEL}</Text>
+              </box>
             </Show>
             <For each={cells().right}>
               {(cell) => (

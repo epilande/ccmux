@@ -22,6 +22,7 @@ import {
   prColumnWidth,
   sizePrColumn,
   PR_COLUMN_MAX,
+  labelsToolCell,
   showColumnHeader,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
@@ -1963,22 +1964,46 @@ describe("columnHeaderCells", () => {
 });
 
 describe("showColumnHeader", () => {
-  it("auto follows the grouping: flat only", () => {
-    expect(showColumnHeader("auto", "none")).toBe(true);
-    expect(showColumnHeader(undefined, "none")).toBe(true);
-    for (const g of ["project", "cwd", "session", "window"] as const) {
-      expect(showColumnHeader("auto", g)).toBe(false);
-    }
+  it("auto draws it in every grouping, as always does", () => {
+    expect(showColumnHeader("auto")).toBe(true);
+    expect(showColumnHeader(undefined)).toBe(true);
+    expect(showColumnHeader("always")).toBe(true);
   });
 
-  it("auto yields to the needs-attention band in a flat list", () => {
-    expect(showColumnHeader("auto", "none", true)).toBe(false);
-    expect(showColumnHeader("always", "none", true)).toBe(true);
+  it("never turns it off", () => {
+    expect(showColumnHeader("never")).toBe(false);
+  });
+});
+
+describe("labelsToolCell", () => {
+  const row1 = sizePrColumn(
+    applyPromptDisplay(resolveColumns(160), "inline", false),
+    4,
+  ).row1;
+  const waiting = mockEnrichedSession({
+    status: "waiting",
+    attentionType: "permission",
+    pendingTool: "Bash",
+  });
+  const idle = mockEnrichedSession({ status: "idle" });
+
+  it("labels the tool cell while some row draws one", () => {
+    expect(labelsToolCell(row1, columnHeaderCells(row1), [idle, waiting])).toBe(
+      true,
+    );
+    expect(labelsToolCell(row1, columnHeaderCells(row1), [idle])).toBe(false);
   });
 
-  it("always and never override the grouping", () => {
-    expect(showColumnHeader("always", "project")).toBe(true);
-    expect(showColumnHeader("never", "none")).toBe(false);
+  it("leaves it unlabeled when a drifting right-side cell unanchors it", () => {
+    // The unsized `pr` is intrinsic-width, so the tool cell's end drifts.
+    const drifting = applyPromptDisplay(
+      resolveColumns(160),
+      "inline",
+      false,
+    ).row1;
+    expect(
+      labelsToolCell(drifting, columnHeaderCells(drifting), [waiting]),
+    ).toBe(false);
   });
 });
 

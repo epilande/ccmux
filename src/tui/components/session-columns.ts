@@ -17,7 +17,7 @@ import {
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
-import type { ColumnHeaderMode, GroupBy } from "../../lib/preferences";
+import type { ColumnHeaderMode } from "../../lib/preferences";
 import { DEFAULT_COLUMN_HEADER } from "../../lib/preferences";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { stripTerminalNoise } from "../../lib/strip-ansi";
@@ -1125,26 +1125,37 @@ export function hasHeaderLabels(cells: HeaderCells): boolean {
 }
 
 /**
- * Whether the picker draws the column-header line under this grouping.
- * `auto` follows the grouping: the flat list is a table and gets one; a
- * grouped list has a group line between the header and its rows and does
- * not. A flat list showing the `needs attention` band has group lines too,
- * so `auto` yields while the band is up. The width gate is the caller's
- * (the list knows its own width).
+ * Whether the picker draws the column-header line. `auto` draws it in every
+ * grouping: a group line between the header and a group's rows does not
+ * stop the labels from naming the columns those rows share, and a rule that
+ * only some groupings get was one nobody saw on the defaults. `auto` and
+ * `always` therefore agree today; `always` stays as the explicit opt-in a
+ * future `auto` rule cannot take back. The width gate is the caller's.
  */
-export function showColumnHeader(
-  mode: ColumnHeaderMode | undefined,
-  groupBy: GroupBy,
-  hasGroupHeaders = false,
+export function showColumnHeader(mode: ColumnHeaderMode | undefined): boolean {
+  return (mode ?? DEFAULT_COLUMN_HEADER) !== "never";
+}
+
+/** The header's label over the trailing tool/attention cell. */
+export const TOOL_LABEL = "tool";
+
+/**
+ * Whether the header labels the trailing tool cell (a pending tool, `Plan`,
+ * `N Agent`, the handoff badge). That cell is sized per row, so only its END
+ * is anchored, at the first right-side cell, and only when every right-side
+ * cell is fixed-width (`cells.right` labels them all). A label over a column
+ * no visible row draws would point at the prompt, so it also needs a row
+ * that has one.
+ */
+export function labelsToolCell(
+  row1: ResolvedRow,
+  cells: HeaderCells,
+  sessions: EnrichedSession[],
 ): boolean {
-  switch (mode ?? DEFAULT_COLUMN_HEADER) {
-    case "always":
-      return true;
-    case "never":
-      return false;
-    default:
-      return groupBy === "none" && !hasGroupHeaders;
-  }
+  return (
+    cells.right.length === row1.right.length &&
+    sessions.some((session) => trailingLabelsWidth(session, false) > 0)
+  );
 }
 
 /** Repository facts belong to project headers, never to cwd or tmux groups. */

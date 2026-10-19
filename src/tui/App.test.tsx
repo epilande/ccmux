@@ -258,7 +258,7 @@ async function renderApp(
   height = 20,
   props: Record<string, unknown> = {},
 ) {
-  // The column-header line is on by default for `groupBy: "none"` and would
+  // The column-header line is on by default in every grouping and would
   // push every row down one line under the pointer coordinates these tests
   // aim at; they opt out the way a user can. Its own tests pass the mode.
   const withDefaults = { columnHeader: "never" as const, ...props };
@@ -714,7 +714,7 @@ describe("App", () => {
     flashPaneDetachedSpy.mockClear();
   }
 
-  it("draws the column header above a flat list by default, and not a grouped one", async () => {
+  it("draws the column header by default in every grouping, and not with never", async () => {
     const seed = async (props: Record<string, unknown>) => {
       await renderApp(120, 20, props);
       sseCallbacks!.onInit(
@@ -742,15 +742,17 @@ describe("App", () => {
     setup.renderer.destroy();
 
     const grouped = await seed({ groupBy: "project", columnHeader: undefined });
-    expect(grouped.join("\n")).not.toContain("version");
-    expect(grouped[FIRST_CONTENT_ROW_Y]).toContain("myapp");
+    expect(grouped[FIRST_CONTENT_ROW_Y]).toContain("version");
+    // The group line sits between the labels and the rows they name.
+    expect(grouped[FIRST_CONTENT_ROW_Y + 1]).toContain("myapp (1)");
     setup.renderer.destroy();
 
-    const forced = await seed({ groupBy: "project", columnHeader: "always" });
-    expect(forced[FIRST_CONTENT_ROW_Y]).toContain("version");
+    const off = await seed({ groupBy: "project", columnHeader: "never" });
+    expect(off.join("\n")).not.toContain("version");
+    expect(off[FIRST_CONTENT_ROW_Y]).toContain("myapp");
   });
 
-  it("drops the default column header while the flat list shows the needs-attention band", async () => {
+  it("keeps the default column header, tool label included, above the needs-attention band", async () => {
     const seed = async (props: Record<string, unknown>) => {
       await renderApp(120, 20, { groupBy: "none", ...props });
       sseCallbacks!.onInit(
@@ -759,6 +761,8 @@ describe("App", () => {
             id: "s1",
             project: "myapp",
             status: "waiting",
+            attentionType: "permission",
+            pendingTool: "Bash",
           }),
           mockEnrichedSession({ id: "s2", project: "other" }),
         ],
@@ -770,13 +774,14 @@ describe("App", () => {
     };
 
     const auto = await seed({ columnHeader: undefined });
-    expect(auto[FIRST_CONTENT_ROW_Y]).toContain("needs attention");
-    expect(auto.join("\n")).not.toContain("pane");
-    setup.renderer.destroy();
-
-    const forced = await seed({ columnHeader: "always" });
-    expect(forced[FIRST_CONTENT_ROW_Y]).toContain("pane");
-    expect(forced[FIRST_CONTENT_ROW_Y + 1]).toContain("needs attention");
+    const header = auto[FIRST_CONTENT_ROW_Y]!;
+    expect(header).toContain("pane");
+    expect(auto[FIRST_CONTENT_ROW_Y + 1]).toContain("needs attention");
+    // `tool` ends where the waiting row's tool name does.
+    const row = auto.find((line) => line.includes("Bash"))!;
+    expect(header.indexOf("tool") + "tool".length).toBe(
+      row.indexOf("Bash") + "Bash".length,
+    );
   });
 
   it("flashes pane on click of session row in persistent picker mode", async () => {
