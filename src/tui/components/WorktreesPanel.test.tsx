@@ -479,7 +479,7 @@ describe("Worktrees view", () => {
           finish = done;
         }),
     });
-    expect(await h.frame()).toContain("alpha +");
+    expect(await h.frame()).toContain("alpha+");
     expect(await h.frame()).toContain("scanning");
     finish({ candidates: [candidate()], skipped: [] });
     await h.frame();
@@ -490,14 +490,14 @@ describe("Worktrees view", () => {
   it("uses one line, the shared prefix, and no removable divider or PR tab", async () => {
     const h = await mount({ cursor: row().path });
     const frame = await h.frame();
-    expect(frame).toContain(" 2   alpha +");
+    expect(frame).toContain(" 2   alpha+");
     expect(frame).toContain("⌂ main checkout");
     expect(frame).not.toContain("Pull Requests");
     expect(frame).not.toContain("removable ·");
     expect(
       frame
         .split("\n")
-        .filter((l) => l.includes("alpha +") || l.includes("PR #68 merged")),
+        .filter((l) => l.includes("alpha+") || l.includes("PR #68 merged")),
     ).toHaveLength(1);
   });
   it("uses the index column for marks and A clears them", async () => {
@@ -514,9 +514,9 @@ describe("Worktrees view", () => {
     await h.keys.pressKey(" ");
     expect((await h.frame()).match(/✓/g)).toHaveLength(2);
     await h.keys.pressEnter();
-    expect(await h.frame()).not.toContain("alpha +");
+    expect(await h.frame()).not.toContain("alpha+");
     await h.keys.pressEnter();
-    expect(await h.frame()).toContain("alpha +");
+    expect(await h.frame()).toContain("alpha+");
   });
   it("reviews working tree with d and branch with D; neither opts into deletion", async () => {
     const h = await mount({ cursor: row().path });
@@ -675,7 +675,7 @@ it("keeps tracking, locks, dirty counts and all attached agents on one row", asy
     scan: async () => ({ candidates: [], skipped: [] }),
   });
   const frame = await h.frame();
-  const line = frame.split("\n").find((l) => l.includes("alpha +")) ?? "";
+  const line = frame.split("\n").find((l) => l.includes("alpha+")) ?? "";
   for (const field of [
     "locked",
     "2 modified",
@@ -696,7 +696,7 @@ it("preserves dirty and session facts from classification while the local snapsh
     }),
   });
   const line =
-    (await h.frame()).split("\n").find((l) => l.includes("alpha +")) ?? "";
+    (await h.frame()).split("\n").find((l) => l.includes("alpha+")) ?? "";
   expect(line).toContain("uncommitted work");
   expect(line).toContain("Claude");
   expect(line).not.toContain("ends it");
@@ -763,11 +763,11 @@ describe("Worktrees read and effect regressions", () => {
         list: async () =>
           fail ? new Response("", { status }) : listResponse([row()]),
       });
-      expect(await h.frame()).not.toContain("alpha +");
+      expect(await h.frame()).not.toContain("alpha+");
       expect(await h.frame()).toContain(status === 404 ? "daemon" : "500");
       fail = false;
       await h.keys.pressKey("R");
-      expect(await h.frame()).toContain("alpha +");
+      expect(await h.frame()).toContain("alpha+");
       expect(h.scanCalls()).toBe(2);
     });
   }
@@ -799,12 +799,12 @@ describe("Worktrees read and effect regressions", () => {
       });
       if (change === "refresh") await h.keys.pressKey("R");
       else h.setScope("/other");
-      expect(await h.frame()).toContain("fresh +");
+      expect(await h.frame()).toContain("fresh+");
       oldList(listResponse([row()]));
       oldScan({ candidates: [candidate()], skipped: [] });
       const frame = await h.frame();
-      expect(frame).toContain("fresh +");
-      expect(frame).not.toContain("alpha +");
+      expect(frame).toContain("fresh+");
+      expect(frame).not.toContain("alpha+");
       expect(frame).not.toContain("merged");
       if (change === "scope")
         expect(
@@ -985,7 +985,7 @@ describe("Worktrees removal outcomes and cache", () => {
     await h.keys.pressKey("y");
     const frame = await h.frame();
     expect(frame).toContain("removed 1 worktree");
-    expect(frame).not.toContain("alpha +");
+    expect(frame).not.toContain("alpha+");
     expect(h.refreshes()).toBe(1);
     destroyPanel();
     const returned = await mount({
@@ -1036,7 +1036,7 @@ describe("Worktrees removal outcomes and cache", () => {
     expect(await h.frame()).toContain("recheck refused");
     expect(h.refreshes()).toBe(0);
     await h.keys.pressKey("R");
-    expect(await h.frame()).toContain("alpha +");
+    expect(await h.frame()).toContain("alpha+");
   });
   it("sends exact scoped paths, caller context and empty consent for an agent-free clean row", async () => {
     const previous = process.env.TMUX_PANE;
@@ -1137,7 +1137,7 @@ describe("Worktrees scrollbar thumb", () => {
       embedded: true,
       list: async () => listResponse(rows),
     });
-    expect(await h.frame()).toContain("r8 +");
+    expect(await h.frame()).toContain("r8+");
     expect(thumb(await h.frame())).toBe(0);
     rows = many(61);
     await h.keys.pressKey("R");
@@ -1204,8 +1204,8 @@ describe("table layout", () => {
       scan: async () => ({ candidates: [], skipped: [] }),
     });
     const lines = (await h.frame()).split("\n");
-    const short = lines.find((l) => l.includes(" a +"))!;
-    const long = lines.find((l) => l.includes("longer-name +"))!;
+    const short = lines.find((l) => l.includes(" a+"))!;
+    const long = lines.find((l) => l.includes("longer-name+"))!;
     // The branch column starts on the same column on both rows.
     expect(short.indexOf("feat/short")).toBe(long.indexOf("feat/a-longer"));
     // The agents column is right-aligned to one edge.

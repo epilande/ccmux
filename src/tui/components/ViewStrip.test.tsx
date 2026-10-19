@@ -34,7 +34,7 @@ it("draws a titled rule, marks the active view with the accent stub, and fills c
   );
   await setup.renderOnce();
   const line = setup.captureCharFrame().split("\n")[0]!;
-  expect(line).toContain("── Sessions ·2 ━━ Worktrees ── Start ─");
+  expect(line).toContain("── Sessions (2) ━━ Worktrees ── Start ─");
   expect(line.trimEnd().endsWith(" scope: all repos ──")).toBe(true);
   // The rule runs edge to edge inside the one-column padding.
   expect(line.trimEnd().length).toBe(95);
@@ -62,7 +62,7 @@ it("draws a titled rule, marks the active view with the accent stub, and fills c
     },
   ]);
   await setup.renderOnce();
-  expect(setup.captureCharFrame()).toContain("Worktrees ·0 ── Start ·82");
+  expect(setup.captureCharFrame()).toContain("Worktrees (0) ── Start (82)");
   expect(setup.captureCharFrame().split("\n")[1]?.trim()).toBe("");
 });
 
@@ -90,7 +90,7 @@ it("marks a stale worktree count with a tilde", async () => {
     { width: 96, height: 2 },
   );
   await setup.renderOnce();
-  expect(setup.captureCharFrame()).toContain("Worktrees ·0~");
+  expect(setup.captureCharFrame()).toContain("Worktrees (0~)");
 });
 
 it("scopes totals to the repo and names it, colored, at the right edge", async () => {
@@ -128,7 +128,7 @@ it("scopes totals to the repo and names it, colored, at the right edge", async (
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
   // Scoped, the count carries the total the scope hides, as Sessions' does.
-  expect(frame).toContain("Start ·3/33");
+  expect(frame).toContain("Start (3/33)");
   expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
   const scope = setup
     .captureSpans()
@@ -174,7 +174,7 @@ it("counts the other views in the base scope while a jump narrows this one", asy
   );
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("Sessions ·4 ━━ Worktrees ·2/5 ── Start ·11 ─");
+  expect(frame).toContain("Sessions (4) ━━ Worktrees (2/5) ── Start (11) ─");
   expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
 });
 
@@ -207,22 +207,22 @@ it("sums the repos that answered and marks the total partial when one never did"
   );
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("Worktrees ·0~");
-  expect(frame).toContain("Start ·11~");
+  expect(frame).toContain("Worktrees (0~)");
+  expect(frame).toContain("Start (11~)");
 });
 
-// Tabs cost 37 columns here (`── Sessions ·2 ── Worktrees ── Start `), the
-// padding 2 and the scope dressing 11: the scope's name gets `width - 50`.
+// Tabs cost 38 columns here (`── Sessions (2) ── Worktrees ── Start `), the
+// padding 2 and the scope dressing 11: the scope's name gets `width - 51`.
 // Below the tabs' own width the strip CLIPS (line 2 must stay blank: OpenTUI
 // wraps an overflowing row onto the next line, which here is the head line).
 for (const [width, expected] of [
-  [36, null],
-  [39, null],
-  [51, null],
-  [52, "s…"],
-  [56, "scope"],
+  [37, null],
+  [40, null],
+  [52, null],
+  [53, "s…"],
+  [57, "scope"],
 ] as const) {
-  it(`fits the scope into a ${width - 50}-column budget`, async () => {
+  it(`fits the scope into a ${width - 51}-column budget`, async () => {
     setup = await testRender(
       () => (
         <ViewStrip
@@ -286,9 +286,9 @@ it("renders the healthy board exactly as the plain titled rule", async () => {
     hideIdle: false,
   });
   expect(healthy).toBe(bare);
-  // Tabs 37, padding 2, scope dressing 11, name 9: 96 - 59 = 37 rule cells.
+  // Tabs 38, padding 2, scope dressing 11, name 9: 96 - 60 = 36 rule cells.
   expect(healthy).toBe(
-    ` ━━ Sessions ·3 ── Worktrees ── Start ${"─".repeat(37)} scope: all repos ──`,
+    ` ━━ Sessions (3) ── Worktrees ── Start ${"─".repeat(36)} scope: all repos ──`,
   );
 });
 
@@ -324,9 +324,9 @@ it("shows degraded and in-flight invokes only while they hold", async () => {
   expect(quiet).not.toContain("invoking");
 });
 
-it("counts hidden rows as ·n/total and flags hide-idle apart from search", async () => {
+it("counts hidden rows as (n/total) and flags hide-idle apart from search", async () => {
   const idle = await strip(96, { total: 8, hideIdle: true });
-  expect(idle).toContain("Sessions ·3/8 ──");
+  expect(idle).toContain("Sessions (3/8) ──");
   // Subtext, not overlay: read text, and overlay is under 4.5:1 on base in
   // every built-in theme.
   expect(fgOf("3/8")).toEqual(hex(theme.subtext));
@@ -335,7 +335,7 @@ it("counts hidden rows as ·n/total and flags hide-idle apart from search", asyn
   expect(fgOf("scope: ")).toEqual(hex(theme.subtext));
   setup.renderer.destroy();
   const search = await strip(96, { total: 8 });
-  expect(search).toContain("Sessions ·3/8 ──");
+  expect(search).toContain("Sessions (3/8) ──");
   expect(search).not.toContain("active");
 });
 

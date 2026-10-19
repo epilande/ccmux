@@ -831,15 +831,17 @@ export interface ProjectCellInput {
 export interface ProjectCellDisplay {
   prefix: string;
   dirname: string;
-  /** ":"-prefixed branch (with the `~`/`+` conventions), or "" when no branch. */
+  /** ":"-prefixed branch (with the `…`/`+` conventions), or "" when no branch. */
   branchLabel: string;
 }
 
 /**
  * The `:branch` label with the existing conventions: capped at `maxBranchLen`
- * COLUMNS with a trailing `~`, worktree `+` appended. Every budget in this
+ * COLUMNS with a trailing `…`, worktree `+` appended. Every budget in this
  * pipeline is a column count, so a branch of wide glyphs is capped by what it
- * draws rather than by how many code units it happens to spend.
+ * draws rather than by how many code units it happens to spend. The mark is
+ * the ellipsis every other cut uses: `~` means "stale" on the PR badge and
+ * the strip's counts.
  */
 function branchLabelFor(
   branch: string,
@@ -848,13 +850,13 @@ function branchLabelFor(
 ): string {
   const shown =
     displayWidth(branch) > maxBranchLen
-      ? sliceToWidth(branch, maxBranchLen - 1) + "~"
+      ? sliceToWidth(branch, maxBranchLen - 1) + "…"
       : branch;
   return ":" + shown + (isWorktree ? "+" : "");
 }
 
 /** Narrowest budget that could still render a label: ":" + one column of
- *  branch + "~" + the worktree "+". Anything less and `shortenBranchLabel`
+ *  branch + "…" + the worktree "+". Anything less and `shortenBranchLabel`
  *  returns "" outright; at or above it the label still drops when the branch
  *  has no grapheme narrow enough to fill that one column. */
 function minBranchLabelWidth(isWorktree: boolean): number {
@@ -862,7 +864,7 @@ function minBranchLabelWidth(isWorktree: boolean): number {
 }
 
 /**
- * Shorten a branch label to `avail` columns using the `~` marker; "" if too
+ * Shorten a branch label to `avail` columns using the `…` marker; "" if too
  * tight. "Too tight" counts the worktree `+` as well as the ":" and one
  * usable column, because a label that keeps a one-column body plus both
  * markers would come back WIDER than the room it was given, and on a worktree
@@ -870,7 +872,7 @@ function minBranchLabelWidth(isWorktree: boolean): number {
  *
  * A body that comes back empty drops the whole label. The one usable column
  * can hold no part of a wide-glyph branch (a CJK or emoji grapheme needs two),
- * and `:~` names no branch while still charging two columns the row would
+ * and `:…` names no branch while still charging two columns the row would
  * rather spend on identity.
  */
 function shortenBranchLabel(
@@ -880,11 +882,11 @@ function shortenBranchLabel(
 ): string {
   const wt = isWorktree ? "+" : "";
   if (avail < minBranchLabelWidth(isWorktree)) return "";
-  const bodyWidth = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
+  const bodyWidth = Math.max(1, avail - 1 /* colon */ - 1 /* … */ - wt.length);
   if (displayWidth(branch) <= bodyWidth) return ":" + branch + wt;
   const body = sliceToWidth(branch, bodyWidth);
   if (!body) return "";
-  return ":" + body + "~" + wt;
+  return ":" + body + "…" + wt;
 }
 
 /** Fit the prefix into `avail` columns; dropped entirely under 2 usable ones. */
@@ -914,10 +916,12 @@ function fitDirname(
 
 /**
  * Fit the project (path:branch) cell into `budget` COLUMNS, never silently
- * clipping: any shortening shows `…` (or the existing `~` for the branch).
- * Shrink order matches the design: prefix first (drop it under 2 usable
- * columns), then the dirname (kept to a small floor), then the branch as a
- * last resort.
+ * clipping: any shortening shows `…`, and a cell shows at most ONE. Shrink
+ * order matches the design: prefix first (drop it under 2 usable columns),
+ * then the dirname (kept to a small floor), then the branch as a last resort.
+ * When that order would cut the path AND the branch (`alpha/fi…:fix-a-r…`),
+ * the cell keeps its identity whole and cuts only the branch, or, with no
+ * room for both, drops the branch and fits the path alone.
  *
  * Every budget here is measured with `displayWidth`, not `.length`: the parts
  * are cut by `truncateText`/`sliceToWidth`, which are column-true, so counting
@@ -941,6 +945,15 @@ function fitDirname(
  * saying which tree it is.
  */
 export function fitProjectCell(
+  input: ProjectCellInput,
+  budget: number,
+  maxBranchLen: number,
+): ProjectCellDisplay {
+  return oneMark(input, budget, shrinkProjectCell(input, budget, maxBranchLen));
+}
+
+/** The shrink cascade `fitProjectCell` describes, before `oneMark`. */
+function shrinkProjectCell(
   input: ProjectCellInput,
   budget: number,
   maxBranchLen: number,
@@ -1009,13 +1022,42 @@ export function fitProjectCell(
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }
 
-  // 3. Last resort: shorten the branch further with the `~` marker.
+  // 3. Last resort: shorten the branch further.
   if (branch) {
     const availForBranch =
       budget - displayWidth(outPrefix) - displayWidth(outDirname);
     branchLabel = shortenBranchLabel(branch, isWorktree, availForBranch);
   }
   return { prefix: outPrefix, dirname: outDirname, branchLabel };
+}
+
+/**
+ * Hold a fitted project cell to one truncation mark. The path parts carry at
+ * most one between them (a plain prefix is cut only while the dirname stays
+ * whole, and a repo prefix is never cut), so the only way to two is a cut
+ * path beside a cut branch. Then the branch alone takes the cut beside a
+ * whole identity: the repo and worktree name when they leave room for its
+ * narrowest label, else the name alone (the repo goes before the branch
+ * does, so a widening terminal never trades the branch for the repo). With
+ * no room even for that, the name takes the whole cell.
+ */
+function oneMark(
+  input: ProjectCellInput,
+  budget: number,
+  fitted: ProjectCellDisplay,
+): ProjectCellDisplay {
+  const { prefix, dirname, branch, isWorktree, repoPrefix } = input;
+  const pathCut =
+    (fitted.prefix !== prefix && fitted.prefix !== "") ||
+    fitted.dirname !== dirname;
+  const branchCut = fitted.branchLabel.includes("…");
+  if (!branch || !pathCut || !branchCut) return fitted;
+  for (const keep of repoPrefix ? [prefix, ""] : [""]) {
+    const rest = budget - displayWidth(keep) - displayWidth(dirname);
+    const branchLabel = shortenBranchLabel(branch, isWorktree, rest);
+    if (branchLabel) return { prefix: keep, dirname, branchLabel };
+  }
+  return { prefix: "", dirname: fitDirname(dirname, budget), branchLabel: "" };
 }
 
 /** Width allocated to a resolved entry on a "right side" (right-aligned column). */

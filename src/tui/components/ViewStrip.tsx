@@ -119,7 +119,7 @@ export function rightSegments(
 }
 
 /**
- * The view strip is a titled RULE, not a row of chips: `━━ Sessions ·2 ──
+ * The view strip is a titled RULE, not a row of chips: `━━ Sessions (2) ──
  * Worktrees ── Start ───────── scope: all repos ──`. Drawn that way so the
  * line above the list reads as chrome at a glance. A row of names on a plain
  * background looked like one more data row, and the column-header line that
@@ -129,7 +129,7 @@ export function rightSegments(
  * them: its rule stub is the accent bar (`━━` in `theme.blue` where the
  * others are `──` in `theme.border`), its name is bold, and its name is the
  * text color where the others are subtext. The count rides after the name in
- * the subtext color (`·2`, or `·2/8` while a scope, `f` or a search hides
+ * the subtext color (`(2)`, or `(2/8)` while a scope, `f` or a search hides
  * rows) so the name reads alone. Each count is taken in its OWN view's scope:
  * a `W`/`N` jump narrows only the view it opened, so the other tabs count in
  * the base scope they will show when reached. The scope carries a `scope:`
@@ -152,7 +152,7 @@ export const ViewStrip: Component<
     /** Sessions in the Sessions view's own scope and filters. */
     sessions: number;
     /** Sessions before a scope, `f` or a search hid any; shown as
-     *  `·n/total`. */
+     *  `(n/total)`. */
     total?: number;
     facts: RepoFacts[];
     onView: (view: View) => void;
@@ -207,7 +207,7 @@ export const ViewStrip: Component<
   const countText = (view: View) =>
     count(view) === undefined
       ? ""
-      : ` ·${count(view)}${stale(view) ? "~" : ""}`;
+      : ` (${count(view)}${stale(view) ? "~" : ""})`;
   const tabWidth = (view: View) =>
     displayWidth(VIEW_NAMES[view]) + displayWidth(countText(view));
   // Every tab is `stub(3) + name + count + space(1)`.

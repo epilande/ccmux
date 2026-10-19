@@ -606,7 +606,7 @@ describe("App", () => {
 
   it("updates session count in header after SSE init", async () => {
     await renderApp();
-    expect(setup.captureCharFrame()).toContain("Sessions ·0");
+    expect(setup.captureCharFrame()).toContain("Sessions (0)");
 
     sseCallbacks!.onInit(
       [
@@ -616,7 +616,7 @@ describe("App", () => {
       null,
     );
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("Sessions ·2");
+    expect(setup.captureCharFrame()).toContain("Sessions (2)");
   });
 
   it("carries connection, health, invokes and hide-idle on the view strip", async () => {
@@ -636,13 +636,13 @@ describe("App", () => {
       null,
     );
     await setup.renderOnce();
-    expect(strip()).toContain("Sessions ·2 ");
+    expect(strip()).toContain("Sessions (2) ");
     for (const quiet of ["●", "▲", "invoking", "active"])
       expect(strip()).not.toContain(quiet);
 
     setup.mockInput.pressKey("f");
     await setup.renderOnce();
-    expect(strip()).toContain("Sessions ·1/2 ");
+    expect(strip()).toContain("Sessions (1/2) ");
     expect(strip()).toContain("active");
 
     sseCallbacks!.onDaemonHealth!({
@@ -9289,10 +9289,10 @@ describe("repo scope across views", () => {
       const jumped = (await frame()).split("\n")[0]!;
       expect(jumped).toContain("scope: myapp");
       // The Sessions tab counts the list `h` returns to, not the jump.
-      expect(jumped).toContain("Sessions ·2 ");
+      expect(jumped).toContain("Sessions (2) ");
       setup.mockInput.pressKey(back);
       const list = await frame();
-      expect(list.split("\n")[0]).toContain("━━ Sessions ·2 ");
+      expect(list.split("\n")[0]).toContain("━━ Sessions (2) ");
       expect(list.split("\n")[0]).toContain("scope: all repos");
       expect(list).toContain("dev:1.1");
       expect(list).toContain("dev:1.2");
@@ -9308,7 +9308,7 @@ describe("repo scope across views", () => {
     await frame();
     setup.mockInput.pressKey("s");
     const scoped = await frame();
-    expect(scoped.split("\n")[0]).toContain("Sessions ·1/2");
+    expect(scoped.split("\n")[0]).toContain("Sessions (1/2)");
     expect(scoped.split("\n")[0]).toContain("scope: myapp");
     expect(scoped).not.toContain("dev:1.2");
     expect(scoped).toContain("needs attention (0)  +1 waiting in other repos");

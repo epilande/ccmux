@@ -1223,14 +1223,14 @@ describe("fitProjectCell", () => {
     });
   });
 
-  it("appends the worktree marker and caps the branch with ~", () => {
+  it("appends the worktree marker and caps the branch with an ellipsis", () => {
     const out = fitProjectCell(
       { ...base, branch: "feature/really-long-branch", isWorktree: true },
       60,
       8,
     );
-    // 8-char cap: 7 chars + "~", then "+"
-    expect(out.branchLabel).toBe(":feature~+");
+    // 8-char cap: 7 chars + "…", then "+"
+    expect(out.branchLabel).toBe(":feature…+");
   });
 
   it("shrinks the prefix with an ellipsis before touching the dirname", () => {
@@ -1316,21 +1316,23 @@ describe("fitProjectCell", () => {
   it("takes the worktree name below the normal dirname floor to keep the repo", () => {
     // A plain path cell floors the dirname at 5 and would rather drop the
     // prefix; with repo identity in the prefix that trade is backwards.
+    // No branch here: with one, the branch takes the cut instead (see
+    // "never cuts both the path and the branch").
     const out = fitProjectCell(
       {
         prefix: "ccmux/",
         dirname: "parking",
-        branch: "feat/sidebar",
+        branch: null,
         isWorktree: true,
         repoPrefix: true,
       },
-      19,
+      10,
       8,
     );
     expect(out.prefix).toBe("ccmux/");
     expect(displayWidth(out.dirname)).toBeLessThan(5);
     expect(out.dirname.endsWith("…")).toBe(true);
-    expect(cellWidth(out)).toBeLessThanOrEqual(19);
+    expect(cellWidth(out)).toBeLessThanOrEqual(10);
   });
 
   it("drops a repo prefix that no longer names the repo, giving the space back", () => {
@@ -1491,8 +1493,9 @@ describe("fitProjectCell", () => {
       24,
     );
     expect(out.prefix).toBe("ccmux/");
-    expect(out.dirname.startsWith("p")).toBe(true);
-    expect(out.branchLabel.endsWith("~+")).toBe(true);
+    // One mark: the identity stays whole and only the branch is cut.
+    expect(out.dirname).toBe("parking");
+    expect(out.branchLabel).toBe(":feat/side…+");
     expect(cellWidth(out)).toBeLessThanOrEqual(25);
   });
 
@@ -1505,11 +1508,28 @@ describe("fitProjectCell", () => {
     expect(out.branchLabel).toBe("");
   });
 
-  it("shortens the branch as a last resort with a ~ marker", () => {
-    // Tight budget: even after dropping the prefix and flooring the dirname to
-    // its 5-char minimum, the branch still overflows, so step 3 truncates it
-    // with `~` rather than dropping it to "". Exercises the positive
-    // shortenBranchLabel path (avail >= 3), not the zero-budget drop.
+  it("keeps the branch whole while the path context and dirname yield", () => {
+    // The design order on a plain path cell: prefix, then dirname, then
+    // the branch as a last resort. One mark, on the dirname.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "claude-toolkit",
+        branch: "feature-x",
+        isWorktree: false,
+      },
+      20,
+      24,
+    );
+    expect(out.prefix).toBe("");
+    expect(out.dirname).toBe("claude-to…");
+    expect(out.branchLabel).toBe(":feature-x");
+    expect(cellWidth(out)).toBeLessThanOrEqual(20);
+  });
+
+  it("never cuts both the path and the branch", () => {
+    // At 12 the dirname cannot stay whole beside any branch label, so the
+    // branch drops rather than leaving `claude…:featu…`.
     const out = fitProjectCell(
       {
         prefix: "epilande/",
@@ -1520,13 +1540,30 @@ describe("fitProjectCell", () => {
       12,
       24,
     );
-    expect(out.prefix).toBe("");
-    expect(out.dirname.endsWith("…")).toBe(true);
-    // Branch truncated with the `~` marker: neither dropped to "" nor left whole.
-    expect(out.branchLabel).toBe(":featu~");
-    expect(out.branchLabel.endsWith("~")).toBe(true);
-    // The cascade never overshoots its budget.
-    expect(cellWidth(out)).toBeLessThanOrEqual(12);
+    expect(out).toEqual({
+      prefix: "",
+      dirname: "claude-tool…",
+      branchLabel: "",
+    });
+    for (let budget = 4; budget <= 70; budget++)
+      for (const repoPrefix of [false, true]) {
+        const cell = fitProjectCell(
+          {
+            prefix: repoPrefix ? "claude-toolkit/" : "epilande/",
+            dirname: "worktree-detection",
+            branch: "fix/worktree-detection",
+            isWorktree: true,
+            repoPrefix,
+          },
+          budget,
+          24,
+        );
+        const text = cell.prefix + cell.dirname + cell.branchLabel;
+        expect([budget, (text.match(/…|~/g) ?? []).length]).toEqual([
+          budget,
+          Math.min(1, (text.match(/…|~/g) ?? []).length),
+        ]);
+      }
   });
 });
 
@@ -1590,13 +1627,13 @@ describe("fitProjectCell with wide glyphs", () => {
   });
 
   it("caps an emoji branch at maxBranchLen columns", () => {
-    // Six rockets are 12 columns; the 8-column cap keeps three plus the `~`.
+    // Six rockets are 12 columns; the 8-column cap keeps three plus the `…`.
     const out = fitProjectCell(
       { prefix: "", dirname: "app", branch: "🚀🚀🚀🚀🚀🚀", isWorktree: false },
       40,
       8,
     );
-    expect(out.branchLabel).toBe(":🚀🚀🚀~");
+    expect(out.branchLabel).toBe(":🚀🚀🚀…");
     expect(displayWidth(out.branchLabel)).toBeLessThanOrEqual(8 + 1);
   });
 
@@ -1652,7 +1689,7 @@ describe("fitProjectCell with wide glyphs", () => {
       12,
       24,
     );
-    expect(out.branchLabel).toBe(":🚀🚀🚀~+");
+    expect(out.branchLabel).toBe(":🚀🚀🚀…+");
     expect(cellWidth(out)).toBeLessThanOrEqual(12);
   });
 

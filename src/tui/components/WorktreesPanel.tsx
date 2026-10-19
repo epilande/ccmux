@@ -319,16 +319,17 @@ const ROW_PREFIX = 6;
 const NAME_COLUMN_MAX = 28;
 const BRANCH_COLUMN_MAX = 32;
 
-/** A row's name cell, worktree marker included. */
+/** A row's name cell, worktree marker included: `name+`, attached the way
+ *  the session list attaches it to a worktree's branch. */
 export function nameText(entry: WorktreePanelRow): string {
-  return entry.row.isMain ? "⌂ main checkout" : `${entry.row.name} +`;
+  return entry.row.isMain ? "⌂ main checkout" : `${entry.row.name}+`;
 }
 
 /** The name cell fitted to `width`, truncating the name and never the
  *  worktree marker after it. */
 function fitName(entry: WorktreePanelRow, width: number): string {
   if (entry.row.isMain) return truncateText(nameText(entry), width);
-  const marker = " +";
+  const marker = "+";
   return (
     truncateText(entry.row.name, Math.max(1, width - marker.length)) + marker
   );
