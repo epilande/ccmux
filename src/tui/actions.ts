@@ -1,15 +1,39 @@
 export type View = "sessions" | "worktrees" | "start";
 const SESSIONS: readonly View[] = ["sessions"];
 
-/** Public action vocabulary shared by help and view-level keyboard routing.
- *  `views` lists the views that handle a key; absent means every view. */
+/** Never dropped from the footer, at any width. */
+export const PINNED = Number.POSITIVE_INFINITY;
+
+/**
+ * How an action appears on the footer line: its key, the one verb it is
+ * glossed with, and how long it survives a narrowing terminal (lowest rank
+ * drops first, see `fitHints`). A verb differs by view only where the key
+ * does something different there: `x` kills sessions but removes worktrees,
+ * and `q` quits from Sessions but goes back from the other views.
+ */
+export interface FooterHint {
+  key: string;
+  verb: string | Readonly<Record<View, string>>;
+  rank: number;
+}
+
+/** Public action vocabulary shared by help, the footer and view-level
+ *  keyboard routing. `views` lists the views that handle a key; absent means
+ *  every view. `hint` puts the action on the footer, in registry order. */
 export const ACTIONS = [
-  { id: "move", key: "j/k ↑/↓", desc: "Move cursor", section: "Navigation" },
+  {
+    id: "move",
+    key: "j/k ↑/↓",
+    desc: "Move cursor",
+    section: "Navigation",
+    hint: { key: "j/k", verb: "nav", rank: 5 },
+  },
   {
     id: "views",
     key: "h / l",
     desc: "Previous / next view",
     section: "Navigation",
+    hint: { key: "h/l", verb: "views", rank: PINNED },
   },
   {
     id: "edges",
@@ -23,12 +47,14 @@ export const ACTIONS = [
     key: "Enter",
     desc: "Go / toggle group",
     section: "Navigation",
+    hint: { key: "enter", verb: "go", rank: 5 },
   },
   {
     id: "scope",
     key: "s",
     desc: "All repos / this repo",
     section: "Navigation",
+    hint: { key: "s", verb: "scope", rank: PINNED },
   },
   {
     id: "search",
@@ -36,8 +62,15 @@ export const ACTIONS = [
     desc: "Filter",
     section: "Navigation",
     views: ["sessions", "start"] as readonly View[],
+    hint: { key: "/", verb: "search", rank: 4 },
   },
-  { id: "mark", key: "Space", desc: "Mark row / group", section: "Actions" },
+  {
+    id: "mark",
+    key: "Space",
+    desc: "Mark row / group",
+    section: "Actions",
+    hint: { key: "space", verb: "mark", rank: 2 },
+  },
   {
     id: "markAll",
     key: "a / A",
@@ -49,14 +82,32 @@ export const ACTIONS = [
     key: "x / X",
     desc: "Kill or remove / all",
     section: "Actions",
+    hint: {
+      key: "x",
+      verb: { sessions: "kill", worktrees: "remove", start: "kill" },
+      rank: 5,
+    },
   },
-  { id: "new", key: "n", desc: "New session here", section: "Actions" },
-  { id: "start", key: "N", desc: "Start from PR or issue", section: "Actions" },
+  {
+    id: "new",
+    key: "n",
+    desc: "New session here",
+    section: "Actions",
+    hint: { key: "n", verb: "new", rank: 2 },
+  },
+  {
+    id: "start",
+    key: "N",
+    desc: "Start from PR or issue",
+    section: "Actions",
+    hint: { key: "N", verb: "start", rank: 3 },
+  },
   {
     id: "worktrees",
     key: "W",
     desc: "Worktrees in this repo",
     section: "Actions",
+    hint: { key: "W", verb: "worktrees", rank: 3 },
   },
   {
     id: "copy",
@@ -65,13 +116,26 @@ export const ACTIONS = [
     section: "Actions",
   },
   { id: "open", key: "o", desc: "Open on GitHub", section: "Actions" },
-  { id: "restart", key: "r", desc: "Restart session", section: "Actions" },
-  { id: "refresh", key: "R", desc: "Refresh / reconnect", section: "Actions" },
+  {
+    id: "restart",
+    key: "r",
+    desc: "Restart session",
+    section: "Actions",
+    hint: { key: "r", verb: "restart", rank: 4 },
+  },
+  {
+    id: "refresh",
+    key: "R",
+    desc: "Refresh / reconnect",
+    section: "Actions",
+    hint: { key: "R", verb: "refresh", rank: 1 },
+  },
   {
     id: "review",
     key: "d / D",
     desc: "Working tree / branch",
     section: "Actions",
+    hint: { key: "d/D", verb: "review", rank: 1 },
   },
   {
     id: "menu",
@@ -107,6 +171,9 @@ export const ACTIONS = [
     desc: "Cycle group-by",
     section: "Groups",
     views: SESSIONS,
+    // Its verb is the live grouping (`b group:project`), filled by the
+    // footer: it says which reading of Sessions is on screen.
+    hint: { key: "b", verb: "group", rank: 5 },
   },
   {
     id: "moveGroup",
@@ -135,6 +202,7 @@ export const ACTIONS = [
     desc: "Toggle preview",
     section: "Preview",
     views: SESSIONS,
+    hint: { key: "P", verb: "preview", rank: 4 },
   },
   {
     id: "previewFocus",
@@ -157,9 +225,32 @@ export const ACTIONS = [
     section: "Preview",
     views: SESSIONS,
   },
-  { id: "help", key: "?", desc: "Help", section: "Other" },
-  { id: "back", key: "q / Esc", desc: "Back, then quit", section: "Other" },
-] as const;
+  {
+    id: "help",
+    key: "?",
+    desc: "Help",
+    section: "Other",
+    hint: { key: "?", verb: "help", rank: PINNED },
+  },
+  {
+    id: "back",
+    key: "q / Esc",
+    desc: "Back, then quit",
+    section: "Other",
+    hint: {
+      key: "q",
+      verb: { sessions: "quit", worktrees: "back", start: "back" },
+      rank: PINNED,
+    },
+  },
+] as const satisfies readonly {
+  id: string;
+  key: string;
+  desc: string;
+  section: string;
+  views?: readonly View[];
+  hint?: FooterHint;
+}[];
 export const VIEWS: View[] = ["sessions", "worktrees", "start"];
 export function nextView(view: View, delta: number): View {
   return VIEWS[(VIEWS.indexOf(view) + delta + VIEWS.length) % VIEWS.length]!;

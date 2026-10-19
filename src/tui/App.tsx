@@ -4262,7 +4262,6 @@ export function App(props: AppProps) {
             confirmMode={store.state.confirmMode}
             helpMode={store.state.showHelp}
             previewFocused={store.state.previewFocused}
-            persistent={props.persistent}
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
@@ -4334,6 +4333,7 @@ export function App(props: AppProps) {
               // the sidebar has neither the room nor the focus for — the same
               // reason its `d` key is inert on a session row.
               onReview={props.sidebar ? undefined : reviewWorktree}
+              reviewable={reviewEnabled && !props.sidebar}
             />
           )}
         </Show>
@@ -4395,6 +4395,7 @@ export function App(props: AppProps) {
                         }),
                       })
               }
+              reviewable={reviewEnabled && !props.sidebar}
               repo={picker().repo}
               cwd={pickerCwd()}
               compact={props.sidebar}

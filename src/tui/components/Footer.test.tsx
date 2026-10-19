@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { Footer, fitHints, defaultHints } from "./Footer";
+import { Footer, fitHints, footerHints, hintLine } from "./Footer";
+import { ACTIONS } from "../actions";
 import { DEFAULT_GROUP_BY, type GroupBy } from "../../lib/preferences";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -15,7 +16,6 @@ async function renderFooter(props: {
   confirmMode?: boolean;
   helpMode?: boolean;
   previewFocused?: boolean;
-  persistent?: boolean;
   groupBy?: GroupBy;
   newSessionMode?: boolean;
   newSessionOption?: "focused" | "dropdown";
@@ -30,7 +30,6 @@ async function renderFooter(props: {
         confirmMode={props.confirmMode}
         helpMode={props.helpMode}
         previewFocused={props.previewFocused}
-        persistent={props.persistent}
         groupBy={props.groupBy}
         newSessionMode={props.newSessionMode}
         newSessionOption={props.newSessionOption}
@@ -77,14 +76,9 @@ describe("Footer", () => {
     expect(frame).toContain("keys sent to pane");
   });
 
-  it("shows switch label when persistent", async () => {
-    const frame = await renderFooter({ persistent: true });
-    expect(frame).toContain("switch");
-  });
-
-  it("shows select label when not persistent", async () => {
-    const frame = await renderFooter({ persistent: false });
-    expect(frame).toContain("select");
+  it("glosses enter with the same verb as every other view", async () => {
+    const frame = await renderFooter({});
+    expect(frame).toContain("enter go");
   });
 
   it("shows current groupBy mode", async () => {
@@ -110,7 +104,8 @@ describe("Footer", () => {
   });
 
   it("shows the review hint when reviewable", async () => {
-    const frame = await renderFooter({ reviewable: true, width: 160 });
+    // Rank 1: it is on the line once every hint fits.
+    const frame = await renderFooter({ reviewable: true, width: 200 });
     expect(frame).toContain("d/D review");
   });
 
@@ -210,9 +205,88 @@ describe("Footer", () => {
   });
 });
 
+describe("footerHints", () => {
+  const VIEWS = ["sessions", "worktrees", "start"] as const;
+  const texts = (view: (typeof VIEWS)[number]) =>
+    footerHints(view, { groupBy: "project", reviewable: true }).map(
+      (segment) => segment.text,
+    );
+  const keyOf = (text: string) => text.split(" ")[0]!;
+
+  it("lists every view's hints in the registry's order", () => {
+    const order = ACTIONS.flatMap((action) =>
+      "hint" in action ? [action.hint.key] : [],
+    );
+    for (const view of VIEWS) {
+      const keys = texts(view).map(keyOf);
+      const positions = keys.map((key) => (order as string[]).indexOf(key));
+      expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    }
+  });
+
+  it("uses one verb per key everywhere, except where the key differs by view", () => {
+    const verbs = new Map<string, Set<string>>();
+    for (const view of VIEWS)
+      for (const text of texts(view)) {
+        const key = keyOf(text);
+        verbs.set(key, (verbs.get(key) ?? new Set()).add(text));
+      }
+    for (const [key, seen] of verbs) {
+      if (key === "x" || key === "q") continue;
+      expect([key, seen.size]).toEqual([key, 1]);
+    }
+    expect(texts("sessions")).toContain("x kill");
+    expect(texts("worktrees")).toContain("x remove");
+    expect(texts("sessions")).toContain("q quit");
+    expect(texts("start")).toContain("q back");
+  });
+
+  it("teaches each view the keys it handles", () => {
+    expect(texts("sessions")).toEqual([
+      "j/k nav",
+      "h/l views",
+      "enter go",
+      "s scope",
+      "/ search",
+      "space mark",
+      "x kill",
+      "n new",
+      "N start",
+      "W worktrees",
+      "r restart",
+      "R refresh",
+      "d/D review",
+      "b group:project",
+      "P preview",
+      "? help",
+      "q quit",
+    ]);
+    expect(texts("worktrees")).not.toContain("/ search");
+    expect(texts("worktrees")).not.toContain("P preview");
+    expect(texts("start")).toContain("/ search");
+    expect(texts("start")).not.toContain("b group:project");
+    expect(
+      footerHints("sessions", { reviewable: false }).map((s) => s.text),
+    ).not.toContain("d/D review");
+  });
+
+  it("keeps the sidebar's session list to the keys it has", () => {
+    const sidebar = footerHints("sessions", { sidebar: true }).map(
+      (s) => s.text,
+    );
+    expect(sidebar).not.toContain("h/l views");
+    expect(sidebar).not.toContain("P preview");
+  });
+});
+
 describe("fitHints", () => {
-  const hints = () =>
-    defaultHints({ groupBy: "project", reviewable: true, persistent: false });
+  const hints = (view: "sessions" | "worktrees" | "start" = "sessions") =>
+    footerHints(view, { groupBy: "project", reviewable: true });
+  const PINNED_TEXT = {
+    sessions: ["h/l views", "s scope", "? help", "q quit"],
+    worktrees: ["h/l views", "s scope", "? help", "q back"],
+    start: ["h/l views", "s scope", "? help", "q back"],
+  };
 
   it("returns every hint when they all fit", () => {
     const full = fitHints(hints(), 500);
@@ -221,65 +295,37 @@ describe("fitHints", () => {
     }
   });
 
-  it("never exceeds the width it is given", () => {
-    for (let width = 8; width <= 130; width++) {
-      expect(fitHints(hints(), width).length).toBeLessThanOrEqual(
-        Math.max(width, "q quit".length),
-      );
-    }
+  it("never drops views, scope, help or quit, in any view, at any width", () => {
+    for (const view of ["sessions", "worktrees", "start"] as const)
+      for (let width = 40; width <= 200; width++) {
+        const line = fitHints(hints(view), width);
+        expect(line.length).toBeLessThanOrEqual(width);
+        for (const text of PINNED_TEXT[view]) expect(line).toContain(text);
+      }
   });
 
-  it("drops the lowest-ranked hints first and keeps the exits longest", () => {
-    // `? help` and `q quit` are how a stuck user gets out, so they outlive
-    // every view toggle no matter how narrow the terminal gets.
-    for (let width = 20; width <= 118; width++) {
-      const line = fitHints(hints(), width);
-      expect(line).toContain("? help");
-      expect(line).toContain("q quit");
-    }
-    // The view toggles are among the first to go.
-    const tight = fitHints(hints(), 60);
-    expect(tight).not.toContain("P preview");
+  it("shrinks the pinned four to their keys, left first, when they alone overflow", () => {
+    // The sidebar overlay's 36 columns: one short of all four words.
+    expect(fitHints(hints("worktrees"), 36)).toBe(
+      "h/l · s scope · ? help · q back",
+    );
+    expect(fitHints(hints("worktrees"), 20)).toBe("h/l · s · ? · q back");
+    expect(fitHints(hints("worktrees"), 10)).toBe("h/l · s · ? · q");
   });
 
-  it("gives up the hints the row menu also teaches first", () => {
-    // `r` and `x` are named on the row itself by the `m` menu, so the footer
-    // stops teaching them before it gives up a mode with no other home
-    // (`/ search`) or the only advertisement the review integration has
-    // (`d/D review`). Widths, not ranks, because the rank scale is an
-    // implementation detail and the drop ORDER is the behaviour.
-    const dropped = (width: number) =>
-      hints()
-        .map((segment) => segment.text)
-        .filter((text) => !fitHints(hints(), width).includes(text));
-
-    // The first column the line has to give up takes the Worktrees pointer
-    // (the panel it opens teaches its own keys), the next takes Kill, and the
-    // one after that Restart. (Listed in display order, which is what the
-    // helper reads them off in — Restart sits left of Kill on the line, and
-    // both sit left of Worktrees.)
-    expect(dropped(167)).toEqual(["W worktrees"]);
-    expect(dropped(153)).toEqual(["x kill", "W worktrees"]);
-    expect(dropped(141)).toEqual(["r restart", "x kill", "W worktrees"]);
-    // Both gone while everything they were ranked against is still there.
-    const line = fitHints(hints(), 141);
-    expect(line).toContain("/ search");
-    expect(line).toContain("d/D review");
-    expect(line).toContain("P preview");
-    expect(line).toContain("b group:project");
+  it("keeps preview, restart and kill on a 150-column session list", () => {
+    const line = fitHints(hints(), 148);
+    for (const text of ["P preview", "r restart", "x kill", "N start"])
+      expect(line).toContain(text);
+    // What a 150-column line gives up: the hints with other homes.
+    expect(line).not.toContain("R refresh");
+    expect(line).not.toContain("d/D review");
   });
 
-  it("keeps the two view toggles longer than the two menu-backed actions", () => {
-    // The tie-break inside rank 1 is positional, so this is the assertion
-    // that would catch a reshuffle of `defaultHints` silently reversing it.
-    // The width is the narrowest that still holds the two toggles, so it
-    // tracks the line's length: it moved from 100 when `d review` became
-    // `d/D review`.
-    const line = fitHints(hints(), 137);
-    expect(line).not.toContain("x kill");
-    expect(line).not.toContain("r restart");
-    expect(line).toContain("P preview");
-    expect(line).toContain("b group:project");
+  it("keeps j/k on the Worktrees line", () => {
+    const line = fitHints(hints("worktrees"), 118);
+    expect(line).toContain("j/k nav");
+    expect(line).toContain("q back");
   });
 
   it("drops whole hints rather than truncating mid-word", () => {
@@ -296,8 +342,32 @@ describe("fitHints", () => {
     const positions = shown.map((text) => order.indexOf(text));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
+});
 
-  it("keeps at least one hint even at an absurd width", () => {
-    expect(fitHints(hints(), 1)).toBe("q quit");
+describe("hintLine", () => {
+  it("fits droppable hints around a note that leaves the pinned four whole", () => {
+    const { note, hints } = hintLine("worktrees", 120, {
+      note: "scanning…",
+    });
+    expect(note).toBe("scanning…  ");
+    expect(hints).toContain("j/k nav");
+    expect(hints).toContain("q back");
+    expect((note + hints).length).toBeLessThanOrEqual(120);
+  });
+
+  it("shrinks the pinned four to keys before cutting a long note", () => {
+    const error = "daemon is out of date (restart it: ccmux daemon restart)";
+    const { note, hints } = hintLine("start", 88, { note: error });
+    expect(note).toBe(`${error}  `);
+    expect(hints).toBe("h/l · s · ? help · q back");
+  });
+
+  it("truncates a note that does not fit even then, and keeps the keys", () => {
+    const { note, hints } = hintLine("start", 50, {
+      note: "gh pr list exited 1: no git remotes found in this repository at all",
+    });
+    expect(note.endsWith("…  ")).toBe(true);
+    expect(hints).toBe("h/l · s · ? · q");
+    expect((note + hints).length).toBeLessThanOrEqual(50);
   });
 });

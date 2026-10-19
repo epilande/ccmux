@@ -1123,9 +1123,10 @@ describe("Worktrees scrollbar thumb", () => {
       height: 40,
       embedded: true,
     });
-    // 62 lines (header + 61 rows) in a 38-line viewport: 76 * 38 / 62 = 46.
-    // The pinned slider drew 3; OpenTUI's clamp alone draws 38 (half).
-    expect(thumb(await h.frame())).toBe(46);
+    // 62 lines (header + 61 rows) in a 37-line viewport (the footer bar
+    // takes two): 74 * 37 / 62 = 44. The pinned slider drew 3; OpenTUI's
+    // clamp alone draws 37 (half).
+    expect(thumb(await h.frame())).toBe(44);
   });
   it("resizes when the list grows from fitting and when it shrinks", async () => {
     let rows = many(10);
@@ -1140,11 +1141,11 @@ describe("Worktrees scrollbar thumb", () => {
     rows = many(61);
     await h.keys.pressKey("R");
     await h.frame();
-    expect(thumb(await h.frame())).toBe(46);
+    expect(thumb(await h.frame())).toBe(44);
     rows = many(45);
     await h.keys.pressKey("R");
     await h.frame();
-    // 76 * 38 / 46 = 62, where the clamp would again draw 38.
-    expect(thumb(await h.frame())).toBe(62);
+    // 74 * 37 / 46 = 59.5, floored to 59, where the clamp would again draw 37.
+    expect(thumb(await h.frame())).toBe(59);
   });
 });

@@ -65,7 +65,7 @@ import {
   type VisualLayout,
 } from "./row-segments";
 
-import { fitHints } from "./Footer";
+import { CONFIRM_HINTS, FooterBar, HintLine } from "./Footer";
 
 import { useStatusIcon } from "../utils/useStatusIcon";
 
@@ -152,6 +152,8 @@ interface WorktreesPanelProps {
   }) => void;
   /** Explicit so tests cannot launch a browser or write the real clipboard. */
   effects: PanelEffects;
+  /** Whether `d`/`D` review is installed, for the footer's hint. */
+  reviewable?: boolean;
 }
 
 export function partitionSelection(
@@ -1126,6 +1128,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const header = `▾ ${group.repoName} (${rows.length})   ${branch}${badge ? `   ${badge}` : ""}`;
     return displayWidth(header) <= width() - 2 ? branch : undefined;
   };
+  const footerNote = () =>
+    note() || scanError() || (!scan() ? "scanning…" : undefined);
   const renderRow = (entry: WorktreePanelRow) => {
     const status = () => leadStatus(rowSessions(entry));
     const spinner = useStatusIcon(
@@ -1259,14 +1263,20 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       borderColor={props.embedded ? undefined : theme.border}
       flexDirection="column"
       paddingLeft={0}
-      paddingRight={1}
+      // Embedded, the footer bar runs edge to edge like the session list's,
+      // so the list's right margin moves onto the list itself.
+      paddingRight={props.embedded ? 0 : 1}
     >
       <Show when={!props.embedded}>
         <Text fg={theme.text}>
           <b>Worktrees</b>
         </Text>
       </Show>
-      <box flexGrow={1} flexDirection="column">
+      <box
+        flexGrow={1}
+        flexDirection="column"
+        paddingRight={props.embedded ? 1 : 0}
+      >
         <Show when={phase() === "loading"}>
           <Text fg={theme.overlay}>Reading worktrees…</Text>
         </Show>
@@ -1361,26 +1371,43 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           </scrollbox>
         </Show>
       </box>
-      <Text fg={note() || scanError() ? theme.yellow : theme.overlay}>
-        {truncateText(
-          note() ||
-            scanError() ||
-            (!scan() ? "scanning…  " : "") +
-              fitHints(
-                [
-                  { text: "h/l views", rank: 2 },
-                  { text: "enter open", rank: 4 },
-                  { text: "space mark", rank: 3 },
-                  { text: "x remove", rank: 3 },
-                  { text: "s scope", rank: 2 },
-                  { text: "R refresh", rank: 1 },
-                  { text: "? help", rank: 3 },
-                ],
-                width(),
-              ),
-          width(),
-        )}
-      </Text>
+      {/* The session list's footer, built from the same registry: same
+          order, same verbs, the same pinned four. A note (a flash, a scan
+          error, the scan still running) leads it without displacing those. */}
+      <Show
+        when={props.embedded}
+        fallback={
+          <HintLine
+            view="worktrees"
+            width={width()}
+            sidebar={props.compact}
+            reviewable={props.reviewable}
+            note={footerNote()}
+            noteColor={note() || scanError() ? theme.yellow : theme.overlay}
+          />
+        }
+      >
+        <FooterBar>
+          <Show
+            when={phase() === "confirm" || phase() === "dirty"}
+            fallback={
+              <HintLine
+                view="worktrees"
+                width={width()}
+                reviewable={props.reviewable}
+                note={footerNote()}
+                noteColor={note() || scanError() ? theme.yellow : theme.overlay}
+              />
+            }
+          >
+            <Text fg={theme.overlay}>
+              {phase() === "dirty"
+                ? "y include · n skip · esc cancel"
+                : CONFIRM_HINTS}
+            </Text>
+          </Show>
+        </FooterBar>
+      </Show>
       <Show when={phase() === "dirty" && dirtyQueue()[0]}>
         {(candidate: () => PruneCandidate) => (
           <RemovalConfirm

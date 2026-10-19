@@ -792,14 +792,17 @@ describe("SourcePicker filter", () => {
 
   it("hints the nav keys in nav mode and the input keys in filter mode", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
-    expect(await harness.frame()).toContain("/ filter");
+    // The session list's verb for the same key.
+    expect(await harness.frame()).toContain("/ search");
 
     harness.keys.pressKey("/");
     const filtering = await harness.frame();
     // `q` types here, so the hint that names it must go: the surface would
-    // otherwise advertise a key that does something else entirely.
+    // otherwise advertise a key that does something else entirely. What
+    // replaces it is the session search's own line.
+    expect(filtering).toContain("type to search");
     expect(filtering).toContain("esc cancel");
-    expect(filtering).not.toContain("q close");
+    expect(filtering).not.toContain("q back");
   });
 
   /**

@@ -8358,7 +8358,7 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressKey("l");
       expect(await frame()).toContain(" ✓");
       setup.mockInput.pressKey("l");
-      expect(await frame()).toContain("/ filter");
+      expect(await frame()).toContain("━━ Start");
       setup.mockInput.pressKey("h");
       expect(await frame()).toContain(" ✓");
       setup.mockInput.pressKey("?");
@@ -9311,5 +9311,56 @@ describe("repo scope across views", () => {
     setup.mockInput.pressKey("l");
     setup.mockInput.pressKey("h");
     expect((await frame()).split("\n")[0]).toContain("scope: myapp");
+  });
+});
+
+describe("one footer across views", () => {
+  it("draws the same registry-built line, pinned four included, on every view", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.includes("prune-candidates"))
+        return Response.json({ candidates: [], skipped: [] });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
+    try {
+      await renderApp(150, 20, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [mockEnrichedSession({ id: "s1", tmuxPane: "%1" })],
+        null,
+      );
+      const footer = async () => {
+        await new Promise((done) => setTimeout(done, 0));
+        await setup.renderOnce();
+        const lines = setup.captureCharFrame().split("\n");
+        // The bar's rule, then its line.
+        expect(lines.at(-3)?.trim()).toMatch(/^─+$/);
+        return lines.at(-2)!;
+      };
+      const sessions = await footer();
+      for (const text of ["j/k nav", "h/l views", "s scope", "? help"])
+        expect(sessions).toContain(text);
+      expect(sessions).toContain("q quit");
+      for (const text of ["P preview", "r restart", "x kill"])
+        expect(sessions).toContain(text);
+      setup.mockInput.pressKey("l");
+      const worktrees = await footer();
+      for (const text of ["j/k nav", "h/l views", "s scope", "? help"])
+        expect(worktrees).toContain(text);
+      expect(worktrees).toContain("x remove");
+      expect(worktrees).toContain("q back");
+      setup.mockInput.pressKey("l");
+      const start = await footer();
+      for (const text of ["h/l views", "s scope", "? help", "q back"])
+        expect(start).toContain(text);
+      // Same order: every hint the views share sits in the same sequence.
+      const shared = ["j/k nav", "h/l views", "enter go", "s scope"];
+      for (const line of [sessions, worktrees, start]) {
+        const at = shared.map((text) => line.indexOf(text));
+        expect(at).toEqual([...at].sort((a, b) => a - b));
+      }
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

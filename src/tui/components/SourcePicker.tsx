@@ -30,7 +30,7 @@ import { truncateText } from "../utils/format";
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { fitHints } from "./Footer";
+import { FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
 import { describeChecks, describeReview, isPRRowKey } from "./pr-rows";
 import {
   fitSegments,
@@ -90,6 +90,8 @@ export interface SourcePickerProps {
   memory?: ViewMemory;
   onRemember?: (memory: ViewMemory) => void;
   embedded?: boolean;
+  /** Whether `d`/`D` review is installed, for the footer's hint. */
+  reviewable?: boolean;
   enabled?: boolean;
   onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
   onScope?: (repo: string | null) => void;
@@ -842,27 +844,25 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       : emptyStateText(visible(), filter()),
   );
 
-  const hints = createMemo(() =>
-    fitHints(
-      filtering()
-        ? [
-            { text: "enter start", rank: 3 },
-            { text: "ctrl-n/p move", rank: 2 },
-            // "cancel", not "done": Esc drops the query, the same word the
-            // session picker's footer uses for the same key.
-            { text: "esc cancel", rank: 3 },
-          ]
-        : [
-            { text: "/ filter", rank: 3 },
-            { text: "enter start", rank: 3 },
-            { text: "j/k move", rank: 1 },
-            { text: "R refresh", rank: 1 },
-            { text: "q close", rank: 2 },
-          ],
-      contentWidth(),
-    ),
+  const footerLine = () => (
+    <Show
+      when={!filtering()}
+      fallback={
+        <Text fg={theme.overlay}>
+          {truncateText(SEARCH_HINTS, contentWidth())}
+        </Text>
+      }
+    >
+      <HintLine
+        view="start"
+        width={contentWidth()}
+        sidebar={props.compact}
+        reviewable={props.reviewable}
+        note={note() ?? sourceNotice() ?? undefined}
+        noteColor={note() ? theme.yellow : theme.overlay}
+      />
+    </Show>
   );
-
   const sourceNotice = () =>
     prError() ??
     issueError() ??
@@ -1003,7 +1003,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       borderColor={props.embedded ? undefined : theme.border}
       flexDirection="column"
       paddingLeft={0}
-      paddingRight={1}
+      // Embedded, the footer bar runs edge to edge like the session list's,
+      // so the list's right margin moves onto the rows above it.
+      paddingRight={props.embedded ? 0 : 1}
     >
       <Show when={!props.embedded}>
         <box width="100%" height={1} flexDirection="row">
@@ -1018,7 +1020,12 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
           The footer's `/ filter` hint is what teaches the key, which is how
           the session picker teaches it too. */}
       <Show when={filtering()}>
-        <box width="100%" height={1} flexDirection="row">
+        <box
+          width="100%"
+          height={1}
+          flexDirection="row"
+          paddingRight={props.embedded ? 1 : 0}
+        >
           <Text fg={theme.overlay} width={2}>
             {"/ "}
           </Text>
@@ -1043,13 +1050,17 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         </box>
       </Show>
 
-      <box flexGrow={1} flexDirection="column">
+      <box
+        flexGrow={1}
+        flexDirection="column"
+        paddingRight={props.embedded ? 1 : 0}
+      >
         <Show when={phase() === "error"}>
           <box paddingTop={1} flexDirection="column">
             <Text fg={theme.red}>
               {truncateText(error() ?? "", contentWidth())}
             </Text>
-            <Text fg={theme.overlay}>R retry · q close</Text>
+            <Text fg={theme.overlay}>R retry · q back</Text>
           </box>
         </Show>
 
@@ -1114,11 +1125,21 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         </Show>
       </box>
 
-      <box width="100%" height={1} flexDirection="row">
-        <Text fg={note() ? theme.yellow : theme.overlay}>
-          {truncateText(note() ?? sourceNotice() ?? hints(), contentWidth())}
-        </Text>
-      </box>
+      {/* The session list's footer, built from the same registry: same
+          order, same verbs, the same pinned four. While the filter owns the
+          keys it teaches the session search's keys instead. A note (a flash,
+          a source still loading or failing) leads the hints, never
+          displacing the pinned four. */}
+      <Show
+        when={props.embedded}
+        fallback={
+          <box width="100%" height={1} flexDirection="row">
+            {footerLine()}
+          </box>
+        }
+      >
+        <FooterBar>{footerLine()}</FooterBar>
+      </Show>
     </box>
   );
 };
