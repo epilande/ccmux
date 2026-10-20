@@ -40,17 +40,19 @@ describe("test isolation", () => {
   });
 
   it("keeps every ccmux-owned path out of the real config dir", () => {
-    const paths = [
+    const unmocked = [
       CCMUX_DIR,
       LOG_FILE,
       PID_FILE,
       PREFS_FILE,
-      STATE_FILE,
-      MARKERS_DIR,
       getPidFilePath(),
     ];
-    for (const p of paths) {
-      expect(isInside(p, testHome!)).toBe(true);
+    // Several test files `mock.module` lib/config with their own temp
+    // STATE_FILE / MARKERS_DIR, and bun's module mocks leak across files, so
+    // these two depend on load order: only "not the real dir" holds for them.
+    const mockedElsewhere = [STATE_FILE, MARKERS_DIR];
+    for (const p of unmocked) expect(isInside(p, testHome!)).toBe(true);
+    for (const p of [...unmocked, ...mockedElsewhere]) {
       expect(isInside(p, REAL_CCMUX_DIR)).toBe(false);
     }
   });
