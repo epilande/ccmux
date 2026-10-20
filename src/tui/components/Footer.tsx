@@ -85,7 +85,8 @@ export function fitHints(segments: HintSegment[], width: number): string {
  * The footer's hints for `view`, built from the `ACTIONS` registry: every
  * action with a `hint` that the view handles, in registry order, so the
  * order and the verbs are the same on every view. `views`, `scope`, `help`
- * and `quit`/`back` are pinned.
+ * and `quit`/`back` are pinned. A view leaves off the hint that opens it
+ * (`N start` on Start, `W worktrees` on Worktrees).
  */
 export function footerHints(
   view: View,
@@ -96,6 +97,7 @@ export function footerHints(
     if (!("hint" in action)) continue;
     if ("views" in action && !action.views.includes(view)) continue;
     if (action.id === "review" && !opts.reviewable) continue;
+    if ("opens" in action.hint && action.hint.opens === view) continue;
     // The sidebar's session list neither cycles views nor previews.
     if (opts.sidebar && view === "sessions" && action.id === "views") continue;
     if (opts.sidebar && action.id === "preview") continue;

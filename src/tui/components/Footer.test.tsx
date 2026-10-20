@@ -281,6 +281,20 @@ describe("footerHints", () => {
     ).not.toContain("d/D review");
   });
 
+  it("leaves off the hint for the view it is on", () => {
+    expect(texts("start")).not.toContain("N start");
+    expect(texts("start")).toContain("W worktrees");
+    expect(texts("worktrees")).not.toContain("W worktrees");
+    expect(texts("worktrees")).toContain("N start");
+    expect(texts("sessions")).toContain("N start");
+    expect(texts("sessions")).toContain("W worktrees");
+    // The sidebar's overlays are views too.
+    const overlay = (view: "worktrees" | "start") =>
+      footerHints(view, { sidebar: true }).map((s) => s.text);
+    expect(overlay("start")).not.toContain("N start");
+    expect(overlay("worktrees")).not.toContain("W worktrees");
+  });
+
   it("keeps the sidebar's session list to the keys it has", () => {
     const sidebar = footerHints("sessions", { sidebar: true }).map(
       (s) => s.text,

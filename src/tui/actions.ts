@@ -15,6 +15,9 @@ export interface FooterHint {
   key: string;
   verb: string | Readonly<Record<View, string>>;
   rank: number;
+  /** The view the key opens. Its hint is left off that view's own footer,
+   *  where it would only point at the screen already showing. */
+  opens?: View;
 }
 
 /** Public action vocabulary shared by help, the footer and view-level
@@ -100,14 +103,14 @@ export const ACTIONS = [
     key: "N",
     desc: "Start from PR or issue",
     section: "Actions",
-    hint: { key: "N", verb: "start", rank: 3 },
+    hint: { key: "N", verb: "start", rank: 3, opens: "start" },
   },
   {
     id: "worktrees",
     key: "W",
     desc: "Worktrees in this repo",
     section: "Actions",
-    hint: { key: "W", verb: "worktrees", rank: 3 },
+    hint: { key: "W", verb: "worktrees", rank: 3, opens: "worktrees" },
   },
   {
     id: "copy",
