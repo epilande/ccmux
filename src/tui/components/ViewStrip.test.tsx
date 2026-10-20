@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import {
-  rightSegments,
+  fitStrip,
   ViewStrip,
   type StripStatus,
 } from "./ViewStrip";
@@ -211,18 +211,19 @@ it("sums the repos that answered and marks the total partial when one never did"
   expect(frame).toContain("Start (11~)");
 });
 
-// Tabs cost 38 columns here (`── Sessions (2) ── Worktrees ── Start `), the
-// padding 2 and the scope dressing 11: the scope's name gets `width - 51`.
-// Below the tabs' own width the strip CLIPS (line 2 must stay blank: OpenTUI
-// wraps an overflowing row onto the next line, which here is the head line).
+// The scope's name is never cut while anything else can give way. Tabs cost
+// 38 columns here (`── Sessions (2) ── Worktrees ── Start `), the padding 2
+// and the right end's dressing 4. Below the tabs' own width the strip CLIPS
+// (line 2 must stay blank: OpenTUI wraps an overflowing row onto the next
+// line, which here is the head line).
 for (const [width, expected] of [
-  [37, null],
-  [40, null],
-  [52, null],
-  [53, "s…"],
-  [57, "scope"],
+  [57, " ━━ Sessions (2) ── Worktrees ── Start ─ scope: scope ──"],
+  [56, " ━━ Sessions (2) ── Worktrees ── Start ──── in scope ──"],
+  [52, " ━━ Sessions ── Worktrees ── Start ──── in scope ──"],
+  [48, " ━━ Sessions ── Worktrees ── St ─── in scope ──"],
+  [44, " ━━ Sessions ── Wt ── St ────── in scope ──"],
 ] as const) {
-  it(`fits the scope into a ${width - 51}-column budget`, async () => {
+  it(`keeps the scope's name whole at ${width} columns`, async () => {
     setup = await testRender(
       () => (
         <ViewStrip
@@ -238,15 +239,8 @@ for (const [width, expected] of [
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
     const line = frame.split("\n")[0]!.trimEnd();
-    if (expected === null) {
-      // A one-column budget would draw a lone `…`; the scope is dropped and
-      // the rule runs to the edge instead (or the tabs are clipped).
-      expect(line).not.toContain("scope:");
-      expect(line.length).toBeLessThanOrEqual(width); // clipped, not wrapped
-    } else {
-      expect(line.endsWith(` scope: ${expected} ──`)).toBe(true);
-      expect(line.length).toBe(width - 1);
-    }
+    expect(line).toBe(expected);
+    expect(line.length).toBe(width - 1);
     expect(frame.split("\n")[1]?.trim()).toBe("");
   });
 }
@@ -353,62 +347,162 @@ it("orders every signal ahead of the scope and keeps the rule edge to edge", asy
   expect(line.length).toBe(119);
 });
 
-describe("rightSegments priority", () => {
+describe("fitStrip priority", () => {
   const all: StripStatus = {
     connectionState: "reconnecting",
     daemonDegraded: true,
     invokeInFlight: 2,
     hideIdle: true,
   };
-  const fit = (budget: number, status: StripStatus = all) => {
-    const { signals, scope } = rightSegments(status, "all repos", budget);
-    return [...signals.map((s) => s.text), ...(scope ? [`scope: ${scope}`] : [])]
-      .join(" · ");
+  const counts = { sessions: " (12/16)", worktrees: " (9)", start: " (124)" };
+  const line = (
+    width: number,
+    status: StripStatus = all,
+    name = "dotfiles",
+  ) => {
+    const fit = fitStrip({
+      view: "sessions",
+      counts,
+      status,
+      scopeName: name,
+      width,
+    });
+    const tabs = (["sessions", "worktrees", "start"] as const)
+      .map((v) => `${fit.tabs[v].name}${fit.tabs[v].count}`)
+      .join(" ");
+    const right = [
+      ...fit.signals.map((s) => s.text),
+      ...(fit.scope ? [fit.prefix + fit.scope] : []),
+    ].join(" · ");
+    return `${tabs} | ${right}`;
   };
-  const full = "● reconnecting · ▲ degraded · 2 invoking · active";
-  const cols = full.length;
 
-  it("truncates, then drops, the scope's name before any signal", () => {
-    // ` · ` + `scope: ` is 10 columns ahead of the name.
-    expect(fit(cols + 19)).toBe(`${full} · scope: all repos`);
-    expect(fit(cols + 14)).toBe(`${full} · scope: all…`);
-    expect(fit(cols + 12)).toBe(`${full} · scope: a…`);
-    // A one-column name would be a lone `…`: the prefix goes with it.
-    expect(fit(cols + 11)).toBe(full);
-    expect(fit(cols)).toBe(full);
-  });
-
-  it("drops invoking, then active, then shrinks to the two glyphs", () => {
-    // One column short: invoking drops and the scope takes what it freed.
-    expect(fit(cols - 1)).toBe(
-      "● reconnecting · ▲ degraded · active · scope: a…",
+  it("gives up signal words, then counts, then the prefix, then names, before the scope's name", () => {
+    expect(line(200)).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · 2 invoking · active · scope: dotfiles",
     );
-    expect(fit(30)).toBe("● reconnecting · ▲ degraded");
-    expect(fit(26)).toBe("● · ▲ degraded · scope: a…");
-    expect(fit(14)).toBe("● · ▲ degraded");
-    expect(fit(5)).toBe("● · ▲");
-    expect(fit(0)).toBe("● · ▲");
+    // Signals first: invoking, active, then the words behind the glyphs.
+    expect(line(110)).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · scope: dotfiles",
+    );
+    expect(line(100)).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ degraded · scope: dotfiles",
+    );
+    expect(line(80)).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ · scope: dotfiles",
+    );
+    // Then the inactive tabs' counts, rightmost first.
+    expect(line(78)).toBe(
+      "Sessions (12/16) Worktrees (9) Start | ● · ▲ · scope: dotfiles",
+    );
+    expect(line(72)).toBe(
+      "Sessions (12/16) Worktrees Start | ● · ▲ · scope: dotfiles",
+    );
+    // Then the shorter prefix, the active count, the inactive names, and
+    // the prefix itself.
+    expect(line(68)).toBe(
+      "Sessions (12/16) Worktrees Start | ● · ▲ · in dotfiles",
+    );
+    expect(line(62)).toBe("Sessions Worktrees Start | ● · ▲ · in dotfiles");
+    expect(line(54)).toBe("Sessions Wt St | ● · ▲ · in dotfiles");
+    expect(line(47)).toBe("Sessions Wt St | ● · ▲ · dotfiles");
   });
 
-  it("gives the whole budget to the scope when healthy", () => {
-    expect(fit(16, {})).toBe("scope: all repos");
-    expect(fit(9, {})).toBe("scope: a…");
-    expect(fit(8, {})).toBe("");
-    expect(fit(0, { connectionState: "connected" })).toBe("");
+  it("cuts the name only when nothing else is left to give", () => {
+    expect(line(42)).toBe("Sessions Wt St | ● · ▲ · dotf…");
+    // A one-column name would be a lone `…`: it goes, the glyphs stay.
+    expect(line(37)).toBe("Sessions Wt St | ● · ▲");
+    expect(line(0)).toBe("Sessions Wt St | ● · ▲");
+  });
+
+  it("keeps a healthy strip's counts while the name fits beside them", () => {
+    expect(line(74, {})).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | scope: dotfiles",
+    );
+    expect(line(70, {})).toBe(
+      "Sessions (12/16) Worktrees (9) Start | scope: dotfiles",
+    );
   });
 });
 
-it("keeps connection and degraded on a narrow strip that has no room for scope", async () => {
+it("keeps connection and degraded, and the scope's name, on a narrow strip", async () => {
   const line = await strip(60, {
     connectionState: "disconnected",
     daemonDegraded: true,
     invokeInFlight: 3,
     scope: "/code/some-repo",
   });
-  expect(line).toEndWith("● · ▲ degraded ──");
-  expect(line).not.toContain("scope:");
+  expect(line).toEndWith("● · ▲ · in some-repo ──");
   expect(line).not.toContain("invoking");
   expect(line.length).toBe(59);
+});
+
+/**
+ * Three repos with facts, so every count is a number and a scoped one shows
+ * its total (`(2/9)`), the widest the strip's tabs get.
+ */
+function factsFor(...names: string[]): RepoFacts[] {
+  return names.map((name, i) => ({
+    repoRoot: `/code/${name}`,
+    repoName: name,
+    worktrees: {
+      value: {
+        repoRoot: `/code/${name}`,
+        repoName: name,
+        worktrees: Array.from({ length: i + 2 }, (_, n) => ({
+          path: `/code/${name}/${n}`,
+          branch: `b${n}`,
+          isMain: n === 0,
+        })),
+      },
+      updatedAt: 1,
+      stale: false,
+    },
+    counts: {
+      value: { prs: 3 * (i + 1), issues: 5 * (i + 1) },
+      updatedAt: 1,
+      stale: false,
+    },
+  }));
+}
+
+describe("the scope's name at 70 and 80 columns", () => {
+  const LONG = "claude-code-plugin-marketplace";
+  const facts = factsFor("dotfiles", "api-server", LONG);
+  const right = (line: string) => line.slice(line.lastIndexOf(" ── ") - 40);
+  for (const width of [70, 80])
+    for (const [scope, name] of [
+      [null, "all repos"],
+      ["/code/dotfiles", "dotfiles"],
+      ["/code/api-server", "api-server"],
+      [`/code/${LONG}`, LONG],
+    ] as const)
+      it(`shows ${name} whole at ${width} columns`, async () => {
+        const line = await strip(width, {
+          scope,
+          sessions: 12,
+          total: 16,
+          hideIdle: true,
+          facts,
+        });
+        expect(line).toMatch(new RegExp(` (scope: |in )?${name} ──$`));
+        expect(right(line)).not.toContain("…");
+        expect(line.length).toBe(width - 1);
+      });
+
+  it("gives way in order: counts and the prefix at 80, inactive names too at 70", async () => {
+    const scope = `/code/${LONG}`;
+    const extra = { scope, sessions: 12, total: 16, facts };
+    // 80: every count and the long prefix give way, the names stay.
+    expect(await strip(80, extra)).toMatch(
+      new RegExp(`^ ━━ Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
+    );
+    setup.renderer.destroy();
+    // 70: the inactive names shorten too, and the name is still whole.
+    expect(await strip(70, extra)).toMatch(
+      new RegExp(`^ ━━ Sessions ── Wt ── St ─+ in ${LONG} ──$`),
+    );
+  });
 });
 
 it("draws a signal that arrives after the first paint ahead of the scope", async () => {
