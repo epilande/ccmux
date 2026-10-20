@@ -34,9 +34,11 @@ it("draws a titled rule, marks the active view with the accent stub, and fills c
   );
   await setup.renderOnce();
   const line = setup.captureCharFrame().split("\n")[0]!;
-  expect(line).toContain("── Sessions (2) ━━ Worktrees ── Start ─");
+  // The first tab starts flush at column 0, with no rule before it; the
+  // rule before the active later tab is the accent bar.
+  expect(line.startsWith("Sessions (2) ━━ Worktrees ── Start ─")).toBe(true);
   expect(line.trimEnd().endsWith(" scope: all repos ──")).toBe(true);
-  // The rule runs edge to edge inside the one-column padding.
+  // The rule runs to the edge inside the one-column right padding.
   expect(line.trimEnd().length).toBe(95);
   const spans = setup.captureSpans().lines[0]!.spans;
   const stub = spans.find((s) => s.text.startsWith("━━"));
@@ -212,16 +214,16 @@ it("sums the repos that answered and marks the total partial when one never did"
 });
 
 // The scope's name is never cut while anything else can give way. Tabs cost
-// 38 columns here (`── Sessions (2) ── Worktrees ── Start `), the padding 2
-// and the right end's dressing 4. Below the tabs' own width the strip CLIPS
-// (line 2 must stay blank: OpenTUI wraps an overflowing row onto the next
-// line, which here is the head line).
+// 35 columns here (`Sessions (2) ── Worktrees ── Start `: no rule before the
+// first), the right padding 1 and the right end's dressing 4. Below the
+// tabs' own width the strip CLIPS (line 2 must stay blank: OpenTUI wraps an
+// overflowing row onto the next line, which here is the head line).
 for (const [width, expected] of [
-  [57, " ━━ Sessions (2) ── Worktrees ── Start ─ scope: scope ──"],
-  [56, " ━━ Sessions (2) ── Worktrees ── Start ──── in scope ──"],
-  [52, " ━━ Sessions ── Worktrees ── Start ──── in scope ──"],
-  [48, " ━━ Sessions ── Worktrees ── St ─── in scope ──"],
-  [44, " ━━ Sessions ── Wt ── St ────── in scope ──"],
+  [53, "Sessions (2) ── Worktrees ── Start ─ scope: scope ──"],
+  [52, "Sessions (2) ── Worktrees ── Start ──── in scope ──"],
+  [48, "Sessions ── Worktrees ── Start ──── in scope ──"],
+  [44, "Sessions ── Worktrees ── St ─── in scope ──"],
+  [41, "Sessions ── Wt ── St ─────── in scope ──"],
 ] as const) {
   it(`keeps the scope's name whole at ${width} columns`, async () => {
     setup = await testRender(
@@ -280,9 +282,9 @@ it("renders the healthy board exactly as the plain titled rule", async () => {
     hideIdle: false,
   });
   expect(healthy).toBe(bare);
-  // Tabs 38, padding 2, scope dressing 11, name 9: 96 - 60 = 36 rule cells.
+  // Tabs 35, padding 1, scope dressing 11, name 9: 96 - 56 = 40 rule cells.
   expect(healthy).toBe(
-    ` ━━ Sessions (3) ── Worktrees ── Start ${"─".repeat(36)} scope: all repos ──`,
+    `Sessions (3) ── Worktrees ── Start ${"─".repeat(40)} scope: all repos ──`,
   );
 });
 
@@ -383,43 +385,47 @@ describe("fitStrip priority", () => {
     );
     // Signals first: invoking, active, then the words behind the glyphs.
     expect(line(110)).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · active · scope: dotfiles",
+    );
+    expect(line(107)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · scope: dotfiles",
     );
-    expect(line(100)).toBe(
+    expect(line(97)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ degraded · scope: dotfiles",
     );
     expect(line(80)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ · scope: dotfiles",
     );
     // Then the inactive tabs' counts, rightmost first.
-    expect(line(78)).toBe(
+    expect(line(75)).toBe(
       "Sessions (12/16) Worktrees (9) Start | ● · ▲ · scope: dotfiles",
     );
-    expect(line(72)).toBe(
+    expect(line(69)).toBe(
       "Sessions (12/16) Worktrees Start | ● · ▲ · scope: dotfiles",
     );
     // Then the shorter prefix, the active count, the inactive names, and
     // the prefix itself.
-    expect(line(68)).toBe(
+    expect(line(65)).toBe(
       "Sessions (12/16) Worktrees Start | ● · ▲ · in dotfiles",
     );
     expect(line(62)).toBe("Sessions Worktrees Start | ● · ▲ · in dotfiles");
-    expect(line(54)).toBe("Sessions Wt St | ● · ▲ · in dotfiles");
-    expect(line(47)).toBe("Sessions Wt St | ● · ▲ · dotfiles");
+    expect(line(54)).toBe("Sessions Worktrees St | ● · ▲ · in dotfiles");
+    expect(line(51)).toBe("Sessions Wt St | ● · ▲ · in dotfiles");
+    expect(line(44)).toBe("Sessions Wt St | ● · ▲ · dotfiles");
   });
 
   it("cuts the name only when nothing else is left to give", () => {
-    expect(line(42)).toBe("Sessions Wt St | ● · ▲ · dotf…");
+    expect(line(39)).toBe("Sessions Wt St | ● · ▲ · dotf…");
     // A one-column name would be a lone `…`: it goes, the glyphs stay.
-    expect(line(37)).toBe("Sessions Wt St | ● · ▲");
+    expect(line(34)).toBe("Sessions Wt St | ● · ▲");
     expect(line(0)).toBe("Sessions Wt St | ● · ▲");
   });
 
   it("keeps a healthy strip's counts while the name fits beside them", () => {
-    expect(line(74, {})).toBe(
+    expect(line(70, {})).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | scope: dotfiles",
     );
-    expect(line(70, {})).toBe(
+    expect(line(67, {})).toBe(
       "Sessions (12/16) Worktrees (9) Start | scope: dotfiles",
     );
   });
@@ -490,18 +496,29 @@ describe("the scope's name at 70 and 80 columns", () => {
         expect(line.length).toBe(width - 1);
       });
 
-  it("gives way in order: counts and the prefix at 80, inactive names too at 70", async () => {
+  it("gives way in order: other counts and the prefix at 80, the current count too at 70", async () => {
     const scope = `/code/${LONG}`;
     const extra = { scope, sessions: 12, total: 16, facts };
-    // 80: every count and the long prefix give way, the names stay.
+    // 80: the other tabs' counts and the long prefix give way.
     expect(await strip(80, extra)).toMatch(
-      new RegExp(`^ ━━ Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
+      new RegExp(
+        `^Sessions \\(12/16\\) ── Worktrees ── Start ─+ in ${LONG} ──$`,
+      ),
     );
     setup.renderer.destroy();
-    // 70: the inactive names shorten too, and the name is still whole.
+    // 70: the current tab's count too; the view names and the scope's name
+    // stay whole, in the columns the first tab's rule used to take.
     expect(await strip(70, extra)).toMatch(
-      new RegExp(`^ ━━ Sessions ── Wt ── St ─+ in ${LONG} ──$`),
+      new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
     );
+  });
+
+  it("starts the first tab at column 0 in every view", async () => {
+    for (const view of ["sessions", "worktrees", "start"] as const) {
+      const line = await strip(80, { view, facts });
+      expect(line.startsWith("Sessions (")).toBe(true);
+      setup.renderer.destroy();
+    }
   });
 });
 

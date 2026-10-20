@@ -42,8 +42,16 @@ const SCOPE_PREFIXES = ["scope: ", "in ", ""] as const;
  *  rule's fill, and the ` ──` that closes the line. */
 const RIGHT_DRESSING = 4;
 /** Columns every tab spends besides its name and count: the `── ` stub and
- *  the space after it. */
+ *  the space after it. The first tab has no stub (see `tabDressing`). */
 const TAB_DRESSING = 4;
+/** The rule stub drawn before every tab but the first. */
+const TAB_STUB = 3;
+
+/** What `view`'s tab spends besides its name and count. The first tab starts
+ *  flush at column 0, so it pays only for the space after it. */
+function tabDressing(view: View): number {
+  return view === VIEWS[0] ? TAB_DRESSING - TAB_STUB : TAB_DRESSING;
+}
 /** Rule cells kept between the tabs and the right end, so the two never
  *  run together as `Start  in api-server`. */
 const MIN_FILL = 1;
@@ -147,7 +155,7 @@ export function fitStrip(input: {
     const tabCols = VIEWS.reduce(
       (n, v) =>
         n +
-        TAB_DRESSING +
+        tabDressing(v) +
         displayWidth(tabs[v].name) +
         displayWidth(tabs[v].count),
       0,
@@ -196,16 +204,17 @@ export function fitStrip(input: {
 }
 
 /**
- * The view strip is a titled RULE, not a row of chips: `━━ Sessions (2) ──
+ * The view strip is a titled RULE, not a row of chips: `Sessions (2) ──
  * Worktrees ── Start ───────── scope: all repos ──`. Drawn that way so the
  * line above the list reads as chrome at a glance. A row of names on a plain
  * background looked like one more data row, and the column-header line that
- * follows it (see `SessionList`) then had nothing to set it apart from.
+ * follows it (see `SessionList`) then had nothing to set it apart from. The
+ * first tab starts flush at column 0, with no rule before it.
  *
- * Three cues mark the active view, and the head line below claims none of
- * them: its rule stub is the accent bar (`━━` in `theme.blue` where the
- * others are `──` in `theme.border`), its name is bold, and its name is the
- * text color where the others are subtext. The count rides after the name in
+ * The active view's name is bold and in the text color where the others are
+ * subtext, and the head line below claims neither cue. The rule before a
+ * later tab is also the accent bar while that tab is active (`━━` in
+ * `theme.blue` where the others are `──` in `theme.border`). The count rides after the name in
  * the subtext color (`(2)`, or `(2/8)` while a scope, `f` or a search hides
  * rows) so the name reads alone. Each count is taken in its OWN view's scope:
  * a `W`/`N` jump narrows only the view it opened, so the other tabs count in
@@ -296,14 +305,15 @@ export const ViewStrip: Component<
       },
       status: props,
       scopeName: props.scope?.split("/").pop() ?? "all repos",
-      width: dims().width - 2,
+      // Right padding only: the first tab starts at column 0.
+      width: dims().width - 1,
     }),
   );
   const tabsWidth = () =>
     VIEWS.reduce(
       (n, v) =>
         n +
-        TAB_DRESSING +
+        tabDressing(v) +
         displayWidth(fit().tabs[v].name) +
         displayWidth(fit().tabs[v].count),
       0,
@@ -338,12 +348,12 @@ export const ViewStrip: Component<
     );
     return nodes;
   };
-  const fill = () => Math.max(0, dims().width - 2 - tabsWidth() - rightWidth());
+  const fill = () => Math.max(0, dims().width - 1 - tabsWidth() - rightWidth());
   return (
     <box
       height={1}
       width="100%"
-      paddingLeft={1}
+      paddingLeft={0}
       paddingRight={1}
       flexDirection="row"
     >
@@ -354,9 +364,12 @@ export const ViewStrip: Component<
             flexDirection="row"
             onMouseDown={() => props.onView(view)}
           >
-            <Text fg={view === props.view ? theme.blue : theme.border}>
-              {view === props.view ? "━━ " : "── "}
-            </Text>
+            {/* The rules BETWEEN tabs: the first tab has none before it. */}
+            <Show when={view !== VIEWS[0]}>
+              <Text fg={view === props.view ? theme.blue : theme.border}>
+                {view === props.view ? "━━ " : "── "}
+              </Text>
+            </Show>
             <Text fg={view === props.view ? theme.text : theme.subtext}>
               <Show when={view === props.view} fallback={fit().tabs[view].name}>
                 <b>{fit().tabs[view].name}</b>

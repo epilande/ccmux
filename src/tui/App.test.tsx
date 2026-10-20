@@ -9292,7 +9292,10 @@ describe("repo scope across views", () => {
       expect(jumped).toContain("Sessions (2) ");
       setup.mockInput.pressKey(back);
       const list = await frame();
-      expect(list.split("\n")[0]).toContain("━━ Sessions (2) ");
+      // Back on Sessions: the first tab, so no later tab carries the
+      // accent bar.
+      expect(list.split("\n")[0]).toStartWith("Sessions (2) ");
+      expect(list.split("\n")[0]).not.toContain("━━");
       expect(list.split("\n")[0]).toContain("scope: all repos");
       expect(list).toContain("dev:1.1");
       expect(list).toContain("dev:1.2");
