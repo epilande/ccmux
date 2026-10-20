@@ -32,6 +32,9 @@ function spawnSleepProcess(): number {
 }
 
 let tempCcmuxHome: string | null = null;
+// Restored (not deleted) on teardown: the test preload's isolated CCMUX_HOME
+// must outlive this file, or later subprocesses fall back to ~/.config/ccmux.
+const originalCcmuxHome = process.env.CCMUX_HOME;
 const originalFetch = globalThis.fetch;
 const originalBunSpawn = Bun.spawn;
 
@@ -63,7 +66,8 @@ function teardown() {
     rmSync(tempCcmuxHome, { recursive: true, force: true });
     tempCcmuxHome = null;
   }
-  delete process.env.CCMUX_HOME;
+  if (originalCcmuxHome === undefined) delete process.env.CCMUX_HOME;
+  else process.env.CCMUX_HOME = originalCcmuxHome;
 }
 
 function writePidFile(pid: number) {

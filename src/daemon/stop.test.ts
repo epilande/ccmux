@@ -39,6 +39,9 @@ function isAlive(pid: number): boolean {
 /** Save/restore the real PID file so tests don't interfere with a running daemon */
 let savedPidFileContent: string | null = null;
 let tempCcmuxHome: string | null = null;
+// Restored (not deleted) on teardown: the test preload's isolated CCMUX_HOME
+// must outlive this file, or later subprocesses fall back to ~/.config/ccmux.
+const originalCcmuxHome = process.env.CCMUX_HOME;
 
 function getTestPidFile(): string {
   return getPidFilePath();
@@ -68,7 +71,8 @@ function restorePidFile() {
     rmSync(tempCcmuxHome, { recursive: true, force: true });
     tempCcmuxHome = null;
   }
-  delete process.env.CCMUX_HOME;
+  if (originalCcmuxHome === undefined) delete process.env.CCMUX_HOME;
+  else process.env.CCMUX_HOME = originalCcmuxHome;
 }
 
 describe("stopDaemon", () => {
