@@ -393,6 +393,10 @@ describe("getDaemonJson plaintext 404", () => {
           return true;
         },
         cli,
+        // Pinned like harness(): the import-time value follows whichever test
+        // file's path `bun test` left in argv[1], so a file at src/*.test.ts
+        // with a built bundle present turned this into "deferred".
+        transientSourceRun: false,
         log: () => {},
         warn: () => {},
       });
