@@ -505,11 +505,14 @@ export const SessionList: Component<SessionListProps> = (props) => {
                 <Text fg={headerFg()}>{TOOL_LABEL}</Text>
               </box>
             </Show>
+            {/* `span` is the label box when it differs from the column: a
+                borrowed label fills its box exactly, starting on its own
+                column, and the lender's label still ends on its own. */}
             <For each={cells().right}>
               {(cell) => (
-                <box width={cell.width} flexShrink={0}>
+                <box width={cell.span ?? cell.width} flexShrink={0}>
                   <Text fg={headerFg()}>
-                    {padStartWidth(cell.text, cell.width)}
+                    {padStartWidth(cell.text, cell.span ?? cell.width)}
                   </Text>
                 </box>
               )}

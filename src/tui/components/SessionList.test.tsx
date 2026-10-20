@@ -15,6 +15,7 @@ import {
   scrollbarThumb,
 } from "./test-helpers";
 import { buildFlatItems, type FlatItem } from "../utils/grouping";
+import { getAgentShortCode } from "../../lib/agents";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -745,11 +746,18 @@ describe("SessionList column header", () => {
       width: 100,
       showPreview: true,
     });
-    const header = lines.find((l) => l.includes("pane") && l.includes("age"));
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
     expect(header).toBeDefined();
     expect(header).toContain("status");
-    // The two-column short agent code has no room for its label.
-    expect(header).not.toContain("agent");
+    // The two-column short agent code keeps its label: `agent` starts on
+    // the column the code does, borrowing the pane cell's unused width.
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    const code = getAgentShortCode("claude");
+    expect(header.indexOf("agent")).toBe(row.indexOf(` ${code} `) + 1);
+    // `pane` still ends where its column does.
+    expect(header.indexOf("pane") + "pane".length).toBe(
+      row.indexOf("main:1.1") + "main:1.1".length,
+    );
   });
 
   it("stays off when not asked, in the sidebar, and below md", async () => {

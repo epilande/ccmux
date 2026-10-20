@@ -1948,15 +1948,40 @@ describe("columnHeaderCells", () => {
     ]);
   });
 
-  it("blanks a label that would not fit its cell rather than cutting it", () => {
-    // At `sm` the agent cell is the 2-column short code: no room for "agent".
+  it("lets a label too wide for its cell borrow the next cell's unused width", () => {
+    // At `sm` the agent cell is the 2-column short code. "agent" takes five
+    // header columns starting on the agent column, and the pane cell (12
+    // wide, its label 4) gives the same three up, so every label after it
+    // stays where it was.
     const sm = columnHeaderCells(inline(60));
     const agent = sm.right.find((c) => c.field === "agent");
-    expect(agent).toEqual({ field: "agent", text: "", width: 2 });
+    expect(agent).toEqual({ field: "agent", text: "agent", width: 2, span: 5 });
+    const pane = sm.right.find((c) => c.field === "pane");
+    expect(pane).toEqual({ field: "pane", text: "pane", width: 12, span: 9 });
+  });
+
+  it("blanks a label that would not fit and has no neighbor to borrow from", () => {
+    // Last on the right: nothing after it to lend columns.
+    const last = columnHeaderCells(
+      inline(60, { row1: { right: [{ field: "agent", mode: "short" }] } }),
+    );
+    expect(last.right).toEqual([{ field: "agent", text: "", width: 2 }]);
+    // A neighbor whose own label fills it cannot lend either.
+    const tight = columnHeaderCells(
+      inline(60, {
+        row1: { right: [{ field: "agent", mode: "short" }, "time"] },
+      }),
+    );
+    expect(tight.right[0]).toEqual({ field: "agent", text: "", width: 2 });
+  });
+
+  it("fits left-side labels to their own cells", () => {
     // The short status cell is exactly 6 wide, which "status" fills.
+    const sm = columnHeaderCells(inline(60));
     const status = sm.left.find((c) => c.field === "status");
     expect(status).toEqual({ field: "status", text: "status", width: 6 });
-    // Icon-only status at `xs` is one column: blank.
+    // Icon-only status at `xs` is one column: blank, since the cell after
+    // it is the flexible project, whose label has a fixed start to keep.
     const xs = columnHeaderCells(inline(40));
     expect(xs.left.find((c) => c.field === "status")?.text).toBe("");
   });

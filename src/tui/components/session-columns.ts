@@ -1110,6 +1110,13 @@ export interface HeaderCell {
   text: string;
   /** Fixed column width, or 0 for the one flexible cell. */
   width: number;
+  /**
+   * The label box's width on the header line, where it differs from the
+   * column's: a right-side label too wide for its cell borrows the next
+   * cell's unused columns (see {@link columnHeaderCells}), and that cell's
+   * box gives the same columns up.
+   */
+  span?: number;
 }
 
 export interface HeaderCells {
@@ -1120,8 +1127,34 @@ export interface HeaderCells {
 function labelFor(entry: ResolvedEntry, width: number): string {
   const label = COLUMN_LABELS[entry.field];
   // A cut label ("ag", "vers") explains nothing; a blank at least does not
-  // mislead, and the cell below still holds the data.
+  // mislead, and the cell below still holds the data. A right-side label
+  // gets a second chance by borrowing room (`lendRight`).
   return displayWidth(label) <= width ? label : "";
+}
+
+/**
+ * Give a right-side label that does not fit its cell the columns it is
+ * short, from the next cell's unused width. Right-side labels are
+ * right-aligned, so a cell wider than its label is blank at its START, which
+ * sits just past the borrower's column: the borrower's box grows, the
+ * lender's shrinks by the same amount, and the line's total (so every other
+ * label's position) is unchanged. The borrowed label starts on its own
+ * column, which is what the 2-column short `agent` code needs. A cell with
+ * no neighbor that can lend stays blank.
+ */
+function lendRight(cells: HeaderCell[]): HeaderCell[] {
+  const out = cells.map((cell) => ({ ...cell }));
+  for (let i = 0; i < out.length - 1; i++) {
+    const cell = out[i]!;
+    const lender = out[i + 1]!;
+    const label = COLUMN_LABELS[cell.field];
+    if (cell.text || !label || lender.span !== undefined) continue;
+    const short = displayWidth(label) - cell.width;
+    if (lender.width - short < displayWidth(lender.text)) continue;
+    out[i] = { ...cell, text: label, span: cell.width + short };
+    out[i + 1] = { ...lender, span: lender.width - short };
+  }
+  return out;
 }
 
 /**
@@ -1158,7 +1191,7 @@ export function columnHeaderCells(row1: ResolvedRow): HeaderCells {
     if (width === 0) break;
     right.unshift({ field: entry.field, text: labelFor(entry, width), width });
   }
-  return { left, right };
+  return { left, right: lendRight(right) };
 }
 
 /** Whether a header line would carry any label at all at this layout. */
