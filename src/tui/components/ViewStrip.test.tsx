@@ -7,7 +7,7 @@ import {
   type StripStatus,
 } from "./ViewStrip";
 import type { RepoFacts } from "../../daemon/repo-facts";
-import { RGBA } from "@opentui/core";
+import { RGBA, TextAttributes } from "@opentui/core";
 import { theme } from "../theme";
 
 type StripProps = Parameters<typeof ViewStrip>[0];
@@ -16,7 +16,7 @@ afterEach(() => setup?.renderer.destroy());
 
 const hex = (c: string) => RGBA.fromHex(c).toInts();
 
-it("draws a titled rule, marks the active view with the accent stub, and fills counts only when facts arrive", async () => {
+it("draws a titled rule, marks the active view by its label, and fills counts only when facts arrive", async () => {
   const [facts, setFacts] = createSignal<RepoFacts[]>([
     { repoRoot: "/repo", repoName: "repo" },
   ]);
@@ -34,19 +34,23 @@ it("draws a titled rule, marks the active view with the accent stub, and fills c
   );
   await setup.renderOnce();
   const line = setup.captureCharFrame().split("\n")[0]!;
-  // The first tab starts flush at column 0, with no rule before it; the
-  // rule before the active later tab is the accent bar.
-  expect(line.startsWith("Sessions (2) ━━ Worktrees ── Start ─")).toBe(true);
+  // The first tab starts flush at column 0, and no tab, active or not, has
+  // an accent rule before it.
+  expect(line.startsWith("Sessions (2) ── Worktrees ── Start ─")).toBe(true);
+  expect(line).not.toContain("━");
   expect(line.trimEnd().endsWith(" scope: all repos ──")).toBe(true);
   // The rule runs to the edge inside the one-column right padding.
   expect(line.trimEnd().length).toBe(95);
   const spans = setup.captureSpans().lines[0]!.spans;
-  const stub = spans.find((s) => s.text.startsWith("━━"));
-  expect(stub?.fg.toInts()).toEqual(hex(theme.blue));
   const active = spans.find((s) => s.text.includes("Worktrees"));
-  expect(active?.fg.toInts()).toEqual(hex(theme.text));
+  expect(active?.fg.toInts()).toEqual(hex(theme.blue));
+  expect(active!.attributes & TextAttributes.BOLD).not.toBe(0);
   const idle = spans.find((s) => s.text.includes("Sessions"));
   expect(idle?.fg.toInts()).toEqual(hex(theme.subtext));
+  expect(idle!.attributes & TextAttributes.BOLD).toBe(0);
+  // The rule before the active tab is the same plain border rule.
+  const rules = spans.filter((s) => s.text.startsWith("──"));
+  for (const rule of rules) expect(rule.fg.toInts()).toEqual(hex(theme.border));
   // No chip: nothing on the line carries a surface background.
   for (const s of spans) {
     expect(s.bg.toInts()).not.toEqual(hex(theme.surface));
@@ -66,6 +70,59 @@ it("draws a titled rule, marks the active view with the accent stub, and fills c
   await setup.renderOnce();
   expect(setup.captureCharFrame()).toContain("Worktrees (0) ── Start (82)");
   expect(setup.captureCharFrame().split("\n")[1]?.trim()).toBe("");
+  // The active label's count takes its accent and weight; an inactive
+  // count stays subtext and plain.
+  const counted = setup.captureSpans().lines[0]!.spans;
+  const activeCount = counted.find((s) => s.text.includes("Worktrees (0)"));
+  expect(activeCount?.fg.toInts()).toEqual(hex(theme.blue));
+  expect(activeCount!.attributes & TextAttributes.BOLD).not.toBe(0);
+  const idleCount = counted.find((s) => s.text.includes("Start (82)"));
+  expect(idleCount?.fg.toInts()).toEqual(hex(theme.subtext));
+  expect(idleCount!.attributes & TextAttributes.BOLD).toBe(0);
+});
+
+it("marks every view's tab the same way and never moves a column between them", async () => {
+  const frames: string[] = [];
+  for (const view of ["sessions", "worktrees", "start"] as const) {
+    setup = await testRender(
+      () => (
+        <ViewStrip
+          view={view}
+          scope="/code/dotfiles"
+          sessions={4}
+          total={16}
+          facts={[]}
+          onView={() => {}}
+        />
+      ),
+      { width: 80, height: 1 },
+    );
+    await setup.renderOnce();
+    frames.push(setup.captureCharFrame());
+    const spans = setup.captureSpans().lines[0]!.spans;
+    const name = {
+      sessions: "Sessions",
+      worktrees: "Worktrees",
+      start: "Start",
+    };
+    for (const [v, label] of Object.entries(name)) {
+      const span = spans.find((s) => s.text.includes(label));
+      const isActive = v === view;
+      expect([v, span?.fg.toInts()]).toEqual([
+        v,
+        hex(isActive ? theme.blue : theme.subtext),
+      ]);
+      expect([v, (span!.attributes & TextAttributes.BOLD) !== 0]).toEqual([
+        v,
+        isActive,
+      ]);
+    }
+    expect(setup.captureCharFrame()).not.toContain("━");
+    setup.renderer.destroy();
+  }
+  // Only colors and weight differ: the characters are identical.
+  expect(frames[1]).toBe(frames[0]);
+  expect(frames[2]).toBe(frames[0]);
 });
 
 it("marks a stale worktree count with a tilde", async () => {
@@ -176,7 +233,7 @@ it("counts the other views in the base scope while a jump narrows this one", asy
   );
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("Sessions (4) ━━ Worktrees (2/5) ── Start (11) ─");
+  expect(frame).toContain("Sessions (4) ── Worktrees (2/5) ── Start (11) ─");
   expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
 });
 
@@ -323,9 +380,10 @@ it("shows degraded and in-flight invokes only while they hold", async () => {
 it("counts hidden rows as (n/total) and flags hide-idle apart from search", async () => {
   const idle = await strip(96, { total: 8, hideIdle: true });
   expect(idle).toContain("Sessions (3/8) ──");
-  // Subtext, not overlay: read text, and overlay is under 4.5:1 on base in
-  // every built-in theme.
-  expect(fgOf("3/8")).toEqual(hex(theme.subtext));
+  // The active tab's count rides in its accent; the rest of the strip's
+  // read text is subtext, not overlay (under 4.5:1 on base in every
+  // built-in theme).
+  expect(fgOf("3/8")).toEqual(hex(theme.blue));
   expect(idle).toEndWith("─ active · scope: all repos ──");
   expect(fgOf("active")).toEqual(hex(theme.subtext));
   expect(fgOf("scope: ")).toEqual(hex(theme.subtext));

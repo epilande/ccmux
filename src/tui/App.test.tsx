@@ -8363,7 +8363,10 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressKey("l");
       expect(await frame()).toContain(" ✓");
       setup.mockInput.pressKey("l");
-      expect(await frame()).toContain("━━ Start");
+      // Start: the footer that teaches `/` and goes back with `q`.
+      const start = await frame();
+      expect(start).toContain("/ search");
+      expect(start).toContain("q back");
       setup.mockInput.pressKey("h");
       expect(await frame()).toContain(" ✓");
       setup.mockInput.pressKey("?");

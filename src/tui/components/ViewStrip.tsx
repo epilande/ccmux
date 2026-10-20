@@ -211,12 +211,12 @@ export function fitStrip(input: {
  * follows it (see `SessionList`) then had nothing to set it apart from. The
  * first tab starts flush at column 0, with no rule before it.
  *
- * The active view's name is bold and in the text color where the others are
- * subtext, and the head line below claims neither cue. The rule before a
- * later tab is also the accent bar while that tab is active (`━━` in
- * `theme.blue` where the others are `──` in `theme.border`). The count rides after the name in
- * the subtext color (`(2)`, or `(2/8)` while a scope, `f` or a search hides
- * rows) so the name reads alone. Each count is taken in its OWN view's scope:
+ * The active view is marked by its label alone, the lazygit way: its name
+ * and count are bold and in the accent color (`theme.blue`), where the
+ * others are plain subtext. The rules between tabs are all the same
+ * `theme.border` `──`, so switching views changes colors and weight but
+ * never a column. The count rides after the name (`(2)`, or `(2/8)` while a
+ * scope, `f` or a search hides rows). Each count is taken in its OWN view's scope:
  * a `W`/`N` jump narrows only the view it opened, so the other tabs count in
  * the base scope they will show when reached. The scope carries a `scope:`
  * prefix because bare at the right edge it read as a column label over the
@@ -348,6 +348,9 @@ export const ViewStrip: Component<
     );
     return nodes;
   };
+  /** A tab's name and its count, as fitted. */
+  const tabLabel = (view: View) =>
+    fit().tabs[view].name + fit().tabs[view].count;
   const fill = () => Math.max(0, dims().width - 1 - tabsWidth() - rightWidth());
   return (
     <box
@@ -364,21 +367,19 @@ export const ViewStrip: Component<
             flexDirection="row"
             onMouseDown={() => props.onView(view)}
           >
-            {/* The rules BETWEEN tabs: the first tab has none before it. */}
+            {/* The rules BETWEEN tabs, all alike: the first tab has none
+                before it, and no tab gets an accent of its own. */}
             <Show when={view !== VIEWS[0]}>
-              <Text fg={view === props.view ? theme.blue : theme.border}>
-                {view === props.view ? "━━ " : "── "}
-              </Text>
+              <Text fg={theme.border}>{"── "}</Text>
             </Show>
-            <Text fg={view === props.view ? theme.text : theme.subtext}>
-              <Show when={view === props.view} fallback={fit().tabs[view].name}>
-                <b>{fit().tabs[view].name}</b>
+            {/* The label, count included, is one run: accent and bold while
+                active, subtext otherwise. Neither changes its width, so
+                switching views never moves the strip. */}
+            <Text fg={view === props.view ? theme.blue : theme.subtext}>
+              <Show when={view === props.view} fallback={tabLabel(view)}>
+                <b>{tabLabel(view)}</b>
               </Show>
             </Text>
-            {/* Guarded: an empty text node still paints one column. */}
-            <Show when={fit().tabs[view].count}>
-              <Text fg={theme.subtext}>{fit().tabs[view].count}</Text>
-            </Show>
             <Text> </Text>
           </box>
         )}
