@@ -213,8 +213,7 @@ export interface NewSessionIssue {
  * it, a dialog's cancel marker carries it, and Esc reads it back.
  */
 export interface SourcePickerOrigin {
-  panelRepo: string | null;
-  /** The panel's LIVE scope, null when Tab had widened it. */
+  /** The panel's scope when it opened the picker, null for all repos. */
   panelScope: string | null;
   panelCursor: string;
 }
@@ -451,12 +450,12 @@ export interface NewSessionDraft {
    * row keys off it, and submit ignores it entirely, since a spawn hands the
    * board to the new session. `cursor` is the panel row the dialog was
    * opened over, so the reopened panel lands where the user left; `scope`
-   * is the panel's LIVE filter at that moment (null when Tab had widened
-   * it), which the reopen re-establishes, since the rescope is panel-local
-   * state nothing else remembers.
+   * is the scope the panel showed at that moment (null for all repos),
+   * which the reopen re-establishes. One field, not an opening repo plus a
+   * live filter: `s` narrows to the cursor row's repo, never back to the
+   * repo the panel was opened on, so there is no second repo to remember.
    */
   returnToWorktrees: {
-    repo: string | null;
     scope: string | null;
     cursor: string;
   } | null;
@@ -505,9 +504,9 @@ interface TUIState {
   scope: string | null;
   markedSessions: Set<string>;
   /**
-   * The Worktrees panel, or null when closed. `repo` scopes it to one main
-   * checkout (opened from a group header) and is null for the global
-   * keybinding; the panel's own Tab widens from there without reopening.
+   * The Worktrees panel, or null when closed. `repo` is the scope it was
+   * opened on (one main checkout, or null for all repos); the panel follows
+   * the shared `scope` from there, which its own `s` changes in place.
    * Everything else the panel needs — the rows, the selection, the run log —
    * is local to the component: it is fetched on open and discarded on close,
    * so it would only be stale state for the rest of the picker's life.
@@ -517,16 +516,13 @@ interface TUIState {
    * not in the fetched list. `isReturn` marks exactly those reopens, and is
    * what lets the panel reuse its last completed prune scan instead of
    * re-firing it; a plain open (`W`, the group menu) always scans fresh.
-   * `startWidened` re-establishes a Tab-widened scope on a return: the
-   * rescope is panel-local state this store never sees, so the action
-   * payloads carry the live filter out and a return carries it back in,
-   * while `repo` keeps naming the opening repo Tab can narrow back to.
+   * A return reopens on the scope its action payload carried out, so the
+   * panel comes back narrowed or widened exactly as the user left it.
    */
   worktrees: {
     repo: string | null;
     initialCursor: string | null;
     isReturn: boolean;
-    startWidened: boolean;
   } | null;
   /**
    * The source picker, or null when closed (issue #151).
@@ -2318,7 +2314,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
-        repo: string | null;
         scope: string | null;
         cursor: string;
       };
@@ -2622,16 +2617,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       opts: {
         initialCursor?: string;
         isReturn?: boolean;
-        startWidened?: boolean;
       } = {},
     ) {
-      changeScope(opts.startWidened ? null : repo);
+      changeScope(repo);
       setState("sourcePicker", null);
       setState("worktrees", {
         repo,
         initialCursor: opts.initialCursor ?? null,
         isReturn: opts.isReturn === true,
-        startWidened: opts.startWidened === true,
       });
     },
 
