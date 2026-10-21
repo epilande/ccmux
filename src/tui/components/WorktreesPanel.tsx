@@ -130,13 +130,11 @@ interface WorktreesPanelProps {
   initialCursor?: string | null;
   /** Return opens may reuse the last completed classification once. */
   isReturn?: boolean;
-  startWidened?: boolean;
   onClose: () => void;
   onJump: (session: WorktreeSession) => void;
   onSpawn: (target: {
     cwd: string;
     existingWorktree: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
     /** Registered paths from this destination's repo, used to resolve
      *  ownership when one checkout is nested inside another. */
@@ -147,7 +145,6 @@ interface WorktreesPanelProps {
     branch?: boolean;
     path: string;
     sessionId: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
   }) => void;
   /** Explicit so tests cannot launch a browser or write the real clipboard. */
@@ -598,11 +595,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [scan, setScan] = createSignal<PruneScan | null>(null);
   const [scanError, setScanError] = createSignal<string | null>(null);
   const [scope, setScope] = createSignal(
-    props.scope !== undefined
-      ? props.scope
-      : props.startWidened
-        ? null
-        : props.repo,
+    props.scope !== undefined ? props.scope : props.repo,
   );
   const [cursor, setCursor] = createSignal<string | null>(
     props.initialCursor ?? props.memory?.cursor ?? null,
@@ -845,7 +838,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         cwd: item.row.path,
         existingWorktree: item.row.isMain ? null : item.row.path,
         sameRepoRegisteredRoots: registeredPaths(item.row.repoRoot),
-        panelRepo: scope(),
         panelScope: scope(),
       });
   }
@@ -1043,7 +1035,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           props.onReview?.({
             path: item.row.path,
             sessionId: item.row.sessions[0]?.id ?? null,
-            panelRepo: scope(),
             panelScope: scope(),
             branch: key === "D" || event.shift,
           });

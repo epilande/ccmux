@@ -78,7 +78,6 @@ type LoadPhase = "loading" | "list" | "error";
 
 export interface SourcePickerOrigin {
   /** The Worktrees panel this was opened from, so Esc can reopen it. */
-  panelRepo: string | null;
   panelScope: string | null;
   panelCursor: string;
 }

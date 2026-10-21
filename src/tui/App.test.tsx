@@ -8999,9 +8999,151 @@ describe("App worktrees panel (W)", () => {
     }
   });
 
-  // Tab's rescope is panel-local, so the return must carry it in the action
-  // payload: reading the store reopened a widened panel back on its narrow
-  // opening repo (wrong scope, lost cursor, cache miss, one wrong capture).
+  // The return marker carries ONE scope, the one the panel showed. `s`
+  // narrows to the cursor row's repo, never to the repo the panel was opened
+  // on, so a widened return needs no "opening repo" to narrow back: it needs
+  // the cursor back on the row it left, which is what these pin.
+  describe("n dialog round trip", () => {
+    const OTHER_ROW = {
+      ...WORKTREE_ROW,
+      path: "/code/other/wt/other-checkout",
+      repoRoot: "/code/other",
+      repoName: "other",
+      name: "other-checkout",
+    };
+
+    /** Two repos, and a `/worktrees` read that honors `repo=` the way the
+     *  daemon does, so a narrowed panel visibly drops the other repo. */
+    function mockTwoRepoFetch(reads: URL[]) {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        );
+        reads.push(url);
+        const repo = url.searchParams.get("repo");
+        if (url.pathname.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [], open: [] });
+        if (url.pathname === "/worktrees")
+          return Response.json({
+            repos: [
+              {
+                repoRoot: "/code/myapp",
+                repoName: "myapp",
+                rows: [WORKTREE_ROW],
+              },
+              { repoRoot: "/code/other", repoName: "other", rows: [OTHER_ROW] },
+            ]
+              .filter((r) => !repo || r.repoRoot === repo)
+              .map(({ rows, ...r }) => ({ ...r, worktrees: rows })),
+          });
+        return Response.json({});
+      }) as typeof fetch;
+      return () => {
+        globalThis.fetch = originalFetch;
+      };
+    }
+
+    async function settle() {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await setup.renderOnce();
+      }
+      return setup.captureCharFrame();
+    }
+
+    const listReads = (reads: URL[], from: number) =>
+      reads
+        .slice(from)
+        .filter((u) => u.pathname === "/worktrees")
+        .map((u) => u.searchParams.get("repo"));
+
+    async function mountWithSession() {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            mainRepoRoot: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+    }
+
+    async function cancelNew() {
+      setup.mockInput.pressKey("n");
+      expect(squish(await settle())).toContain(squish("New session"));
+      deliverEscape(setup.renderer);
+      return settle();
+    }
+
+    it("narrows back to the row's repo after a widened round trip", async () => {
+      const reads: URL[] = [];
+      const restore = mockTwoRepoFetch(reads);
+      try {
+        await mountWithSession();
+        setup.mockInput.pressKey("W", { shift: true });
+        expect(await settle()).not.toContain("all repos");
+        setup.mockInput.pressKey("s");
+        expect(await settle()).toContain("other-checkout");
+
+        const before = reads.length;
+        const returned = await cancelNew();
+        // Back widened, cursor on the row `n` left from...
+        expect(returned).toContain("all repos");
+        expect(returned).toContain("other-checkout");
+        expect(listReads(reads, before)).toEqual([null]);
+        expect(
+          reads.slice(before).some((u) => u.pathname.includes("prune")),
+        ).toBe(false);
+
+        // ...so `s` still has that row's repo to narrow to.
+        const narrowed = reads.length;
+        setup.mockInput.pressKey("s");
+        const frame = await settle();
+        expect(frame).not.toContain("all repos");
+        expect(frame).not.toContain("other-checkout");
+        expect(listReads(reads, narrowed)).toEqual(["/code/myapp"]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("keeps an s-narrowed scope across the round trip", async () => {
+      const reads: URL[] = [];
+      const restore = mockTwoRepoFetch(reads);
+      try {
+        await mountWithSession();
+        // `l` opens the view on the shared, still global, scope.
+        setup.mockInput.pressKey("l");
+        expect(await settle()).toContain("all repos");
+        setup.mockInput.pressKey("s");
+        expect(await settle()).not.toContain("other-checkout");
+
+        const before = reads.length;
+        const returned = await cancelNew();
+        expect(returned).not.toContain("all repos");
+        expect(returned).not.toContain("other-checkout");
+        expect(listReads(reads, before)).toEqual(["/code/myapp"]);
+
+        const widened = reads.length;
+        setup.mockInput.pressKey("s");
+        expect(await settle()).toContain("other-checkout");
+        expect(listReads(reads, widened)).toEqual([null]);
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  // The return carries the scope the panel showed in the action payload:
+  // reopening on the opening repo instead brought a widened panel back
+  // narrow (wrong scope, lost cursor, cache miss, one wrong capture).
   it("keeps a s-widened scope across the dialog round trip", async () => {
     const urls: string[] = [];
     const originalFetch = globalThis.fetch;
