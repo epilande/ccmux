@@ -127,12 +127,55 @@ it("scopes totals to the repo and names it, colored, at the right edge", async (
   );
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("Start ·3");
+  // Scoped, the count carries the total the scope hides, as Sessions' does.
+  expect(frame).toContain("Start ·3/33");
   expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
   const scope = setup
     .captureSpans()
     .lines[0]!.spans.find((s) => s.text === "repo");
   expect(scope?.fg.toInts()).toEqual(hex(theme.blue));
+});
+
+it("counts the other views in the base scope while a jump narrows this one", async () => {
+  const facts: RepoFacts[] = ["/repo", "/other"].map((root, i) => ({
+    repoRoot: root,
+    repoName: root.slice(1),
+    counts: {
+      value: { prs: i ? 10 : 1, issues: 0 },
+      updatedAt: 1,
+      stale: false,
+    },
+    worktrees: {
+      value: {
+        repoRoot: root,
+        repoName: root.slice(1),
+        worktrees: Array.from({ length: i ? 3 : 2 }, (_, n) => ({
+          path: `${root}/${n}`,
+          branch: `b${n}`,
+          isMain: n === 0,
+        })),
+      },
+      updatedAt: 1,
+      stale: false,
+    },
+  }));
+  setup = await testRender(
+    () => (
+      <ViewStrip
+        view="worktrees"
+        scope="/repo"
+        baseScope={null}
+        sessions={4}
+        facts={facts}
+        onView={() => {}}
+      />
+    ),
+    { width: 110, height: 1 },
+  );
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Sessions ·4 ━━ Worktrees ·2/5 ── Start ·11 ─");
+  expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
 });
 
 it("sums the repos that answered and marks the total partial when one never did", async () => {

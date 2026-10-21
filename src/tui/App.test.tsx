@@ -9369,3 +9369,89 @@ describe("App worktrees panel (W)", () => {
     }
   });
 });
+
+describe("repo scope across views", () => {
+  let original: typeof fetch;
+  beforeEach(() => {
+    original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.includes("prune-candidates"))
+        return Response.json({ candidates: [], skipped: [] });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+  const sessions = () => [
+    mockEnrichedSession({
+      id: "s1",
+      project: "myapp",
+      cwd: "/code/myapp",
+      mainRepoRoot: "/code/myapp",
+      tmuxPane: "%1",
+      tmuxTarget: "dev:1.1",
+    }),
+    mockEnrichedSession({
+      id: "s2",
+      project: "other",
+      cwd: "/code/other",
+      mainRepoRoot: "/code/other",
+      tmuxPane: "%2",
+      tmuxTarget: "dev:1.2",
+      status: "waiting",
+    }),
+  ];
+  const frame = async () => {
+    await new Promise((done) => setTimeout(done, 0));
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  };
+
+  // `h`/`l` cycle Sessions, Worktrees, Start: the key that leads from the
+  // jumped view back to Sessions.
+  for (const [key, back] of [
+    ["W", "h"],
+    ["N", "l"],
+  ] as const) {
+    it(`${key} narrows only the view it opens; ${back} returns to the whole list`, async () => {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(sessions(), null);
+      await frame();
+      // `G`: the myapp row, last in the list (the waiting row leads the band).
+      setup.mockInput.pressKey("G");
+      await frame();
+      setup.mockInput.pressKey(key);
+      const jumped = (await frame()).split("\n")[0]!;
+      expect(jumped).toContain("scope: myapp");
+      // The Sessions tab counts the list `h` returns to, not the jump.
+      expect(jumped).toContain("Sessions ·2 ");
+      setup.mockInput.pressKey(back);
+      const list = await frame();
+      expect(list.split("\n")[0]).toContain("━━ Sessions ·2 ");
+      expect(list.split("\n")[0]).toContain("scope: all repos");
+      expect(list).toContain("dev:1.1");
+      expect(list).toContain("dev:1.2");
+      expect(list).not.toContain("in other repos");
+    });
+  }
+
+  it("shows the hidden total and the waiting sessions an s scope hides", async () => {
+    await renderApp(120, 24, { groupBy: "none" });
+    sseCallbacks!.onInit(sessions(), null);
+    await frame();
+    setup.mockInput.pressKey("G");
+    await frame();
+    setup.mockInput.pressKey("s");
+    const scoped = await frame();
+    expect(scoped.split("\n")[0]).toContain("Sessions ·1/2");
+    expect(scoped.split("\n")[0]).toContain("scope: myapp");
+    expect(scoped).not.toContain("dev:1.2");
+    expect(scoped).toContain("needs attention (0)  +1 waiting in other repos");
+    // An explicit scope sticks across views.
+    setup.mockInput.pressKey("l");
+    setup.mockInput.pressKey("h");
+    expect((await frame()).split("\n")[0]).toContain("scope: myapp");
+  });
+});

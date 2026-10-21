@@ -1004,3 +1004,46 @@ describe("buildFlatItems with the attention band off", () => {
     ).toEqual(["# alpha", "# beta", "c"]);
   });
 });
+
+describe("buildFlatItems with waiting sessions the scope hides", () => {
+  const label = (i: ReturnType<typeof buildFlatItems>[number]) =>
+    i.type === "header"
+      ? `# ${i.label} (${i.count}) +${i.hiddenWaiting ?? 0}`
+      : i.filteredSession.session.id;
+
+  it("draws the band for hidden sessions alone, and closes it in a flat list", () => {
+    const rest = [toFiltered(mockSession({ id: "a", status: "idle" }))];
+    expect(
+      buildFlatItems(rest, "none", new Set(), false, [], true, 2).map(label),
+    ).toEqual(["# needs attention (0) +2", "# sessions (1) +0", "a"]);
+    expect(
+      buildFlatItems(rest, "project", new Set(), false, [], true, 2).map(label),
+    ).toEqual(["# needs attention (0) +2", "# my-project (1) +0", "a"]);
+  });
+
+  it("adds the count beside the band's own members", () => {
+    const items = buildFlatItems(
+      [toFiltered(mockSession({ id: "w", status: "waiting" }))],
+      "none",
+      new Set(),
+      false,
+      [],
+      true,
+      3,
+    );
+    expect(items.map(label)).toEqual(["# needs attention (1) +3", "w"]);
+  });
+
+  it("has no band to carry it when the band is off", () => {
+    const items = buildFlatItems(
+      [toFiltered(mockSession({ id: "a", status: "idle" }))],
+      "none",
+      new Set(),
+      false,
+      [],
+      false,
+      2,
+    );
+    expect(items.map(label)).toEqual(["a"]);
+  });
+});

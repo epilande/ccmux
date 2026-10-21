@@ -1394,7 +1394,9 @@ export function App(props: AppProps) {
       store.state.showHelp
     )
       return;
-    const scope = store.state.scope;
+    // The base scope: a `W`/`N` jump narrowed only the view it opened, and
+    // leaving it for another view ends the jump.
+    const scope = store.baseScope();
     if (next === "worktrees") store.actions.showWorktrees(scope);
     else if (next === "start") store.actions.showSourcePicker(scope);
     else {
@@ -1421,8 +1423,8 @@ export function App(props: AppProps) {
           store.actions.hideWorktrees();
           store.actions.hideSourcePicker();
         } else if (view() === "worktrees")
-          store.actions.showSourcePicker(store.state.scope);
-        else store.actions.showWorktrees(store.state.scope);
+          store.actions.showSourcePicker(store.baseScope());
+        else store.actions.showWorktrees(store.baseScope());
       } else switchMainView(nextView(view(), key === "h" ? -1 : 1));
     } else if (action?.id === "worktrees") store.actions.showWorktrees(repo);
     else if (action?.id === "start") store.actions.showSourcePicker(repo);
@@ -4109,8 +4111,10 @@ export function App(props: AppProps) {
             <ViewStrip
               view={view()}
               scope={store.state.scope}
+              baseScope={store.baseScope()}
               sessions={store.filteredSessions().length}
               total={
+                store.baseScope() ||
                 store.state.hideIdle ||
                 (store.state.searchMode && store.state.searchQuery)
                   ? store.sortedSessions().length
@@ -4128,7 +4132,7 @@ export function App(props: AppProps) {
           <Header
             sessionCount={store.filteredSessions().length}
             totalCount={
-              store.state.scope ||
+              store.baseScope() ||
               store.state.hideIdle ||
               (store.state.searchMode && store.state.searchQuery)
                 ? store.sortedSessions().length

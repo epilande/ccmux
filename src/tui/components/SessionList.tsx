@@ -25,6 +25,7 @@ import {
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
 import { GroupHeader } from "./GroupHeader";
+import { getStatusColor } from "./StatusBadge";
 import type { HeaderCells, ResolvedColumns } from "./session-columns";
 import {
   resolveLayout,
@@ -115,6 +116,22 @@ export function isActivePaneRow(
   activePaneId: string | null | undefined,
 ): boolean {
   return session.tmuxPane !== null && session.tmuxPane === activePaneId;
+}
+
+/**
+ * What the `needs attention` band says about waiting sessions the repo scope
+ * hides, or undefined when it hides none. In the waiting color: these are
+ * sessions that need the user, just not on this list.
+ */
+export function hiddenWaitingNotice(
+  hidden: number | undefined,
+): { text: string; short: string; color: string } | undefined {
+  if (!hidden) return undefined;
+  return {
+    text: `+${hidden} waiting in other repos`,
+    short: `+${hidden} elsewhere`,
+    color: getStatusColor("waiting", null),
+  };
 }
 
 /** Columns a keyboard-opened row menu is inset from the list's left edge, so
@@ -359,6 +376,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             // The rule itself is sized by layout.
             width={effectiveWidth() - viewportInset()}
             facts={factsText(headerFacts(item))}
+            notice={hiddenWaitingNotice(item.hiddenWaiting)}
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}

@@ -1,6 +1,6 @@
 # TUI key migration: Sessions · Worktrees · Start
 
-The picker now has three persistent views and starts with all repositories in scope. `h`/`l` cycle views; `W` and `N` jump to Worktrees or Start narrowed to the cursor's repo, including when that view is already open. `s` toggles repo scope. Scope changes retain the selected session only if it remains visible. The sidebar keeps compact `W`/`N` overlays without a strip.
+The picker now has three persistent views and starts with all repositories in scope. `h`/`l` cycle views; `W` and `N` jump to Worktrees or Start narrowed to the cursor's repo, including when that view is already open; the narrowing ends with that view, which restores the previous scope. `s` toggles repo scope for every view. Scope changes retain the selected session only if it remains visible. The sidebar keeps compact `W`/`N` overlays without a strip.
 
 | Previously                                  | Now                                                           |
 | ------------------------------------------- | ------------------------------------------------------------- |
