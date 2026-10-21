@@ -69,6 +69,7 @@ interface SessionItemProps {
   session: EnrichedSession;
   selected: boolean;
   index: number;
+  marked?: boolean;
   highlights?: SessionItemHighlights | null;
   /** Live transcript-search snippet, shown dim in the prompt cell to explain
    * why the row matched when no prompt highlight applies. */
@@ -315,6 +316,7 @@ export function prStateColor(
 interface FieldRenderContext {
   session: EnrichedSession;
   index: number;
+  marked?: boolean;
   iconStyle?: IconStyle;
   highlights?: SessionItemProps["highlights"];
   isActivePane?: boolean;
@@ -535,7 +537,7 @@ const FieldCell: Component<{
       return (
         <box width={width}>
           <Text fg={dimColor(ctx, theme.overlay)}>
-            {ctx.index < 9 ? `${ctx.index + 1}` : " "}
+            {ctx.marked ? "✓" : ctx.index < 9 ? `${ctx.index + 1}` : " "}
           </Text>
         </box>
       );
@@ -1024,7 +1026,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       cells +
       (attn > 0 ? attn + 1 : 0) +
       promptFloor +
-      2 + // small margin so the truncated content sits inside its flex box
+      (props.sidebar ? 0 : 2) + // the narrow sidebar spends this margin on its index
       scrollbarReserve(); // scrollbox eats width the terminal size hides
     return Math.max(12, effectiveWidth() - reserved);
   });
@@ -1108,6 +1110,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   const ctx: FieldRenderContext = {
     get session() {
       return props.session;
+    },
+    get marked() {
+      return props.marked;
     },
     get index() {
       return props.index;

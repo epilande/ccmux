@@ -33,6 +33,8 @@ export interface BackgroundChild {
  * background agent created".
  */
 export interface BranchPR {
+  /** A previously successful repository lookup failed on refresh. */
+  stale?: boolean;
   id: string;
   href: string;
   /**

@@ -1,5 +1,14 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runGit, type GitRun } from "./worktree-git";
 import { describe, it, expect } from "bun:test";
-import { listOpenPRs } from "./pr-list";
+import {
+  associatedBranchPRs,
+  listOpenPRs,
+  upstreamHeadName,
+  type OpenPR,
+} from "./pr-list";
 import type { GhRun, GhRunResult } from "./gh-spawn-source";
 
 /** A runner that answers every call with one canned result. */
@@ -19,6 +28,8 @@ const PR_ROW = {
   ],
   headRefName: "feat/pr-list-panel",
   headRefOid: "abc123",
+  headRepository: { name: "r" },
+  headRepositoryOwner: { login: "fork-owner" },
 };
 
 describe("listOpenPRs", () => {
@@ -79,6 +90,7 @@ describe("listOpenPRs", () => {
     expect(pr!.headRefName).toBe("feat/pr-list-panel");
     // The only reliable branch identity; never the head ref NAME.
     expect(pr!.headRefOid).toBe("abc123");
+    expect(pr!.headRepository).toEqual({ owner: "fork-owner", name: "r" });
   });
 
   it("reports an empty repo as an empty list, not as a failure", async () => {
@@ -257,7 +269,10 @@ describe("listOpenPRs", () => {
       "/repo",
       ghAnswering({
         stdout: JSON.stringify([
-          { ...PR_ROW, title: "family \ud83d\udc68\u200d\ud83d\udc69 and \u200cnb" },
+          {
+            ...PR_ROW,
+            title: "family \ud83d\udc68\u200d\ud83d\udc69 and \u200cnb",
+          },
         ]),
       }),
     );
@@ -329,5 +344,319 @@ describe("listOpenPRs", () => {
       if (found.ok) continue;
       expect(found.error).toContain("did not return valid JSON");
     }
+  });
+});
+
+it("can query an active branch beyond the repository list cap", async () => {
+  let args: string[] = [];
+  await listOpenPRs(
+    "/repo",
+    async (_cwd, argv) => {
+      args = argv;
+      return { exitCode: 0, stdout: "[]", stderr: "" };
+    },
+    "old-feature",
+  );
+  expect(
+    args.slice(args.indexOf("--head"), args.indexOf("--head") + 2),
+  ).toEqual(["--head", "old-feature"]);
+});
+
+describe("branch PR identity", () => {
+  const pr: OpenPR = {
+    number: 7,
+    title: "change",
+    url: "https://github.com/o/r/pull/7",
+    author: "author",
+    isDraft: false,
+    reviewDecision: null,
+    ciStatus: "none",
+    headRefName: "patch-1",
+    headRefOid: "abc",
+    headRepository: { owner: "fork-owner", name: "r" },
+  };
+  async function select(
+    tip: string,
+    remote: string,
+    merge: string,
+    url = "git@github.com:fork-owner/r.git",
+  ) {
+    const calls: string[][] = [];
+    const result = await associatedBranchPRs(
+      "/repo",
+      "patch-1",
+      [
+        pr,
+        {
+          ...pr,
+          number: 8,
+          headRepository: { owner: "other", name: "r" },
+          headRefOid: "other-tip",
+        },
+      ],
+      async (_cwd, args) => {
+        calls.push(args);
+        if (args[0] === "rev-parse") {
+          return {
+            exitCode: tip ? 0 : 1,
+            stderr: "",
+            stdout: tip ? `${tip}\n` : "",
+          };
+        }
+        if (args[0] === "config") {
+          const key = args[args.length - 1] ?? "";
+          const value = key.endsWith(".remote")
+            ? remote
+            : key.endsWith(".merge")
+              ? merge
+              : "";
+          return {
+            exitCode: value ? 0 : 1,
+            stderr: "",
+            stdout: value ? `${value}\n` : "",
+          };
+        }
+        return { exitCode: 0, stderr: "", stdout: url };
+      },
+    );
+    expect(
+      calls.every((args) =>
+        ["rev-parse", "config", "remote"].includes(args[0]!),
+      ),
+    ).toBe(true);
+    return result;
+  }
+  it("uses upstream repository and ref, independently of author and local tip", async () => {
+    const result = await select("local-ahead", "origin", "refs/heads/patch-1");
+    expect(result).toEqual({ ok: true, value: [pr] });
+    expect(
+      await select("local-ahead", "origin", "refs/heads/different"),
+    ).toEqual({ ok: true, value: [] });
+  });
+  it("does not confuse a different host or base repo with the source repo", async () => {
+    expect(
+      await select(
+        "local-ahead",
+        "origin",
+        "refs/heads/patch-1",
+        "https://elsewhere.test/fork-owner/r",
+      ),
+    ).toEqual({ ok: true, value: [] });
+    expect(
+      await select(
+        "local-ahead",
+        "origin",
+        "refs/heads/patch-1",
+        "https://github.com/o/r",
+      ),
+    ).toEqual({ ok: true, value: [] });
+  });
+  it("reads a URL stored in branch.<name>.remote without a named remote", async () => {
+    expect(
+      await select(
+        "local-ahead",
+        "git@github.com:fork-owner/r.git",
+        "refs/heads/patch-1",
+      ),
+    ).toEqual({ ok: true, value: [pr] });
+  });
+  it("uses exact SHA proof without a remote and never matches just the branch name", async () => {
+    expect(await select("abc", "", "")).toEqual({ ok: true, value: [pr] });
+    expect(await select("local-ahead", "", "")).toEqual({
+      ok: true,
+      value: [],
+    });
+  });
+  it("keeps exact SHA proof when the upstream names an unrelated branch", async () => {
+    expect(
+      await select(
+        "abc",
+        "origin",
+        "refs/heads/main",
+        "https://github.com/o/r",
+      ),
+    ).toEqual({ ok: true, value: [pr] });
+    expect(
+      await select(
+        "local-ahead",
+        "origin",
+        "refs/heads/main",
+        "https://github.com/o/r",
+      ),
+    ).toEqual({ ok: true, value: [] });
+  });
+  describe("a branch tracking the trunk under another name", () => {
+    const fromMain: OpenPR = {
+      ...pr,
+      number: 9,
+      url: "https://github.com/o/r/pull/9",
+      headRefName: "main",
+      headRefOid: "main-tip",
+      headRepository: { owner: "o", name: "r" },
+    };
+    const release: OpenPR = {
+      ...fromMain,
+      number: 10,
+      url: "https://github.com/o/r/pull/10",
+      headRefName: "develop",
+    };
+    function tracking(merge: string, remoteHead = "") {
+      return async (_cwd: string, args: string[]) => {
+        const last = args[args.length - 1] ?? "";
+        const out = (stdout: string) => ({
+          exitCode: stdout ? 0 : 1,
+          stderr: "",
+          stdout: stdout ? `${stdout}\n` : "",
+        });
+        if (args[0] === "rev-parse") return out("local-ahead");
+        if (args[0] === "symbolic-ref") return out(remoteHead);
+        if (last.endsWith(".remote")) return out("origin");
+        if (last.endsWith(".merge")) return out(merge);
+        return out("https://github.com/o/r");
+      };
+    }
+    it("does not inherit a PR whose head is main", async () => {
+      expect(
+        await associatedBranchPRs(
+          "/repo",
+          "feature",
+          [fromMain],
+          tracking("refs/heads/main"),
+        ),
+      ).toEqual({ ok: true, value: [] });
+    });
+    it("keeps that PR for the main checkout itself", async () => {
+      expect(
+        await associatedBranchPRs(
+          "/repo",
+          "main",
+          [fromMain],
+          tracking("refs/heads/main"),
+        ),
+      ).toEqual({ ok: true, value: [fromMain] });
+    });
+    it("reads a custom trunk from the remote's HEAD", async () => {
+      const git = tracking("refs/heads/develop", "origin/develop");
+      expect(
+        await associatedBranchPRs("/repo", "feature", [release], git),
+      ).toEqual({ ok: true, value: [] });
+      expect(
+        await associatedBranchPRs(
+          "/repo",
+          "feature",
+          [release],
+          tracking("refs/heads/develop", "origin/main"),
+        ),
+      ).toEqual({ ok: true, value: [release] });
+    });
+  });
+  it("understands an explicit pull ref tracked from the base repository", async () => {
+    expect(
+      await select(
+        "local-ahead",
+        "origin",
+        "refs/pull/7/head",
+        "https://github.com/o/r",
+      ),
+    ).toEqual({ ok: true, value: [pr] });
+  });
+  it("reports unreadable local identity as a failure, allowing cached facts to go stale", async () => {
+    expect(
+      (
+        await associatedBranchPRs("/repo", "patch-1", [pr], async () => ({
+          exitCode: 128,
+          stdout: "",
+          stderr: "gone",
+        }))
+      ).ok,
+    ).toBe(false);
+  });
+});
+
+it("associates a real local-ahead branch using its configured fork remote", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ccmux-pr-identity-"));
+  const git = async (...args: string[]) => {
+    const result = await runGit(root, args);
+    expect(result.exitCode).toBe(0);
+    return result.stdout.trim();
+  };
+  try {
+    await git("init", "-b", "patch-1");
+    await git("config", "user.name", "Test");
+    await git("config", "user.email", "test@example.com");
+    await git(
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "PR head",
+    );
+    const tip = await git("rev-parse", "HEAD");
+    await git("remote", "add", "fork", "git@github.com:owner/project.git");
+    await git("config", "branch.patch-1.remote", "fork");
+    await git("config", "branch.patch-1.merge", "refs/heads/patch-1");
+    await git(
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "Local work",
+    );
+    const base: OpenPR = {
+      number: 1,
+      title: "change",
+      url: "https://github.com/upstream/project/pull/1",
+      author: "someone-else",
+      isDraft: false,
+      reviewDecision: null,
+      ciStatus: "none",
+      headRefName: "patch-1",
+      headRefOid: tip,
+      headRepository: { owner: "owner", name: "project" },
+    };
+    const result = await associatedBranchPRs(root, "patch-1", [
+      base,
+      {
+        ...base,
+        number: 2,
+        headRepository: { owner: "unrelated", name: "project" },
+      },
+    ]);
+    expect(result).toEqual({ ok: true, value: [base] });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+describe("upstreamHeadName", () => {
+  const git =
+    (exitCode: number, stdout = ""): GitRun =>
+    async () => ({ exitCode, stdout, stderr: "" });
+
+  it("uses the local name when no upstream is configured", async () => {
+    expect(await upstreamHeadName("/repo", "review-7", git(1))).toBe(
+      "review-7",
+    );
+    expect(await upstreamHeadName("/repo", "review-7", git(128))).toBe(
+      "review-7",
+    );
+  });
+
+  it("uses the upstream head when the branch tracks one", async () => {
+    expect(
+      await upstreamHeadName(
+        "/repo",
+        "review-7",
+        git(0, "refs/heads/feature\n"),
+      ),
+    ).toBe("feature");
+  });
+
+  it("refuses a failed config read instead of querying the local alias", async () => {
+    await expect(
+      upstreamHeadName("/repo", "review-7", git(124)),
+    ).rejects.toThrow("git config failed (124)");
   });
 });

@@ -485,6 +485,7 @@ export class Daemon {
     // hydrate live via session_created/session_updated broadcasts, which
     // the constructor wires before this line.
     this.server.start();
+    this.server.startRepoFacts();
     this.attentionTransitions.start();
     this.notifier.start();
 

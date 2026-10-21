@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { RepoAnswerCache } from "./repo-answer-cache";
 import type { SourceResult } from "./gh-spawn-source";
 
@@ -165,12 +165,26 @@ describe("RepoAnswerCache", () => {
     const subject = cache();
     const source = counting(bad("gh: not logged in"), ok("recovered"));
 
-    await subject.answer("/repo", false, source.fetch);
-    age(subject, "/repo", FAILURE_TTL - 1);
-    const again = await subject.answer("/repo", false, source.fetch);
+    // Keep the one-millisecond boundary independent of real clock ticks.
+    const clock = spyOn(Date, "now").mockReturnValue(
+      Date.parse("2024-01-15T12:00:00Z"),
+    );
+    try {
+      await subject.answer("/repo", false, source.fetch);
+      age(subject, "/repo", FAILURE_TTL - 1);
+      const again = await subject.answer("/repo", false, source.fetch);
 
-    expect(again).toEqual(bad("gh: not logged in"));
-    expect(source.calls()).toBe(1);
+      expect(again).toEqual(bad("gh: not logged in"));
+      expect(source.calls()).toBe(1);
+
+      age(subject, "/repo", 1);
+      expect(await subject.answer("/repo", false, source.fetch)).toEqual(
+        ok("recovered"),
+      );
+      expect(source.calls()).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("drops the entry when a fetch throws, so the repo cannot wedge in flight", async () => {

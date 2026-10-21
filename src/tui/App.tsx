@@ -1,3 +1,6 @@
+import { ViewStrip } from "./components/ViewStrip";
+import { nextView, actionForKey, type View, type ViewMemory } from "./actions";
+import { branchPR, createRepoFacts } from "./utils/repo-facts";
 import { watch } from "fs";
 import {
   batch,
@@ -588,8 +591,9 @@ export function App(props: AppProps) {
   function reviewWorktree(target: {
     path: string;
     sessionId: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
+    branch?: boolean;
+    returnToSources?: SourcesReturn;
   }) {
     if (reviewInFlight) return;
     // Re-probe live (not the launch-time `hunkAtLaunch`) so a hunk installed
@@ -607,23 +611,28 @@ export function App(props: AppProps) {
     // captured notes with no way to answer for them. Nothing below needs the
     // panel: the row was already read into `target` and `session`.
     //
-    // The scope travels IN THE PAYLOAD, not from the store: Tab's rescope is
-    // panel-local state the store never sees, so reading the store here
-    // reopened a widened panel back on its narrow opening repo. Every exit
+    // The scope travels IN THE PAYLOAD: it is the scope the panel showed when
+    // the review left it, and the reopen re-establishes exactly that, so a
+    // panel `s` had widened or narrowed comes back the same way. Every exit
     // below reopens the panel with the cursor on the reviewed row, and the
     // hand-back paths do it through `onDone` so the reopen provably follows
     // the confirm's own resolution instead of racing it back over the dialog.
     const reopen = () =>
-      store.actions.showWorktrees(target.panelRepo, {
-        initialCursor: target.path,
-        isReturn: true,
-        startWidened: target.panelRepo !== null && target.panelScope === null,
-      });
+      target.returnToSources
+        ? store.actions.showSourcePicker(
+            target.returnToSources.repo,
+            sourcesReopenOptions(target.returnToSources),
+          )
+        : store.actions.showWorktrees(target.panelScope, {
+            initialCursor: target.path,
+            isReturn: true,
+          });
     store.actions.hideWorktrees();
+    store.actions.hideSourcePicker();
     reviewInFlight = true;
     // Resolved before the guard is honored so a slow git can't be raced, and
     // before `runHunkReview` because that is what suspends the renderer.
-    resolveMergeBase(target.path)
+    (target.branch ? resolveMergeBase(target.path) : Promise.resolve(null))
       .then((base) =>
         runHunkReview(renderer, target.path, { target: base ?? undefined }),
       )
@@ -696,7 +705,6 @@ export function App(props: AppProps) {
   function spawnInWorktree(target: {
     cwd: string;
     existingWorktree: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
     sameRepoRegisteredRoots: readonly string[];
     /**
@@ -735,51 +743,11 @@ export function App(props: AppProps) {
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
-      // The payload's own scope, not the store's: Tab's rescope is
-      // panel-local, and a cancel must land on the view the user left.
+      // The scope the panel showed when Enter left it: a cancel must land on
+      // the view the user left.
       returnToWorktrees: {
-        repo: target.panelRepo,
         scope: target.panelScope,
         cursor: target.cursor ?? worktree ?? target.cwd,
-      },
-    });
-  }
-
-  /**
-   * The Worktrees panel's Enter on an open PR that is NOT checked out here
-   * (issue #151): open the dialog that cuts a worktree from its head.
-   *
-   * No revalidation of its own, unlike `spawnInWorktree`: the fact that could
-   * have changed is whether the PR is still open, and only GitHub knows.
-   * `POST /spawn` re-runs `lookupPR` and refuses a non-OPEN one, so a stale
-   * row fails safe with the daemon's own message instead of this client's
-   * guess about a state it cannot see.
-   *
-   * `cwd` is the repo root: `gh` resolves the PR from the directory the
-   * request names, and the worktree is cut under that repo.
-   */
-  function spawnFromPR(target: {
-    number: number;
-    title: string;
-    repoRoot: string;
-    cursor: string;
-    panelRepo: string | null;
-    panelScope: string | null;
-  }) {
-    store.actions.hideWorktrees();
-    openNewSession({
-      cwd: target.repoRoot,
-      pr: {
-        number: target.number,
-        title: target.title,
-        repoRoot: target.repoRoot,
-      },
-      // The PR row's own synthetic key, so a cancel lands the cursor back on
-      // the row it was opened from rather than on the top of the list.
-      returnToWorktrees: {
-        repo: target.panelRepo,
-        scope: target.panelScope,
-        cursor: target.cursor,
       },
     });
   }
@@ -887,29 +855,6 @@ export function App(props: AppProps) {
   }
 
   /**
-   * The Worktrees panel's `n`: open the picker over the panel's LIVE scope,
-   * remembering where to come back to.
-   *
-   * `panelScope` and not `props.repo`: Tab's rescope is panel-local state
-   * this store never sees, so a picker opened from a widened panel has to be
-   * widened too, and the Esc back into the panel has to re-widen it.
-   */
-  function startFromSource(target: {
-    panelRepo: string | null;
-    panelScope: string | null;
-    cursor: string;
-  }) {
-    store.actions.hideWorktrees();
-    store.actions.showSourcePicker(target.panelScope, {
-      origin: {
-        panelRepo: target.panelRepo,
-        panelScope: target.panelScope,
-        panelCursor: target.cursor,
-      },
-    });
-  }
-
-  /**
    * Esc out of the picker: back to the Worktrees panel that opened it, or
    * simply closed.
    *
@@ -921,10 +866,9 @@ export function App(props: AppProps) {
     const origin = store.state.sourcePicker?.origin ?? null;
     store.actions.hideSourcePicker();
     if (!origin) return;
-    store.actions.showWorktrees(origin.panelRepo, {
+    store.actions.showWorktrees(origin.panelScope, {
       initialCursor: origin.panelCursor,
       isReturn: true,
-      startWidened: origin.panelRepo !== null && origin.panelScope === null,
     });
   }
 
@@ -1420,7 +1364,72 @@ export function App(props: AppProps) {
    * checkout, which is exactly what the panel keys off. Null lists every
    * known repo.
    */
+  const [worktreeModal, setWorktreeModal] = createSignal(false);
+  let worktreeMemory: ViewMemory | undefined;
+  let sourceMemory: ViewMemory | undefined;
+  const view = (): View =>
+    store.state.worktrees
+      ? "worktrees"
+      : store.state.sourcePicker
+        ? "start"
+        : "sessions";
+  const repoFacts = createRepoFacts({
+    connected: () => store.state.connectionState === "connected",
+    sources: () => view() === "start",
+    cwd: () => pickerCwd(),
+    visible: () => isVisible(),
+  });
+  function switchMainView(next: View) {
+    if (
+      next === view() ||
+      worktreeModal() ||
+      store.state.newSession ||
+      store.state.confirmMode ||
+      store.state.showHelp
+    )
+      return;
+    const scope = store.state.scope;
+    if (next === "worktrees") store.actions.showWorktrees(scope);
+    else if (next === "start") store.actions.showSourcePicker(scope);
+    else {
+      store.actions.hideWorktrees();
+      store.actions.hideSourcePicker();
+    }
+  }
+  function refreshAll() {
+    void repoFacts.refresh(true);
+    sseClient?.disconnect();
+    sseClient?.connect();
+  }
+  function navigateView(event: KeyEvent, repo: string | null): boolean {
+    const key = event.name;
+    const action = actionForKey(event);
+    if (
+      action?.id === "views" &&
+      !event.meta &&
+      !event.ctrl &&
+      (key === "h" || key === "l")
+    ) {
+      if (props.sidebar) {
+        if (key === "h") {
+          store.actions.hideWorktrees();
+          store.actions.hideSourcePicker();
+        } else if (view() === "worktrees")
+          store.actions.showSourcePicker(store.state.scope);
+        else store.actions.showWorktrees(store.state.scope);
+      } else switchMainView(nextView(view(), key === "h" ? -1 : 1));
+    } else if (action?.id === "worktrees") store.actions.showWorktrees(repo);
+    else if (action?.id === "start") store.actions.showSourcePicker(repo);
+    else if (action?.id === "help") store.actions.toggleHelp();
+    else return false;
+    event.preventDefault();
+    return true;
+  }
+
   function selectedRepoRoot(): string | null {
+    // A synthetic header (the `needs attention` band, the flat list's `sessions`
+    // header) spans repositories, so its first member's repo would be an
+    // arbitrary pick: `s`, `W` and `N` from one stay global.
     const header = store.selectedGroupHeader();
     if (header && isSyntheticGroupKey(header.groupKey)) return null;
     return (
@@ -2449,11 +2458,10 @@ export function App(props: AppProps) {
     /** Origin marker set ONLY by the source picker's Enter: a cancel of this
      *  dialog returns to the picker with its filter and cursor intact. */
     returnToSources?: SourcesReturn;
-    /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
-     *  this dialog returns to the panel, cursor on `cursor`, scoped to the
-     *  live filter the panel had (`scope`, null when Tab had widened it). */
+    /** Origin marker set ONLY by the Worktrees panel (Enter, `n`): a cancel
+     *  of this dialog returns to the panel, cursor on `cursor`, on the
+     *  scope the panel showed (`scope`, null for all repos). */
     returnToWorktrees?: {
-      repo: string | null;
       scope: string | null;
       cursor: string;
     };
@@ -2515,10 +2523,9 @@ export function App(props: AppProps) {
       return;
     }
     if (marker) {
-      store.actions.showWorktrees(marker.repo, {
+      store.actions.showWorktrees(marker.scope, {
         initialCursor: marker.cursor,
         isReturn: true,
-        startWidened: marker.repo !== null && marker.scope === null,
       });
     }
   }
@@ -3184,11 +3191,7 @@ export function App(props: AppProps) {
       if (pending?.sessionId === sessionId) {
         void deliverReviewNotes(sessionId, pending.notes, "confirm");
       }
-    } else if (action === "kill-all") {
-      // The daemon reaps in-flight invoke workers itself (it owns the
-      // authoritative in-flight set); the client only needs to ask once.
-      fetch(`${getDaemonUrl()}/sessions/kill-all`, { method: "POST" });
-    } else if (action === "kill-group") {
+    } else if (action === "kill-all" || action === "kill-group") {
       for (const id of store.state.confirmSessionIds) {
         killOrCancelSession(id);
       }
@@ -3550,6 +3553,8 @@ export function App(props: AppProps) {
     if (visibility && !visibility.visible()) visibility.refresh();
 
     const key = event.name;
+    const armedZ = pendingZ;
+    pendingZ = false;
 
     // First, and it swallows the key that dismissed it. This is raised over
     // whatever was already on screen (including the new-session dialog, which
@@ -3572,20 +3577,6 @@ export function App(props: AppProps) {
         helpScrollbox.scrollTo(helpScrollbox.scrollTop + delta);
       }
       event.preventDefault();
-      return;
-    }
-
-    // The Worktrees panel owns every key while it is up (it registers its own
-    // handler), so nothing here may also act on them.
-    if (store.state.worktrees) {
-      event.preventDefault();
-      return;
-    }
-
-    // The source picker likewise — and it must NOT preventDefault here, the
-    // way the panel does: its filter is an `<input>`, and a key defaulted on
-    // the way past would never reach it.
-    if (store.state.sourcePicker) {
       return;
     }
 
@@ -3623,6 +3614,19 @@ export function App(props: AppProps) {
 
     if (store.state.newSession) {
       handleNewSessionKey(event);
+      return;
+    }
+
+    // The Worktrees panel owns every key while it is up (it registers its own
+    // handler), so nothing here may also act on them.
+    if (store.state.worktrees) {
+      return;
+    }
+
+    // The source picker likewise — and it must NOT preventDefault here, the
+    // way a modal does: its filter is an `<input>`, and a key defaulted on
+    // the way past would never reach it.
+    if (store.state.sourcePicker) {
       return;
     }
 
@@ -3719,8 +3723,7 @@ export function App(props: AppProps) {
     if (key !== "g" && pendingG) {
       pendingG = false;
     }
-    if (pendingZ) {
-      pendingZ = false;
+    if (armedZ) {
       if (key === "m" && store.state.groupBy !== "none") {
         store.actions.collapseAll();
         event.preventDefault();
@@ -3789,12 +3792,7 @@ export function App(props: AppProps) {
           // as `"N"` or as `"n"` with `shift` set.
           store.actions.showSourcePicker(selectedRepoRoot());
         } else {
-          const item = store.selectedFlatItem();
-          if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
-            event.preventDefault();
-            break;
-          }
-          openNewSession(newSessionContext(item));
+          openNewSession(newSessionContext(store.selectedFlatItem()));
         }
         event.preventDefault();
         break;
@@ -3825,8 +3823,29 @@ export function App(props: AppProps) {
       case " ": {
         const item = store.selectedFlatItem();
         if (item?.type === "header") {
-          store.actions.toggleGroupCollapse(item.groupKey);
-        }
+          store.actions.markSessions(item.members.map((m) => m.session.id));
+        } else if (item?.type === "session")
+          store.actions.markSessions([item.filteredSession.session.id]);
+        event.preventDefault();
+        break;
+      }
+
+      case "a":
+      case "A":
+        store.actions.markAllSessions(key === "A" || event.shift);
+        event.preventDefault();
+        break;
+
+      case "s":
+        store.actions.setScope(store.state.scope ? null : selectedRepoRoot());
+        event.preventDefault();
+        break;
+
+      case "o": {
+        const session = store.selectedSession();
+        const pr = session ? branchPR(session, repoFacts.data().repos) : null;
+        if (pr) liveEffects.openUrl(pr.href);
+        else store.actions.showToast("No GitHub PR on this row");
         event.preventDefault();
         break;
       }
@@ -3834,11 +3853,29 @@ export function App(props: AppProps) {
       case "X":
       case "x":
         if (key === "X" || event.shift) {
-          if (store.filteredSessions().length > 0) {
-            store.actions.showConfirmDialog(null, "kill-all");
+          const ids = store
+            .flatItems()
+            .flatMap((item) =>
+              item.type === "session" ? [item.filteredSession.session.id] : [],
+            );
+          if (ids.length > 0) {
+            store.actions.showConfirmDialog(null, "kill-all", ids);
           }
         } else {
+          const marked = store
+            .filteredSessions()
+            .filter((s) => store.state.markedSessions.has(s.session.id))
+            .map((s) => s.session.id);
           const sessionToKill = store.selectedSession();
+          if (marked.length) {
+            store.actions.showConfirmDialog(
+              null,
+              "kill-group",
+              marked,
+              "Marked sessions",
+            );
+            break;
+          }
           if (sessionToKill) {
             store.actions.showConfirmDialog(sessionToKill.id, "kill");
           } else if (store.selectedGroupHeader()) {
@@ -3857,14 +3894,9 @@ export function App(props: AppProps) {
         // `shift` set rather than as `"W"`; gating on the modifier is what
         // keeps a bare `w` from opening a surface that can delete.
         if (key !== "W" && !event.shift) break;
-        const item = store.selectedFlatItem();
-        if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
-          event.preventDefault();
-          break;
-        }
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise. The
-        // panel's own Tab widens from there.
+        // panel's own `s` widens from there.
         store.actions.showWorktrees(selectedRepoRoot());
         event.preventDefault();
         break;
@@ -3910,8 +3942,7 @@ export function App(props: AppProps) {
       case "R":
       case "r":
         if (key === "R" || event.shift) {
-          sseClient?.disconnect();
-          sseClient?.connect();
+          refreshAll();
         } else {
           const sessionToRestart = store.selectedSession();
           if (sessionToRestart) {
@@ -3995,38 +4026,12 @@ export function App(props: AppProps) {
         break;
 
       case "h":
-        if (event.meta && store.state.showPreview) {
-          store.actions.resizePreview(5);
-          event.preventDefault();
-        } else if (!event.meta && store.state.groupBy !== "none") {
-          // Collapse: on a session, collapse parent group; on a header, collapse it
-          const item = store.selectedFlatItem();
-          if (item?.type === "session") {
-            store.actions.collapseParent();
-          } else if (item?.type === "header" && !item.collapsed) {
-            store.actions.toggleGroupCollapse(item.groupKey);
-          }
-          event.preventDefault();
-        }
-        break;
-
       case "l":
-        if (event.meta && store.state.showPreview) {
-          store.actions.resizePreview(-5);
-          event.preventDefault();
-        } else if (!event.meta && store.state.groupBy !== "none") {
-          // Expand: on a collapsed header, expand it; on expanded header, move to first child
-          const item = store.selectedFlatItem();
-          if (item?.type === "header") {
-            if (item.collapsed) {
-              store.actions.expandGroup(item.groupKey);
-            } else {
-              // Move to first child session
-              store.actions.moveSelection(1);
-            }
-          }
-          event.preventDefault();
-        }
+        if (event.meta && store.state.showPreview)
+          store.actions.resizePreview(key === "h" ? 5 : -5);
+        else if (!event.meta && !props.sidebar)
+          switchMainView(nextView(view(), key === "h" ? -1 : 1));
+        event.preventDefault();
         break;
 
       case "-":
@@ -4092,20 +4097,45 @@ export function App(props: AppProps) {
       }}
     >
       <box flexDirection="column" width="100%" height="100%">
-        <Header
-          sessionCount={store.filteredSessions().length}
-          totalCount={
-            store.state.hideIdle ||
-            (store.state.searchMode && store.state.searchQuery)
-              ? store.sortedSessions().length
-              : undefined
+        <Show
+          when={props.sidebar}
+          fallback={
+            <ViewStrip
+              view={view()}
+              scope={store.state.scope}
+              sessions={store.filteredSessions().length}
+              total={
+                store.state.hideIdle ||
+                (store.state.searchMode && store.state.searchQuery)
+                  ? store.sortedSessions().length
+                  : undefined
+              }
+              hideIdle={store.state.hideIdle}
+              connectionState={store.state.connectionState}
+              daemonDegraded={store.state.daemonHealth.degraded}
+              invokeInFlight={store.invocationInFlightCount()}
+              facts={repoFacts.data().repos}
+              onView={switchMainView}
+            />
           }
-          hideIdle={store.state.hideIdle}
-          connectionState={store.state.connectionState}
-          daemonDegraded={store.state.daemonHealth.degraded}
-          dimmed={store.state.previewFocused}
-          invokeInFlight={store.invocationInFlightCount()}
-        />
+        >
+          <Header
+            sessionCount={store.filteredSessions().length}
+            totalCount={
+              store.state.scope ||
+              store.state.hideIdle ||
+              (store.state.searchMode && store.state.searchQuery)
+                ? store.sortedSessions().length
+                : undefined
+            }
+            scope={store.state.scope}
+            hideIdle={store.state.hideIdle}
+            connectionState={store.state.connectionState}
+            daemonDegraded={store.state.daemonHealth.degraded}
+            dimmed={store.state.previewFocused}
+            invokeInFlight={store.invocationInFlightCount()}
+          />
+        </Show>
 
         <Show when={store.state.searchMode}>
           <SearchInput
@@ -4148,11 +4178,8 @@ export function App(props: AppProps) {
         <box flexDirection="row" flexGrow={1}>
           <SessionList
             items={store.flatItems()}
-            // Deliberately NOT the filtered list: the only thing reading it
-            // is the worktree-counts scope, which must not move when a
-            // search query or the hide-idle toggle changes.
-            sessions={store.unfilteredSessions()}
-            groupBy={store.state.groupBy}
+            repoFacts={repoFacts.data()}
+            marks={store.state.markedSessions}
             selectedIndex={store.selectedIndex()}
             iconStyle={store.state.iconStyle}
             showPreview={store.state.showPreview}
@@ -4161,7 +4188,6 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             ageFadeAfter={store.state.ageFadeAfter}
-            connectionState={store.state.connectionState}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry
@@ -4224,12 +4250,143 @@ export function App(props: AppProps) {
           />
         </Show>
 
-        <Show when={store.state.showHelp}>
-          <HelpOverlay
-            sidebar={props.sidebar}
-            reviewable={reviewEnabled}
-            onScrollboxRef={(ref) => (helpScrollbox = ref)}
-          />
+        <Show when={store.state.worktrees}>
+          {(panel: () => NonNullable<typeof store.state.worktrees>) => (
+            <WorktreesPanel
+              onModalChange={setWorktreeModal}
+              scope={store.state.scope}
+              activeSessionId={store.state.activeSessionId}
+              facts={repoFacts.data()}
+              memory={
+                worktreeMemory?.scope === store.state.scope
+                  ? worktreeMemory
+                  : undefined
+              }
+              onRemember={(value) => {
+                worktreeMemory = value;
+              }}
+              embedded={!props.sidebar}
+              enabled={
+                !store.state.showHelp &&
+                !store.state.confirmMode &&
+                !store.state.newSession
+              }
+              onNavigate={navigateView}
+              onScope={store.actions.setScope}
+              onRefresh={refreshAll}
+              onNew={(cwd) => {
+                const scope = store.state.scope;
+                store.actions.hideWorktrees();
+                openNewSession({
+                  cwd,
+                  returnToWorktrees: {
+                    scope,
+                    cursor: worktreeMemory?.cursor ?? cwd,
+                  },
+                });
+              }}
+              onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
+              onKillAll={(ids) => {
+                if (ids.length)
+                  store.actions.showConfirmDialog(
+                    null,
+                    "kill-group",
+                    ids,
+                    "Sessions in these worktrees",
+                  );
+              }}
+              repo={panel().repo}
+              cwd={pickerCwd()}
+              compact={props.sidebar}
+              iconStyle={store.state.iconStyle}
+              initialCursor={panel().initialCursor}
+              isReturn={panel().isReturn}
+              onClose={store.actions.hideWorktrees}
+              onJump={jumpToWorktreeSession}
+              onSpawn={spawnInWorktree}
+              effects={liveEffects}
+              // Review suspends the renderer into a full-screen tool, which
+              // the sidebar has neither the room nor the focus for — the same
+              // reason its `d` key is inert on a session row.
+              onReview={props.sidebar ? undefined : reviewWorktree}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.sourcePicker}>
+          {(picker: () => NonNullable<typeof store.state.sourcePicker>) => (
+            <SourcePicker
+              scope={store.state.scope}
+              activeSessionId={store.state.activeSessionId}
+              effects={liveEffects}
+              facts={repoFacts.data()}
+              memory={
+                sourceMemory?.scope === store.state.scope
+                  ? sourceMemory
+                  : undefined
+              }
+              onRemember={(value) => {
+                sourceMemory = value;
+              }}
+              embedded={!props.sidebar}
+              enabled={
+                !store.state.showHelp &&
+                !store.state.confirmMode &&
+                !store.state.newSession
+              }
+              onNavigate={navigateView}
+              onScope={store.actions.setScope}
+              onRefresh={refreshAll}
+              onNew={(cwd) => {
+                const marker = sourcesReturn({
+                  repoRoot: store.state.scope ?? cwd,
+                  cursor: sourceMemory?.cursor ?? "",
+                  filter: sourceMemory?.filter ?? "",
+                });
+                store.actions.hideSourcePicker();
+                openNewSession({ cwd, returnToSources: marker });
+              }}
+              onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
+              onKill={(ids) =>
+                store.actions.showConfirmDialog(
+                  null,
+                  "kill-group",
+                  ids,
+                  "Sessions on these checkouts",
+                )
+              }
+              onReview={
+                props.sidebar
+                  ? undefined
+                  : (target) =>
+                      reviewWorktree({
+                        ...target,
+                        panelScope: store.state.scope,
+                        returnToSources: sourcesReturn({
+                          repoRoot: store.state.scope ?? target.path,
+                          cursor: target.cursor,
+                          filter: target.filter,
+                        }),
+                      })
+              }
+              repo={picker().repo}
+              cwd={pickerCwd()}
+              compact={props.sidebar}
+              iconStyle={store.state.iconStyle}
+              initialCursor={picker().initialCursor}
+              initialFilter={
+                picker().initialFilter ||
+                (sourceMemory?.scope === store.state.scope
+                  ? sourceMemory.filter
+                  : undefined)
+              }
+              origin={picker().origin}
+              onClose={closeSourcePicker}
+              onPickPR={spawnFromSourcePR}
+              onPickIssue={spawnFromSourceIssue}
+              onOpenWorktree={openWorktreeFromSources}
+            />
+          )}
         </Show>
 
         <Show when={store.state.confirmMode}>
@@ -4239,11 +4396,12 @@ export function App(props: AppProps) {
             sessionCount={
               store.state.confirmAction === "send-review"
                 ? pendingReviewNoteCount()
-                : store.state.confirmAction === "kill-group"
+                : store.state.confirmAction === "kill-group" ||
+                    store.state.confirmAction === "kill-all"
                   ? store.state.confirmSessionIds.length
                   : store.filteredSessions().length
             }
-            groupLabel={store.selectedGroupHeader()?.label}
+            groupLabel={store.state.confirmLabel ?? undefined}
             onConfirm={confirmDialogAction}
             onCancel={cancelConfirmDialog}
           />
@@ -4319,48 +4477,14 @@ export function App(props: AppProps) {
           )}
         </Show>
 
-        <Show when={store.state.worktrees}>
-          {(panel: () => NonNullable<typeof store.state.worktrees>) => (
-            <WorktreesPanel
-              repo={panel().repo}
-              cwd={pickerCwd()}
-              compact={props.sidebar}
-              iconStyle={store.state.iconStyle}
-              initialCursor={panel().initialCursor}
-              isReturn={panel().isReturn}
-              startWidened={panel().startWidened}
-              onClose={store.actions.hideWorktrees}
-              onJump={jumpToWorktreeSession}
-              onSpawn={spawnInWorktree}
-              onSpawnFromPR={spawnFromPR}
-              onStartFromSource={startFromSource}
-              effects={liveEffects}
-              // Review suspends the renderer into a full-screen tool, which
-              // the sidebar has neither the room nor the focus for — the same
-              // reason its `d` key is inert on a session row.
-              onReview={props.sidebar ? undefined : reviewWorktree}
-            />
-          )}
+        <Show when={store.state.showHelp}>
+          <HelpOverlay
+            sidebar={props.sidebar}
+            reviewable={reviewEnabled}
+            view={view()}
+            onScrollboxRef={(ref) => (helpScrollbox = ref)}
+          />
         </Show>
-
-        <Show when={store.state.sourcePicker}>
-          {(picker: () => NonNullable<typeof store.state.sourcePicker>) => (
-            <SourcePicker
-              repo={picker().repo}
-              cwd={pickerCwd()}
-              compact={props.sidebar}
-              iconStyle={store.state.iconStyle}
-              initialCursor={picker().initialCursor}
-              initialFilter={picker().initialFilter}
-              origin={picker().origin}
-              onClose={closeSourcePicker}
-              onPickPR={spawnFromSourcePR}
-              onPickIssue={spawnFromSourceIssue}
-              onOpenWorktree={openWorktreeFromSources}
-            />
-          )}
-        </Show>
-
         <Show when={store.state.contextMenu}>
           {(cm: () => NonNullable<typeof store.state.contextMenu>) => (
             <ContextMenu
