@@ -597,7 +597,6 @@ export function App(props: AppProps) {
   function reviewWorktree(target: {
     path: string;
     sessionId: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
     branch?: boolean;
     returnToSources?: SourcesReturn;
@@ -618,9 +617,9 @@ export function App(props: AppProps) {
     // captured notes with no way to answer for them. Nothing below needs the
     // panel: the row was already read into `target` and `session`.
     //
-    // The scope travels IN THE PAYLOAD, not from the store: Tab's rescope is
-    // panel-local state the store never sees, so reading the store here
-    // reopened a widened panel back on its narrow opening repo. Every exit
+    // The scope travels IN THE PAYLOAD: it is the scope the panel showed when
+    // the review left it, and the reopen re-establishes exactly that, so a
+    // panel `s` had widened or narrowed comes back the same way. Every exit
     // below reopens the panel with the cursor on the reviewed row, and the
     // hand-back paths do it through `onDone` so the reopen provably follows
     // the confirm's own resolution instead of racing it back over the dialog.
@@ -630,11 +629,9 @@ export function App(props: AppProps) {
             target.returnToSources.repo,
             sourcesReopenOptions(target.returnToSources),
           )
-        : store.actions.showWorktrees(target.panelRepo, {
+        : store.actions.showWorktrees(target.panelScope, {
             initialCursor: target.path,
             isReturn: true,
-            startWidened:
-              target.panelRepo !== null && target.panelScope === null,
           });
     store.actions.hideWorktrees();
     store.actions.hideSourcePicker();
@@ -714,7 +711,6 @@ export function App(props: AppProps) {
   function spawnInWorktree(target: {
     cwd: string;
     existingWorktree: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
     sameRepoRegisteredRoots: readonly string[];
     /**
@@ -753,10 +749,9 @@ export function App(props: AppProps) {
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
-      // The payload's own scope, not the store's: Tab's rescope is
-      // panel-local, and a cancel must land on the view the user left.
+      // The scope the panel showed when Enter left it: a cancel must land on
+      // the view the user left.
       returnToWorktrees: {
-        repo: target.panelRepo,
         scope: target.panelScope,
         cursor: target.cursor ?? worktree ?? target.cwd,
       },
@@ -877,10 +872,9 @@ export function App(props: AppProps) {
     const origin = store.state.sourcePicker?.origin ?? null;
     store.actions.hideSourcePicker();
     if (!origin) return;
-    store.actions.showWorktrees(origin.panelRepo, {
+    store.actions.showWorktrees(origin.panelScope, {
       initialCursor: origin.panelCursor,
       isReturn: true,
-      startWidened: origin.panelRepo !== null && origin.panelScope === null,
     });
   }
 
@@ -2472,11 +2466,10 @@ export function App(props: AppProps) {
     /** Origin marker set ONLY by the source picker's Enter: a cancel of this
      *  dialog returns to the picker with its filter and cursor intact. */
     returnToSources?: SourcesReturn;
-    /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
-     *  this dialog returns to the panel, cursor on `cursor`, scoped to the
-     *  live filter the panel had (`scope`, null when Tab had widened it). */
+    /** Origin marker set ONLY by the Worktrees panel (Enter, `n`): a cancel
+     *  of this dialog returns to the panel, cursor on `cursor`, on the
+     *  scope the panel showed (`scope`, null for all repos). */
     returnToWorktrees?: {
-      repo: string | null;
       scope: string | null;
       cursor: string;
     };
@@ -2538,10 +2531,9 @@ export function App(props: AppProps) {
       return;
     }
     if (marker) {
-      store.actions.showWorktrees(marker.repo, {
+      store.actions.showWorktrees(marker.scope, {
         initialCursor: marker.cursor,
         isReturn: true,
-        startWidened: marker.repo !== null && marker.scope === null,
       });
     }
   }
@@ -3912,7 +3904,7 @@ export function App(props: AppProps) {
         if (key !== "W" && !event.shift) break;
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise. The
-        // panel's own Tab widens from there.
+        // panel's own `s` widens from there.
         store.actions.showWorktrees(selectedRepoRoot());
         event.preventDefault();
         break;
@@ -4298,14 +4290,13 @@ export function App(props: AppProps) {
               onScope={store.actions.setScope}
               onRefresh={refreshAll}
               onNew={(cwd) => {
-                const repo = store.state.scope;
+                const scope = store.state.scope;
                 store.actions.hideWorktrees();
                 openNewSession({
                   cwd,
                   returnToWorktrees: {
-                    repo,
+                    scope,
                     cursor: worktreeMemory?.cursor ?? cwd,
-                    scope: repo,
                   },
                 });
               }}
@@ -4325,7 +4316,6 @@ export function App(props: AppProps) {
               iconStyle={store.state.iconStyle}
               initialCursor={panel().initialCursor}
               isReturn={panel().isReturn}
-              startWidened={panel().startWidened}
               onClose={store.actions.hideWorktrees}
               onJump={jumpToWorktreeSession}
               onSpawn={spawnInWorktree}
@@ -4386,7 +4376,6 @@ export function App(props: AppProps) {
                   : (target) =>
                       reviewWorktree({
                         ...target,
-                        panelRepo: store.state.scope,
                         panelScope: store.state.scope,
                         returnToSources: sourcesReturn({
                           repoRoot: store.state.scope ?? target.path,

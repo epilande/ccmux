@@ -4609,7 +4609,6 @@ describe("worktrees panel state", () => {
       repo: "/repo",
       initialCursor: "/repo/wt/alpha",
       isReturn: false,
-      startWidened: false,
     });
 
     // A return-open says so, which is what lets the panel reuse its scan.
@@ -4621,22 +4620,21 @@ describe("worktrees panel state", () => {
       repo: "/repo",
       initialCursor: "/repo/wt/alpha",
       isReturn: true,
-      startWidened: false,
     });
+    expect(store.state.scope).toBe("/repo");
 
-    // A return whose action left from the Tab-widened view carries that
-    // too, while `repo` still names the repo Tab can narrow back to.
-    store.actions.showWorktrees("/repo", {
+    // A return whose action left a widened panel reopens widened: the scope
+    // it carried out is the scope it opens on.
+    store.actions.showWorktrees(null, {
       initialCursor: "/repo/wt/alpha",
       isReturn: true,
-      startWidened: true,
     });
     expect(store.state.worktrees).toEqual({
-      repo: "/repo",
+      repo: null,
       initialCursor: "/repo/wt/alpha",
       isReturn: true,
-      startWidened: true,
     });
+    expect(store.state.scope).toBeNull();
 
     // The plain open (the W key) carries none.
     store.actions.showWorktrees(null);
@@ -4644,7 +4642,6 @@ describe("worktrees panel state", () => {
       repo: null,
       initialCursor: null,
       isReturn: false,
-      startWidened: false,
     });
 
     store.actions.hideWorktrees();
@@ -4661,7 +4658,6 @@ describe("new session dialog origin marker", () => {
       agent: "claude",
       existingWorktree: "/repo/.claude/worktrees/panel",
       returnToWorktrees: {
-        repo: "/repo",
         scope: null,
         cursor: "/repo/.claude/worktrees/panel",
       },
@@ -4671,7 +4667,6 @@ describe("new session dialog origin marker", () => {
     // absence (every non-panel origin) is pinned to null by the full-draft
     // assertions above.
     expect(store.state.newSession?.returnToWorktrees).toEqual({
-      repo: "/repo",
       scope: null,
       cursor: "/repo/.claude/worktrees/panel",
     });
@@ -4686,12 +4681,11 @@ describe("new session dialog origin marker", () => {
    * steps. A marker holding only repo/cursor/filter restores the middle of
    * the stack and silently drops its bottom, so the second Esc closes to the
    * session list instead of returning to the panel — taking the panel's
-   * Tab-widened scope with it.
+   * widened scope with it.
    */
   it("carries the picker's own origin through the dialog round trip", () => {
     const store = createTUIStore();
     const origin = {
-      panelRepo: "/repo",
       panelScope: null,
       panelCursor: "/repo/.claude/worktrees/panel",
     };
