@@ -56,8 +56,8 @@ function tabDressing(view: View): number {
  *  run together as `Start  in api-server`. */
 const MIN_FILL = 1;
 
-/** What an inactive tab's name shrinks to on a strip too narrow for the
- *  scope's name. Two letters so Sessions and Start stay apart. */
+/** What every tab's name shrinks to on a strip too narrow for the scope's
+ *  name. Two letters so Sessions and Start stay apart. */
 const SHORT_VIEW_NAMES: Record<View, string> = {
   sessions: "Se",
   worktrees: "Wt",
@@ -94,16 +94,19 @@ export interface StripFit {
  * 1. `N invoking` drops, then `active`, then the connection and degraded
  *    words shrink to `●` and `▲`. The glyphs are never dropped: a broken
  *    connection or a degraded daemon outranks anything else here.
- * 2. Inactive tabs drop their counts, rightmost first.
+ * 2. Every tab drops its count.
  * 3. `scope: ` shortens to `in `.
- * 4. The active tab drops its count.
- * 5. Inactive tabs shorten their names to two letters.
- * 6. The prefix drops.
- * 7. Only then, on a strip too narrow for the name even so, the name is
+ * 4. Every tab shortens its name to two letters.
+ * 5. The prefix drops.
+ * 6. Only then, on a strip too narrow for the name even so, the name is
  *    cut (and below two columns, dropped).
+ *
+ * The tab steps apply to all three tabs together, and the fit is not told
+ * which view is active: the active tab differs only in color and weight, so
+ * switching views never moves a label. (A `W`/`N` jump can still change the
+ * current view's count TEXT, which is data, not layout.)
  */
 export function fitStrip(input: {
-  view: View;
   /** Each tab's count as drawn after its name (` (6)`), or `""`. */
   counts: Record<View, string>;
   status: StripStatus;
@@ -174,7 +177,6 @@ export function fitStrip(input: {
   };
   const fits = () => used() <= input.width;
 
-  const inactive = VIEWS.filter((v) => v !== input.view).reverse();
   const steps: (() => void)[] = [
     ...signals
       .map((s, i) => ({ i, shrink: s.shrink }))
@@ -184,10 +186,9 @@ export function fitStrip(input: {
           () =>
             (level[i] = signals[i]!.forms.length - 1),
       ),
-    ...inactive.map((v) => () => (tabs[v].count = "")),
+    () => VIEWS.forEach((v) => (tabs[v].count = "")),
     () => (prefix = SCOPE_PREFIXES[1]),
-    () => (tabs[input.view].count = ""),
-    ...inactive.map((v) => () => (tabs[v].name = SHORT_VIEW_NAMES[v])),
+    () => VIEWS.forEach((v) => (tabs[v].name = SHORT_VIEW_NAMES[v])),
     () => (prefix = SCOPE_PREFIXES[2]),
   ];
   for (const step of steps) {
@@ -297,7 +298,6 @@ export const ViewStrip: Component<
       : ` (${count(view)}${stale(view) ? "~" : ""})`;
   const fit = createMemo(() =>
     fitStrip({
-      view: props.view,
       counts: {
         sessions: countText("sessions"),
         worktrees: countText("worktrees"),
