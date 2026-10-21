@@ -122,6 +122,71 @@ describe("SessionList shared repository facts", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("keeps a row's PR badge, labeled, when branch facts found no association", async () => {
+    // A branch pushed without `-u` that then gained a local commit: the
+    // daemon's per-session lookup found PR #7 by name, while the repo-facts
+    // cache could prove nothing and stored an empty answer for the branch.
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
+    );
+    const session = mockEnrichedSession({
+      id: "s1",
+      project: "a",
+      cwd: "/code/a",
+      mainRepoRoot: "/code/a",
+      gitBranch: "feature",
+      tmuxTarget: "dev:1.0",
+      branchPRs: [
+        {
+          id: "7",
+          href: "https://github.com/o/a/pull/7",
+          ciStatus: "passing",
+          reviewDecision: null,
+        },
+      ],
+    });
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(
+              [{ session, highlights: null }],
+              "none",
+              new Set(),
+              false,
+            )}
+            repoFacts={{
+              headerPR: true,
+              repos: [
+                {
+                  repoRoot: "/code/a",
+                  repoName: "a",
+                  branchPRs: {
+                    feature: { value: [], updatedAt: 1, stale: false },
+                  },
+                },
+              ],
+            }}
+            columnHeader
+            selectedIndex={0}
+            previewWidth={30}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 8 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const lines = setup.captureCharFrame().split("\n");
+    const row = lines.find((l) => l.includes("dev:1.0"))!;
+    const header = lines.find((l) => l.includes("version"))!;
+    expect(row).toContain("#7");
+    // The badge is a column now: its label ends where the badge does.
+    expect(header.indexOf(" pr ") + " pr".length).toBe(
+      row.indexOf("#7") + "#7".length,
+    );
+  });
+
   it("omits shared facts for cwd, tmux, mixed-repo, or attention-only headers", async () => {
     const [items, setItems] = createSignal<FlatItem[]>([]);
     fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(

@@ -30,6 +30,8 @@ import {
   resolveLayout,
   applyPromptDisplay,
   columnHeaderCells,
+  prColumnWidth,
+  sizePrColumn,
   hasHeaderLabels,
   rowHasContent,
   normalizePrompt,
@@ -156,7 +158,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
   // rows at a given width/config) and passed down to each SessionItem.
   // The scroll-target math below reads the same object, so row heights
   // and scroll positions can't disagree.
-  const layout = createMemo(() => {
+  const displayed = createMemo(() => {
     const resolved = resolveLayout(
       !!props.sidebar,
       effectiveWidth(),
@@ -180,6 +182,29 @@ export const SessionList: Component<SessionListProps> = (props) => {
         : [],
     };
   }
+
+  /**
+   * One width for the list's right-side `pr` column (see `sizePrColumn`).
+   * Its own memo so that a list update which changes no badge, which is
+   * nearly every one, leaves the number, and so the layout, untouched. The
+   * sidebar keeps its badge sized per row: it has no header to label the
+   * column, and a 30-column rail cannot spare a blank one.
+   */
+  const prWidth = createMemo(() => {
+    if (props.sidebar) return 0;
+    const entry = displayed().row1.right.find((e) => e.field === "pr");
+    if (!entry) return 0;
+    return prColumnWidth(
+      props.items.flatMap((item) =>
+        item.type === "session" ? [enriched(item)] : [],
+      ),
+      entry.mode,
+    );
+  });
+
+  const layout = createMemo(() =>
+    props.sidebar ? displayed() : sizePrColumn(displayed(), prWidth()),
+  );
 
   /**
    * The layout for a row whose block is drawn and whose agent DID write a
