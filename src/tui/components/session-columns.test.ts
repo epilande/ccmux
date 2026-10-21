@@ -17,6 +17,9 @@ import {
   rowHasContent,
   rowHasFlexText,
   isFlexTextField,
+  columnHeaderCells,
+  hasHeaderLabels,
+  showColumnHeader,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
   fitProjectCell,
@@ -1822,5 +1825,104 @@ describe("stripPrompt with the summary cell", () => {
       "project",
     ]);
     expect(stripped.row2).toEqual({ left: [], right: [] });
+  });
+});
+
+describe("columnHeaderCells", () => {
+  const inline = (width: number, user?: Parameters<typeof resolveColumns>[1]) =>
+    applyPromptDisplay(resolveColumns(width, user), "inline", false).row1;
+
+  it("labels the default picker layout's anchored cells at a wide width", () => {
+    const cells = columnHeaderCells(inline(160));
+    expect(cells.left.map((c) => [c.field, c.text, c.width])).toEqual([
+      ["index", "", 1],
+      ["status", "status", 9],
+      ["project", "project", 0],
+    ]);
+    expect(cells.right.map((c) => [c.field, c.text, c.width])).toEqual([
+      ["agent", "agent", 8],
+      ["version", "version", 10],
+      ["pane", "pane", 12],
+      ["time", "age", 4],
+    ]);
+  });
+
+  it("stops the left side at the first intrinsic-width cell", () => {
+    // Inline mode tucks `pr` and the summary after `project`; neither has a
+    // fixed start, so neither gets a label.
+    const fields = columnHeaderCells(inline(160)).left.map((c) => c.field);
+    expect(fields).not.toContain("pr");
+    expect(fields).not.toContain("summary");
+  });
+
+  it("blanks a label that would not fit its cell rather than cutting it", () => {
+    // At `sm` the agent cell is the 2-column short code: no room for "agent".
+    const sm = columnHeaderCells(inline(60));
+    const agent = sm.right.find((c) => c.field === "agent");
+    expect(agent).toEqual({ field: "agent", text: "", width: 2 });
+    // The short status cell is exactly 6 wide, which "status" fills.
+    const status = sm.left.find((c) => c.field === "status");
+    expect(status).toEqual({ field: "status", text: "status", width: 6 });
+    // Icon-only status at `xs` is one column: blank.
+    const xs = columnHeaderCells(inline(40));
+    expect(xs.left.find((c) => c.field === "status")?.text).toBe("");
+  });
+
+  it("labels only the fixed-width suffix of a custom right side", () => {
+    const row = inline(160, { row1: { right: ["pr", "time"] } });
+    const cells = columnHeaderCells(row);
+    expect(cells.right.map((c) => c.field)).toEqual(["time"]);
+  });
+
+  it("labels nothing on the right when its last cell is intrinsic-width", () => {
+    const row = inline(160, {
+      row1: { right: ["agent", "prompt"] },
+      row2: { left: [] },
+    });
+    expect(columnHeaderCells(row).right).toEqual([]);
+  });
+
+  it("follows a reordered right side", () => {
+    const row = inline(160, { row1: { right: ["time", "agent"] } });
+    expect(columnHeaderCells(row).right.map((c) => c.text)).toEqual([
+      "age",
+      "agent",
+    ]);
+  });
+
+  it("labels a flexible first cell at its fixed start", () => {
+    const row = inline(160, { row1: { left: ["summary"] } });
+    expect(columnHeaderCells(row).left).toEqual([
+      { field: "summary", text: "summary", width: 0 },
+    ]);
+  });
+
+  it("reports whether any label survived", () => {
+    expect(hasHeaderLabels(columnHeaderCells(inline(160)))).toBe(true);
+    const bare = inline(160, {
+      row1: { left: ["index"], right: ["prompt"] },
+      row2: { left: [], right: [] },
+    });
+    expect(hasHeaderLabels(columnHeaderCells(bare))).toBe(false);
+  });
+});
+
+describe("showColumnHeader", () => {
+  it("auto follows the grouping: flat only", () => {
+    expect(showColumnHeader("auto", "none")).toBe(true);
+    expect(showColumnHeader(undefined, "none")).toBe(true);
+    for (const g of ["project", "cwd", "session", "window"] as const) {
+      expect(showColumnHeader("auto", g)).toBe(false);
+    }
+  });
+
+  it("auto yields to the needs-attention band in a flat list", () => {
+    expect(showColumnHeader("auto", "none", true)).toBe(false);
+    expect(showColumnHeader("always", "none", true)).toBe(true);
+  });
+
+  it("always and never override the grouping", () => {
+    expect(showColumnHeader("always", "project")).toBe(true);
+    expect(showColumnHeader("never", "none")).toBe(false);
   });
 });

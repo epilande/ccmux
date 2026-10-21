@@ -27,6 +27,7 @@ import type {
   ColumnsConfig,
   BreakpointConfig,
   PromptDisplay,
+  ColumnHeaderMode,
 } from "../lib/preferences";
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
 import { setUIState, type UIState } from "../lib/state";
@@ -651,6 +652,7 @@ interface TUIState {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   groupBy: GroupBy;
   hideIdle: boolean;
 }
@@ -664,6 +666,7 @@ interface TUIStoreOptions {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   /** Pin waiting sessions in the `needs attention` band (default true). */
   attentionBand?: boolean;
   searchPaneContent?: boolean;
@@ -990,6 +993,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptLines: options.promptLines,
     breakpoints: options.breakpoints,
     ageFadeAfter: options.ageFadeAfter,
+    columnHeader: options.columnHeader,
     groupBy: options.groupBy ?? DEFAULT_GROUP_BY,
     hideIdle: options.hideIdle ?? false,
   });

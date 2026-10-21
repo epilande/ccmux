@@ -399,9 +399,9 @@ type SessionLineCount = (
 
 /**
  * Compute the visual height of a flat item.
- * Non-first headers occupy 2 lines (divider + header).
+ * Headers occupy 1 line: the header draws its own rule, so there is no
+ * separate divider line to count.
  * Session items ask `lineCount`; without one they are assumed to be 2 lines.
- * First header occupies 1 line.
  */
 export function itemVisualHeight(
   items: FlatItem[],
@@ -409,7 +409,6 @@ export function itemVisualHeight(
   lineCount?: SessionLineCount,
 ): number {
   const item = items[index];
-  if (item.type === "header" && index > 0) return 2;
   if (item.type === "session") {
     if (!lineCount) return 2;
     // A row always draws its identity line, whatever the caller computes.
@@ -419,9 +418,8 @@ export function itemVisualHeight(
 }
 
 /**
- * Convert a flat item index to a visual line position.
- * Headers (except the first) render a divider line above them,
- * so they occupy 2 visual lines instead of 1.
+ * Convert a flat item index to a visual line position: the sum of every
+ * earlier item's `itemVisualHeight`.
  */
 export function toVisualLine(
   items: FlatItem[],

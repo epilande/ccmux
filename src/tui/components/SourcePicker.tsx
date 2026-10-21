@@ -1084,6 +1084,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
                       label={repo.repoName}
                       count={repo.prs.length + repo.issues.length}
                       width={listWidth()}
+                      // Rows here have no right padding, so neither does
+                      // the header: its rule ends where they do.
+                      flushRight
                       facts={factsText(
                         props.facts?.repos.find(
                           (r) => r.repoRoot === repo.repoRoot,
