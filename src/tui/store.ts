@@ -2655,22 +2655,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       }, durationMs);
     },
 
-    /** Restore configuration defaults after state.json is removed, without saving. */
-    resetUIState(
-      defaults: Pick<TUIStoreOptions, "promptDisplay" | "groupBy"> = {},
-    ) {
-      batch(() => {
-        setCollapsedGroups(new Set<string>());
-        setPinnedGroups([]);
-        setState({
-          promptDisplay: defaults.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
-          groupBy: defaults.groupBy ?? DEFAULT_GROUP_BY,
-          hideIdle: false,
-          lastSpawnAgent: null,
-        });
-      });
-    },
-
     reloadUIState(freshState: UIState) {
       batch(() => {
         if (freshState.collapsedGroups !== undefined) {

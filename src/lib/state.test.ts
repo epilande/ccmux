@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { readUIState, resolvePromptDisplay } from "./state";
+import { resolvePromptDisplay } from "./state";
 
 // Override STATE_FILE before importing state module
 const testDir = join(tmpdir(), `ccmux-state-test-${Date.now()}`);
@@ -73,24 +73,6 @@ describe("UIState file format", () => {
       // Expected: malformed JSON throws
       expect(true).toBe(true);
     }
-  });
-
-  it("distinguishes a missing file from an empty saved state", async () => {
-    expect(await readUIState(testStateFile)).toBeNull();
-    await Bun.write(testStateFile, "{}");
-    expect(await readUIState(testStateFile)).toEqual({});
-  });
-
-  it.each(["{broken", "null", "[]"])(
-    "rejects invalid state instead of treating it as missing (%s)",
-    async (contents) => {
-      await Bun.write(testStateFile, contents);
-      await expect(readUIState(testStateFile)).rejects.toThrow();
-    },
-  );
-
-  it("does not treat other read errors as a missing file", async () => {
-    await expect(readUIState(testDir)).rejects.toThrow();
   });
 });
 

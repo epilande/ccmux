@@ -171,7 +171,7 @@ mock.module("./utils/tmux-window-state", () => ({
 // App builds its own store, whose persistence writes the REAL state.json
 // under the developer's ~/.config/ccmux. Any test that changes a persisted
 // setting (a spawn's last-agent memory, `f`, `p`, `b`) would otherwise
-// rewrite their live UI state. `readUIState` stays real: the sidebar's
+// rewrite their live UI state. `getUIState` stays real: the sidebar's
 // state-file watcher reads it, and reading is harmless.
 const realUiState = await import("../lib/state");
 
@@ -329,7 +329,7 @@ describe("watchStateFile", () => {
   });
 
   it.each(["existing", "missing"])(
-    "reloads after repeated atomic saves (%s state file)",
+    "reloads after repeated atomic saves and recreation (%s state file)",
     async (initialFile) => {
       // Match setUIState's temp + rename writes, using only a test-owned file.
       const save = (promptDisplay: "row2" | "off") => {
@@ -365,9 +365,11 @@ describe("watchStateFile", () => {
         await expectLoaded(mode);
       }
 
-      // 5. Deletion must also request a reload.
+      // 5. Deleting the file keeps the last loaded settings.
       rmSync(file);
-      await expectLoaded(null);
+      // Allow Chokidar's unlink delay and the reload debounce to settle.
+      await Bun.sleep(500);
+      expect(loaded).toBe(JSON.stringify({ promptDisplay: "off" }));
 
       // 6. The same watcher must keep following the recreated file.
       save("row2");
