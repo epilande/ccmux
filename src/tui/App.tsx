@@ -2861,7 +2861,9 @@ export function App(props: AppProps) {
     );
     if (!session) return;
     setPendingSpawn(null);
-    store.actions.applySidebarSelection(session.id, null);
+    // Only onto a row the list shows (expanding its group if collapsed); a
+    // session the scope, `f` or a search hides leaves the selection alone.
+    store.actions.revealSession(session.id);
   });
 
   async function submitNewSession(): Promise<void> {
@@ -2937,6 +2939,13 @@ export function App(props: AppProps) {
     // The sidebar spawns without stealing focus; the picker's whole purpose
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
+    // A slow spawn can outlive its dialog: Esc, or a replacement draft, means
+    // the user has moved on, and the completion must not close, switch or
+    // select over what they are doing now. Same rule as `submitFork`.
+    const dialogSequence = newSessionDialogSequence;
+    const ownsDialog = () =>
+      newSessionDialogSequence === dialogSequence &&
+      store.state.newSession !== null;
     spawnInFlight = true;
     let spawned: SpawnBody | null = null;
     try {
@@ -3020,18 +3029,22 @@ export function App(props: AppProps) {
         // never arrived.
         const error = body?.error ?? response.statusText;
         const what = draft.moveChanges ? "Move failed" : "Spawn failed";
+        // A notice that says where the user's work went is the one thing a
+        // stale completion still shows: it is about their files, not the
+        // view, and nothing else would tell them.
         if (body && failureNeedsAcknowledgement(body)) {
           store.actions.showNotice(what, [
             error,
             ...stashRecoveryLines(body),
             ...(body.move ? moveReportLines(body.move, draft.cwd) : []),
           ]);
-        } else {
+        } else if (ownsDialog()) {
           store.actions.showToast(`${what}: ${error}`, 4000);
         }
       }
     } catch (err: unknown) {
-      store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
+      if (ownsDialog())
+        store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
     } finally {
       // Released only on the paths that leave the dialog open. A landed spawn
       // holds the guard until the draft is gone: the state write below is a
@@ -3048,11 +3061,22 @@ export function App(props: AppProps) {
     // failure. Remembering the agent is best-effort for exactly that reason:
     // an unwritable ~/.config would otherwise surface as "Spawn failed", and
     // the user — reasonably — would press Enter again and get a second pane.
+    // Decided once the agent is remembered, the last await before acting:
+    // an Esc during that write counts as moving on too.
+    let owns = false;
     try {
       await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
     } finally {
-      store.actions.closeNewSessionDialog();
+      owns = ownsDialog();
+      if (owns) store.actions.closeNewSessionDialog();
       spawnInFlight = false;
+    }
+    if (!owns) {
+      // Moved on: nothing visible, bar the one notice about the user's own
+      // files (a move that left a stash or a split to rebuild).
+      const notice = landedMoveNotice(draft, landed);
+      if (notice) store.actions.showNotice(notice.title, notice.lines);
+      return;
     }
 
     // A session started: the board is the session list now (ending any

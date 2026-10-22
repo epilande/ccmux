@@ -9297,7 +9297,14 @@ describe("App worktrees panel (W)", () => {
       }
     });
 
-    it("lands on Sessions with the cursor on the new session once it starts", async () => {
+    /**
+     * The daemon a spawn talks to. `/spawn` answers with `spawn()`, which a
+     * test holds open with a promise to play a slow daemon.
+     */
+    const mockSpawnDaemon = (
+      spawn: () => Response | Promise<Response> = () =>
+        Response.json({ success: true, paneId: "%9" }),
+    ) => {
       const original = globalThis.fetch;
       const spawned: unknown[] = [];
       globalThis.fetch = (async (
@@ -9320,7 +9327,7 @@ describe("App worktrees panel (W)", () => {
           });
         if (href.endsWith("/spawn")) {
           spawned.push(JSON.parse(String(init?.body ?? "{}")));
-          return Response.json({ success: true, paneId: "%9" });
+          return spawn();
         }
         if (href.includes("prune-candidates"))
           return Response.json({ candidates: [], skipped: [], open: [] });
@@ -9336,28 +9343,64 @@ describe("App worktrees panel (W)", () => {
           });
         return Response.json({});
       }) as unknown as typeof fetch;
+      return {
+        spawned,
+        restore: () => {
+          globalThis.fetch = original;
+        },
+      };
+    };
+    const session = (id: string, project: string, pane: number) =>
+      mockEnrichedSession({
+        id,
+        project,
+        cwd: `/code/${project}`,
+        mainRepoRoot: `/code/${project}`,
+        tmuxPane: `%${pane}`,
+        tmuxTarget: `dev:1.${pane}`,
+      });
+    /** The session `/spawn` started, arriving over SSE on pane `%9`. */
+    const arrive = (project: string) =>
+      sseCallbacks!.onSessionCreated(
+        mockEnrichedSession({
+          id: "fresh",
+          project,
+          cwd: `/code/${project}/wt/feature`,
+          mainRepoRoot: `/code/${project}`,
+          tmuxPane: "%9",
+          tmuxTarget: "dev:2.1",
+        }),
+      );
+    const frame = async () => {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((done) => setTimeout(done, 0));
+        await setup.renderOnce();
+      }
+      return setup.captureCharFrame();
+    };
+    /** `j` until the cursor sits on `target`'s row. */
+    const cursorTo = async (target: string) => {
+      for (let i = 0; i < 6 && !cursorLine()?.includes(target); i++) {
+        setup.mockInput.pressKey("j");
+        await frame();
+      }
+      expect(cursorLine()).toContain(target);
+    };
+    /** Whose project the `x` confirm names, then dismissed. */
+    const killTarget = async () => {
+      setup.mockInput.pressKey("x");
+      const dialog = await frame();
+      expect(dialog).toContain("Kill Session?");
+      deliverEscape(setup.renderer);
+      await frame();
+      return dialog;
+    };
+
+    it("lands on Sessions with the cursor on the new session once it starts", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
       try {
         await renderApp(120, 24, { groupBy: "none", persistent: true });
-        sseCallbacks!.onInit(
-          [
-            mockEnrichedSession({
-              id: "s1",
-              project: "myapp",
-              cwd: "/code/myapp",
-              mainRepoRoot: "/code/myapp",
-              tmuxPane: "%1",
-              tmuxTarget: "dev:1.1",
-            }),
-          ],
-          null,
-        );
-        const frame = async () => {
-          for (let i = 0; i < 3; i++) {
-            await new Promise((done) => setTimeout(done, 0));
-            await setup.renderOnce();
-          }
-          return setup.captureCharFrame();
-        };
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
         await frame();
         setup.mockInput.pressKey("W", { shift: true });
         await frame();
@@ -9368,20 +9411,175 @@ describe("App worktrees panel (W)", () => {
         expect(spawned).toHaveLength(1);
         // Sessions now, though the new row has not arrived yet.
         expect(isActiveTab("Sessions")).toBe(true);
-        sseCallbacks!.onSessionCreated(
-          mockEnrichedSession({
-            id: "fresh",
-            project: "myapp",
-            cwd: "/code/myapp/wt/feature",
-            mainRepoRoot: "/code/myapp",
-            tmuxPane: "%9",
-            tmuxTarget: "dev:2.1",
-          }),
-        );
+        arrive("myapp");
         await frame();
         expect(cursorLine()).toContain("dev:2.1");
       } finally {
-        globalThis.fetch = original;
+        restore();
+      }
+    });
+
+    // A cursor on a row the list does not draw splits the board: the
+    // highlight falls back to the first row while the preview and `x`/`r`
+    // read the hidden session.
+    it("leaves the selection alone when the new session lands outside the scope", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit(
+          [
+            session("s1", "myapp", 1),
+            session("s3", "myapp", 3),
+            session("s2", "other", 2),
+          ],
+          null,
+        );
+        await frame();
+        await cursorTo("dev:1.3");
+        setup.mockInput.pressKey("s");
+        expect((await frame()).split("\n")[0]).toContain("scope: myapp");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        arrive("elsewhere");
+        const after = await frame();
+        expect(after).not.toContain("dev:2.1");
+        // Highlight, `x` and the selection all still name the row picked
+        // before the spawn.
+        expect(cursorLine()).toContain("dev:1.3");
+        const dialog = await killTarget();
+        expect(dialog).not.toContain("elsewhere");
+        expect(dialog).toContain("myapp");
+        expect(cursorLine()).toContain("dev:1.3");
+      } finally {
+        restore();
+      }
+    });
+
+    it("expands a collapsed group to put the cursor on the new session", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, {
+          groupBy: "project",
+          persistent: true,
+          collapsedGroups: ["other"],
+        });
+        sseCallbacks!.onInit(
+          [session("s1", "myapp", 1), session("s2", "other", 2)],
+          null,
+        );
+        const before = await frame();
+        expect(before).not.toContain("dev:1.2");
+        await cursorTo("dev:1.1");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        arrive("other");
+        const after = await frame();
+        // The group opened, so its rows draw, the new one under the cursor.
+        expect(after).toContain("dev:1.2");
+        expect(cursorLine()).toContain("dev:2.1");
+        expect(await killTarget()).toContain("other");
+      } finally {
+        restore();
+      }
+    });
+
+    // Esc, or a replacement draft, is the user moving on; a /spawn that
+    // answers afterwards must not pull them back to Sessions, nor close a
+    // one-shot picker under them.
+    for (const [outcome, persistent] of [
+      ["lands", true],
+      ["fails", true],
+      ["lands", false],
+    ] as const) {
+      it(`a slow spawn that ${outcome} after Esc changes nothing on screen (${persistent ? "persistent" : "one-shot"})`, async () => {
+        let answer!: (response: Response) => void;
+        const { spawned, restore } = mockSpawnDaemon(
+          () => new Promise<Response>((resolve) => (answer = resolve)),
+        );
+        const { exitSpy, restore: restoreExit } = withExitSpy();
+        try {
+          await renderApp(120, 24, { groupBy: "none", persistent });
+          sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+          await frame();
+          setup.mockInput.pressKey("W", { shift: true });
+          await frame();
+          setup.mockInput.pressKey("n");
+          await frame();
+          setup.mockInput.pressEnter();
+          await frame();
+          expect(spawned).toHaveLength(1);
+          deliverEscape(setup.renderer);
+          const moved = await frame();
+          expect(squish(moved)).not.toContain(squish("New session"));
+          expect(isActiveTab("Worktrees")).toBe(true);
+
+          answer(
+            outcome === "lands"
+              ? Response.json({ success: true, paneId: "%9" })
+              : Response.json(
+                  { success: false, error: "no such agent" },
+                  { status: 500 },
+                ),
+          );
+          const late = await frame();
+          expect(isActiveTab("Worktrees")).toBe(true);
+          expect(late).not.toContain("Spawn failed");
+          expect(late).toBe(moved);
+          expect(exitSpy).not.toHaveBeenCalled();
+
+          // Nor does the session, when it turns up, take the cursor.
+          arrive("myapp");
+          await frame();
+          setup.mockInput.pressKey("h");
+          await frame();
+          expect(isActiveTab("Sessions")).toBe(true);
+          expect(cursorLine()).toContain("dev:1.1");
+        } finally {
+          restoreExit();
+          restore();
+        }
+      });
+    }
+
+    it("a slow spawn leaves the dialog that replaced it open", async () => {
+      let answer!: (response: Response) => void;
+      const { spawned, restore } = mockSpawnDaemon(
+        () => new Promise<Response>((resolve) => (answer = resolve)),
+      );
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("W", { shift: true });
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        deliverEscape(setup.renderer);
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        await setup.mockInput.typeText("keep this prompt");
+        const drafting = await frame();
+        expect(drafting).toContain("keep this prompt");
+
+        answer(Response.json({ success: true, paneId: "%9" }));
+        const late = await frame();
+        expect(squish(late)).toContain(squish("New session"));
+        expect(late).toContain("keep this prompt");
+        expect(isActiveTab("Worktrees")).toBe(true);
+      } finally {
+        restore();
       }
     });
   });
