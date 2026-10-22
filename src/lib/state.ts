@@ -45,15 +45,28 @@ export function resolvePromptDisplay(
   return undefined;
 }
 
+/** Return null only for a missing file; leave other read errors to the caller. */
+export async function readUIState(file = STATE_FILE): Promise<UIState | null> {
+  try {
+    const state: unknown = await Bun.file(file).json();
+    if (state === null || typeof state !== "object" || Array.isArray(state)) {
+      throw new Error("UI state must be an object");
+    }
+    return state as UIState;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 /**
  * Returns empty object if file doesn't exist or is malformed
  */
 export async function getUIState(): Promise<UIState> {
   try {
-    const file = Bun.file(STATE_FILE);
-    if (await file.exists()) {
-      return await file.json();
-    }
+    return (await readUIState()) ?? {};
   } catch {
     // Ignore malformed file
   }

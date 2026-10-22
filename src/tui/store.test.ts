@@ -3437,6 +3437,41 @@ describe("store", () => {
       expect(store.state.hideIdle).toBe(false);
     });
 
+    it("resetUIState restores config defaults and clears saved choices without writing", async () => {
+      // 1. Start with runtime overrides, including remembered group/agent choices.
+      const persist = mock(() => {});
+      const store = createTUIStore({
+        sidebar: true,
+        promptDisplay: "off",
+        groupBy: "none",
+        hideIdle: true,
+        collapsedGroups: ["alpha"],
+        pinnedGroups: ["alpha"],
+        lastSpawnAgent: "codex",
+        onPersistState: persist,
+      });
+
+      // 2. Removing state.json restores config defaults, not those startup overrides.
+      store.actions.resetUIState({ promptDisplay: "row2", groupBy: "cwd" });
+      expect(store.state.promptDisplay).toBe("row2");
+      expect(store.state.groupBy).toBe("cwd");
+      expect(store.state.hideIdle).toBe(false);
+      expect(store.collapsedGroups().size).toBe(0);
+      expect(store.pinnedGroups()).toEqual([]);
+      expect(store.state.lastSpawnAgent).toBeNull();
+
+      // 3. Resetting must not recreate the deleted state file.
+      await waitForDebounce();
+      expect(persist).not.toHaveBeenCalled();
+    });
+
+    it("resetUIState falls back to built-in defaults without config overrides", () => {
+      const store = createTUIStore({ promptDisplay: "off", groupBy: "none" });
+      store.actions.resetUIState();
+      expect(store.state.promptDisplay).toBe("inline");
+      expect(store.state.groupBy).toBe("project");
+    });
+
     it("reloadUIState does not sync selectedSessionId", () => {
       const store = createTUIStore({ sidebar: true });
       store.actions.setSelectedSessionId("s1");

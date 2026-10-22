@@ -56,7 +56,8 @@ import { tmuxArgv } from "../lib/tmux-exec";
 import { isSameServerCached, setDaemonSocketPath } from "./utils/server-guard";
 import { useSharedTerminalDimensions } from "./utils/use-shared-dimensions";
 import { getDaemonUrl, resolvedHomeDir, STATE_FILE } from "../lib/config";
-import { getUIState } from "../lib/state";
+import { readUIState } from "../lib/state";
+import { getPreferences } from "../lib/preferences";
 import {
   PERF_ENABLED,
   trackInterval,
@@ -285,6 +286,7 @@ export function watchStateFile(
     .on("ready", scheduleReload)
     .on("add", scheduleReload)
     .on("change", scheduleReload)
+    .on("unlink", scheduleReload)
     .on("error", () => {
       // Local UI controls still work when the state path is unavailable.
     });
@@ -3474,8 +3476,18 @@ export function App(props: AppProps) {
       let disposed = false;
       try {
         const stopWatching = watchStateFile(STATE_FILE, async () => {
-          const freshState = await getUIState();
-          if (!disposed) store.actions.reloadUIState(freshState);
+          try {
+            const freshState = await readUIState();
+            if (disposed) return;
+            if (freshState === null) {
+              const defaults = await getPreferences();
+              if (!disposed) store.actions.resetUIState(defaults);
+            } else {
+              store.actions.reloadUIState(freshState);
+            }
+          } catch {
+            // Keep current settings on malformed JSON or other read errors.
+          }
         });
         onCleanup(() => {
           disposed = true;
