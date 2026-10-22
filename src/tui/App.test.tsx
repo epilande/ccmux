@@ -19,8 +19,16 @@ import {
 import { liveEffects } from "./components/WorktreesPanel";
 import { HANDOFF_BADGE } from "./components/session-columns";
 import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
-import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SwitchToPaneResult } from "./utils/client-switch";
 import type { OpenAgentsResult } from "./utils/tmux";
@@ -192,7 +200,7 @@ mock.module("../lib/startup-timing", () => ({
   resetStartupMarks: () => {},
 }));
 
-const { App, STALE_DAEMON_HINT } = await import("./App");
+const { App, STALE_DAEMON_HINT, watchStateFile } = await import("./App");
 const { setDaemonSocketPath } = await import("./utils/server-guard");
 
 // Stub process.exit so a one-shot picker's exit is observable, not fatal.
@@ -303,6 +311,62 @@ function mockSidebarStateFetch(payload: Record<string, unknown>) {
     },
   };
 }
+
+describe("watchStateFile", () => {
+  let directory: string;
+  let file: string;
+  let stopWatching: (() => Promise<void>) | undefined;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), "ccmux-state-watch-"));
+    file = join(directory, "state.json");
+  });
+
+  afterEach(async () => {
+    await stopWatching?.();
+    stopWatching = undefined;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it.each(["existing", "missing"])(
+    "reloads after repeated atomic saves (%s state file)",
+    async (initialFile) => {
+      // Match setUIState's temp + rename writes, using only a test-owned file.
+      const save = (promptDisplay: "row2" | "off") => {
+        writeFileSync(`${file}.tmp`, JSON.stringify({ promptDisplay }));
+        renameSync(`${file}.tmp`, file);
+      };
+      let loaded: string | null | undefined;
+      async function expectLoaded(promptDisplay: "row2" | "off" | null) {
+        const expected =
+          promptDisplay === null ? null : JSON.stringify({ promptDisplay });
+        const deadline = Date.now() + 3000;
+        // File events and the reload debounce are asynchronous.
+        while (loaded !== expected && Date.now() < deadline)
+          await Bun.sleep(25);
+        expect(loaded).toBe(expected);
+      }
+
+      // 1. Prepare saved settings, or leave the state file missing.
+      if (initialFile === "existing") save("row2");
+
+      // 2. Read the file whenever the watcher requests a reload.
+      stopWatching = watchStateFile(file, () => {
+        loaded = existsSync(file) ? readFileSync(file, "utf8") : null;
+      });
+
+      // 3. Wait for the startup reload before testing later file changes.
+      await expectLoaded(initialFile === "existing" ? "row2" : null);
+
+      // 4. Create or replace the file; every subsequent save must be observed.
+      // The original fs.watch stopped following the file after a rename.
+      for (const mode of ["off", "row2", "off"] as const) {
+        save(mode);
+        await expectLoaded(mode);
+      }
+    },
+  );
+});
 
 describe("App", () => {
   it("renders header and footer on mount", async () => {
