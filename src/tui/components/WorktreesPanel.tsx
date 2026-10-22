@@ -60,7 +60,8 @@ import {
   type VisualLayout,
 } from "./row-segments";
 
-import { CONFIRM_HINTS, FooterBar, HintLine } from "./Footer";
+import { CONFIRM_HINTS, FOOTER_BAR_ROWS, FooterBar, HintLine } from "./Footer";
+import { DIMMED_OPACITY } from "../theme";
 
 import { useStatusIcon } from "../utils/useStatusIcon";
 
@@ -151,6 +152,9 @@ interface WorktreesPanelProps {
   effects: PanelEffects;
   /** Whether `d`/`D` review is installed, for the footer's hint. */
   reviewable?: boolean;
+  /** A dialog opened from this view sits over it: the view stays, dimmed,
+   *  so it is still the view the user is in. */
+  dimmed?: boolean;
 }
 
 export function partitionSelection(
@@ -1131,6 +1135,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const header = `▾ ${group.repoName} (${rows.length})   ${branch}${badge ? `   ${badge}` : ""}`;
     return displayWidth(header) <= width() - 2 ? branch : undefined;
   };
+  /** Embedded and not the key owner: App's footer shows through instead. */
+  const footerYielded = () => !!props.embedded && props.enabled === false;
   const footerNote = () =>
     note() || scanError() || (!scan() ? "scanning…" : undefined);
   /** The agents cell's text for a row, at this width. */
@@ -1227,7 +1233,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         width="100%"
         flexDirection="row"
         backgroundColor={cursor() === entry.key ? theme.surface : undefined}
-        onMouseDown={() => setCursor(entry.key)}
+        onMouseDown={() => {
+          // Behind a dialog the row under the cursor is the one the dialog
+          // returns to: a stray click must not move it.
+          if (props.enabled !== false) setCursor(entry.key);
+        }}
       >
         <Text fg={theme.mauve}>
           {rowSessions(entry).some((s) => s.id === props.activeSessionId)
@@ -1272,7 +1282,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       top={props.embedded ? 1 : 0}
       left={0}
       width="100%"
-      height={props.embedded ? dims().height - 1 : "100%"}
+      height={
+        props.embedded
+          ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+          : "100%"
+      }
       backgroundColor={theme.base}
       border={props.embedded ? false : true}
       borderColor={props.embedded ? undefined : theme.border}
@@ -1282,146 +1296,162 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       // so the list's right margin moves onto the list itself.
       paddingRight={props.embedded ? 0 : 1}
     >
-      <Show when={!props.embedded}>
-        <Text fg={theme.text}>
-          <b>Worktrees</b>
-        </Text>
-      </Show>
+      {/* Dimmed INSIDE the root, whose opaque base is what keeps the session
+          list underneath from showing through. */}
       <box
         flexGrow={1}
         flexDirection="column"
-        paddingRight={props.embedded ? 1 : 0}
+        opacity={props.dimmed ? DIMMED_OPACITY : 1}
       >
-        <Show when={phase() === "loading"}>
-          <Text fg={theme.overlay}>Reading worktrees…</Text>
+        <Show when={!props.embedded}>
+          <Text fg={theme.text}>
+            <b>Worktrees</b>
+          </Text>
         </Show>
-        <Show when={phase() === "running"}>
-          <Text fg={theme.yellow}>Removing worktrees…</Text>
-        </Show>
-        <Show when={phase() === "done"}>
-          <scrollbox
-            flexGrow={1}
-            ref={(r: ScrollBoxRenderable) => {
-              resultsBox = r;
-              syncScrollbarThumb(r);
-            }}
-          >
-            <For each={result()?.outcomes ?? []}>
-              {(outcome) => (
-                <box flexDirection="column" flexShrink={0}>
-                  <Text fg={outcome.error ? theme.yellow : theme.text}>
-                    {basename(outcome.path)}:{" "}
-                    {outcome.removed ? "removed" : "kept"}
-                  </Text>
-                  <Show when={outcome.error}>
-                    <Text fg={theme.yellow}>{outcome.error}</Text>
-                  </Show>
-                  <For each={outcome.steps}>
-                    {(step) => (
-                      <Text fg={step.ok ? theme.subtext : theme.yellow}>
-                        {step.ok ? "✓" : "!"} {step.detail}
-                      </Text>
-                    )}
-                  </For>
-                </box>
-              )}
-            </For>
-            <For each={result()?.state.filter((s) => s.error) ?? []}>
-              {(entry) => <Text fg={theme.yellow}>{entry.error}</Text>}
-            </For>
-            <Text fg={theme.overlay}>
-              j/k scroll · Enter returns · R refresh
-            </Text>
-          </scrollbox>
-        </Show>
-        <Show when={["list", "confirm", "dirty"].includes(phase())}>
-          <scrollbox
-            flexGrow={1}
-            ref={(r: ScrollBoxRenderable) => {
-              listBox = r;
-              syncScrollbarThumb(r);
-              const bump = () => setMeasured((v) => v + 1);
-              r.viewport.on("resize", bump);
-              r.content.on("resize", bump);
-            }}
-          >
-            <For each={items()}>
-              {(item) =>
-                item.kind === "header" ? (
-                  <GroupHeader
-                    label={item.repoName}
-                    count={item.rows.length}
-                    width={headerWidth()}
-                    flushRight
-                    sharedBranch={groupBranch(item.repoRoot)}
-                    prBadgeColor={
-                      item.rows[0]
-                        ? cachedPRs(item.rows[0]).length
-                          ? badgeColor(cachedPRs(item.rows[0]))
-                          : item.rows[0].pr
-                            ? prColor(item.rows[0].pr)
-                            : undefined
-                        : undefined
-                    }
-                    prBadge={
-                      groupBranch(item.repoRoot) && item.rows[0]
-                        ? cachedBadge(item.rows[0]) ||
-                          (item.rows[0].pr ? describePR(item.rows[0].pr) : "")
-                        : ""
-                    }
-                    collapsed={collapsed().has(item.repoRoot)}
-                    selected={cursor() === item.key}
-                    members={[]}
-                    onActivate={() => {
-                      setCursor(item.key);
-                      toggleGroup(item.repoRoot);
-                    }}
-                  />
-                ) : (
-                  renderRow(item)
-                )
-              }
-            </For>
-          </scrollbox>
-        </Show>
-      </box>
-      {/* The session list's footer, built from the same registry: same
+        <box
+          flexGrow={1}
+          flexDirection="column"
+          paddingRight={props.embedded ? 1 : 0}
+        >
+          <Show when={phase() === "loading"}>
+            <Text fg={theme.overlay}>Reading worktrees…</Text>
+          </Show>
+          <Show when={phase() === "running"}>
+            <Text fg={theme.yellow}>Removing worktrees…</Text>
+          </Show>
+          <Show when={phase() === "done"}>
+            <scrollbox
+              flexGrow={1}
+              ref={(r: ScrollBoxRenderable) => {
+                resultsBox = r;
+                syncScrollbarThumb(r);
+              }}
+            >
+              <For each={result()?.outcomes ?? []}>
+                {(outcome) => (
+                  <box flexDirection="column" flexShrink={0}>
+                    <Text fg={outcome.error ? theme.yellow : theme.text}>
+                      {basename(outcome.path)}:{" "}
+                      {outcome.removed ? "removed" : "kept"}
+                    </Text>
+                    <Show when={outcome.error}>
+                      <Text fg={theme.yellow}>{outcome.error}</Text>
+                    </Show>
+                    <For each={outcome.steps}>
+                      {(step) => (
+                        <Text fg={step.ok ? theme.subtext : theme.yellow}>
+                          {step.ok ? "✓" : "!"} {step.detail}
+                        </Text>
+                      )}
+                    </For>
+                  </box>
+                )}
+              </For>
+              <For each={result()?.state.filter((s) => s.error) ?? []}>
+                {(entry) => <Text fg={theme.yellow}>{entry.error}</Text>}
+              </For>
+              <Text fg={theme.overlay}>
+                j/k scroll · Enter returns · R refresh
+              </Text>
+            </scrollbox>
+          </Show>
+          <Show when={["list", "confirm", "dirty"].includes(phase())}>
+            <scrollbox
+              flexGrow={1}
+              ref={(r: ScrollBoxRenderable) => {
+                listBox = r;
+                syncScrollbarThumb(r);
+                const bump = () => setMeasured((v) => v + 1);
+                r.viewport.on("resize", bump);
+                r.content.on("resize", bump);
+              }}
+            >
+              <For each={items()}>
+                {(item) =>
+                  item.kind === "header" ? (
+                    <GroupHeader
+                      label={item.repoName}
+                      count={item.rows.length}
+                      width={headerWidth()}
+                      flushRight
+                      sharedBranch={groupBranch(item.repoRoot)}
+                      prBadgeColor={
+                        item.rows[0]
+                          ? cachedPRs(item.rows[0]).length
+                            ? badgeColor(cachedPRs(item.rows[0]))
+                            : item.rows[0].pr
+                              ? prColor(item.rows[0].pr)
+                              : undefined
+                          : undefined
+                      }
+                      prBadge={
+                        groupBranch(item.repoRoot) && item.rows[0]
+                          ? cachedBadge(item.rows[0]) ||
+                            (item.rows[0].pr ? describePR(item.rows[0].pr) : "")
+                          : ""
+                      }
+                      collapsed={collapsed().has(item.repoRoot)}
+                      selected={cursor() === item.key}
+                      members={[]}
+                      onActivate={() => {
+                        if (props.enabled === false) return;
+                        setCursor(item.key);
+                        toggleGroup(item.repoRoot);
+                      }}
+                    />
+                  ) : (
+                    renderRow(item)
+                  )
+                }
+              </For>
+            </scrollbox>
+          </Show>
+        </box>
+        {/* The session list's footer, built from the same registry: same
           order, same verbs, the same pinned four. A note (a flash, a scan
           error, the scan still running) leads it without displacing those. */}
-      <Show
-        when={props.embedded}
-        fallback={
-          <HintLine
-            view="worktrees"
-            width={width()}
-            sidebar={props.compact}
-            reviewable={props.reviewable}
-            note={footerNote()}
-            noteColor={note() || scanError() ? theme.yellow : theme.subtext}
-          />
-        }
-      >
-        <FooterBar>
-          <Show
-            when={phase() === "confirm" || phase() === "dirty"}
-            fallback={
-              <HintLine
-                view="worktrees"
-                width={width()}
-                reviewable={props.reviewable}
-                note={footerNote()}
-                noteColor={note() || scanError() ? theme.yellow : theme.subtext}
-              />
-            }
-          >
-            <Text fg={theme.subtext}>
-              {phase() === "dirty"
-                ? "y include · n skip · esc cancel"
-                : CONFIRM_HINTS}
-            </Text>
+        <Show
+          when={props.embedded}
+          fallback={
+            <HintLine
+              view="worktrees"
+              width={width()}
+              sidebar={props.compact}
+              reviewable={props.reviewable}
+              note={footerNote()}
+              noteColor={note() || scanError() ? theme.yellow : theme.subtext}
+            />
+          }
+        >
+          {/* While a dialog, help or a confirmation owns the keys, the bar's two
+            rows go back to App's footer, which shows THAT surface's keys; the
+            panel ends two rows higher, so its list keeps its height. */}
+          <Show when={!footerYielded()}>
+            <FooterBar>
+              <Show
+                when={phase() === "confirm" || phase() === "dirty"}
+                fallback={
+                  <HintLine
+                    view="worktrees"
+                    width={width()}
+                    reviewable={props.reviewable}
+                    note={footerNote()}
+                    noteColor={
+                      note() || scanError() ? theme.yellow : theme.subtext
+                    }
+                  />
+                }
+              >
+                <Text fg={theme.subtext}>
+                  {phase() === "dirty"
+                    ? "y include · n skip · esc cancel"
+                    : CONFIRM_HINTS}
+                </Text>
+              </Show>
+            </FooterBar>
           </Show>
-        </FooterBar>
-      </Show>
+        </Show>
+      </box>
       <Show when={phase() === "dirty" && dirtyQueue()[0]}>
         {(candidate: () => PruneCandidate) => (
           <RemovalConfirm

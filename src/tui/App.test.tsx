@@ -9,6 +9,8 @@ import {
 } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
+import { RGBA, TextAttributes } from "@opentui/core";
+import { theme } from "./theme";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import {
@@ -9094,10 +9096,11 @@ describe("App worktrees panel (W)", () => {
 
         const before = reads.length;
         const returned = await cancelNew();
-        // Back widened, cursor on the row `n` left from...
+        // Back widened, cursor on the row `n` left from: the panel stayed up
+        // behind the dialog, so nothing is read again...
         expect(returned).toContain("all repos");
         expect(returned).toContain("other-checkout");
-        expect(listReads(reads, before)).toEqual([null]);
+        expect(listReads(reads, before)).toEqual([]);
         expect(
           reads.slice(before).some((u) => u.pathname.includes("prune")),
         ).toBe(false);
@@ -9129,7 +9132,8 @@ describe("App worktrees panel (W)", () => {
         const returned = await cancelNew();
         expect(returned).not.toContain("all repos");
         expect(returned).not.toContain("other-checkout");
-        expect(listReads(reads, before)).toEqual(["/code/myapp"]);
+        // The panel never left, so its narrowed list was never re-read.
+        expect(listReads(reads, before)).toEqual([]);
 
         const widened = reads.length;
         setup.mockInput.pressKey("s");
@@ -9141,9 +9145,249 @@ describe("App worktrees panel (W)", () => {
     });
   });
 
-  // The return carries the scope the panel showed in the action payload:
-  // reopening on the opening repo instead brought a widened panel back
-  // narrow (wrong scope, lost cursor, cache miss, one wrong capture).
+  describe("New session dialog over the view that opened it", () => {
+    const SECOND_ROW = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp/wt/second",
+      name: "second",
+      branch: "feat/y",
+    };
+    const spans = () => setup.captureSpans().lines;
+    /** The line the panel's cursor highlight sits on (`surface` bg). */
+    const cursorLine = () =>
+      spans()
+        .find((line) =>
+          line.spans.some(
+            (span) =>
+              span.text.trim() !== "" &&
+              span.bg.toInts().join() ===
+                RGBA.fromHex(theme.surface).toInts().join(),
+          ),
+        )
+        ?.spans.map((span) => span.text)
+        .join("");
+    const spanWith = (text: string) =>
+      spans()
+        .flatMap((line) => line.spans)
+        .find((span) => span.text.includes(text));
+    const isActiveTab = (label: string) => {
+      const tab = setup
+        .captureSpans()
+        .lines[0]!.spans.find((span) => span.text.startsWith(label));
+      return (
+        tab?.fg.toInts().join() === RGBA.fromHex(theme.blue).toInts().join() &&
+        (tab!.attributes & TextAttributes.BOLD) !== 0
+      );
+    };
+
+    it("keeps Worktrees behind the dialog, dimmed, and Esc leaves the same row", async () => {
+      const { restore, frame } = await openPanel([WORKTREE_ROW, SECOND_ROW]);
+      try {
+        await frame();
+        for (let i = 0; i < 4 && !cursorLine()?.includes("second"); i++) {
+          setup.mockInput.pressKey("j");
+          await frame();
+        }
+        expect(cursorLine()).toContain("second");
+        const bright = spanWith("feature")!.fg.toInts();
+
+        setup.mockInput.pressKey("n");
+        const open = await frame();
+        expect(squish(open)).toContain(squish("New session"));
+        // Worktrees is still the view: its rows behind the dialog, its tab
+        // the active one, and the footer teaching the dialog's keys.
+        expect(open).toContain("feature");
+        expect(isActiveTab("Worktrees")).toBe(true);
+        expect(open.trimEnd().split("\n").at(-1)).toContain("enter spawn");
+        // Dimmed: the same row draws fainter than it did a moment ago.
+        expect(spanWith("feature")!.fg.toInts()).not.toEqual(bright);
+
+        deliverEscape(setup.renderer);
+        const back = await frame();
+        expect(squish(back)).not.toContain(squish("New session"));
+        expect(cursorLine()).toContain("second");
+        expect(isActiveTab("Worktrees")).toBe(true);
+        expect(spanWith("feature")!.fg.toInts()).toEqual(bright);
+        expect(back).toContain("x remove");
+      } finally {
+        restore();
+      }
+    });
+
+    it("keeps Start behind the dialog its n opens, and Esc returns to it", async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        );
+        if (url.pathname === "/prs")
+          return Response.json({
+            repos: [
+              {
+                repoRoot: "/code/myapp",
+                repoName: "myapp",
+                prs: [
+                  {
+                    number: 7,
+                    title: "seven",
+                    url: "https://github.com/o/r/pull/7",
+                    author: "epilande",
+                    isDraft: false,
+                    reviewDecision: null,
+                    ciStatus: "none",
+                    headRefName: "feat/seven",
+                    headRefOid: "sha7",
+                  },
+                ],
+              },
+            ],
+            errors: [],
+          });
+        if (url.pathname.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [] });
+        return Response.json({ repos: [], errors: [], headerPR: true });
+      }) as typeof fetch;
+      try {
+        await renderApp(120, 24, { groupBy: "none" });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              project: "myapp",
+              cwd: "/code/myapp",
+              mainRepoRoot: "/code/myapp",
+              tmuxPane: "%1",
+            }),
+          ],
+          null,
+        );
+        const frame = async () => {
+          for (let i = 0; i < 3; i++) {
+            await new Promise((done) => setTimeout(done, 0));
+            await setup.renderOnce();
+          }
+          return setup.captureCharFrame();
+        };
+        await frame();
+        setup.mockInput.pressKey("N", { shift: true });
+        expect(await frame()).toContain("#7 seven");
+        setup.mockInput.pressKey("n");
+        const open = await frame();
+        expect(squish(open)).toContain(squish("New session"));
+        expect(open).toContain("#7 seven");
+        expect(isActiveTab("Start")).toBe(true);
+        expect(open.trimEnd().split("\n").at(-1)).toContain("enter spawn");
+        deliverEscape(setup.renderer);
+        const back = await frame();
+        expect(squish(back)).not.toContain(squish("New session"));
+        expect(back).toContain("#7 seven");
+        expect(isActiveTab("Start")).toBe(true);
+
+        // Enter on the PR opens the PR-mode dialog over Start the same way.
+        setup.mockInput.pressEnter();
+        const pr = await frame();
+        expect(squish(pr)).toContain(squish("New session on PR"));
+        expect(pr).toContain("myapp (1)");
+        expect(isActiveTab("Start")).toBe(true);
+        deliverEscape(setup.renderer);
+        expect(squish(await frame())).not.toContain(squish("New session"));
+        expect(isActiveTab("Start")).toBe(true);
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+
+    it("lands on Sessions with the cursor on the new session once it starts", async () => {
+      const original = globalThis.fetch;
+      const spawned: unknown[] = [];
+      globalThis.fetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const href = input instanceof Request ? input.url : String(input);
+        if (href.includes("/server-info"))
+          return Response.json({ socketPath: null });
+        if (href.endsWith("/agents"))
+          return Response.json({
+            agents: [
+              {
+                name: "claude",
+                displayName: "Claude",
+                shortCode: "CC",
+                supportsPrompt: true,
+              },
+            ],
+          });
+        if (href.endsWith("/spawn")) {
+          spawned.push(JSON.parse(String(init?.body ?? "{}")));
+          return Response.json({ success: true, paneId: "%9" });
+        }
+        if (href.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [], open: [] });
+        if (href.includes("/worktrees"))
+          return Response.json({
+            repos: [
+              {
+                repoRoot: "/code/myapp",
+                repoName: "myapp",
+                worktrees: [WORKTREE_ROW],
+              },
+            ],
+          });
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              project: "myapp",
+              cwd: "/code/myapp",
+              mainRepoRoot: "/code/myapp",
+              tmuxPane: "%1",
+              tmuxTarget: "dev:1.1",
+            }),
+          ],
+          null,
+        );
+        const frame = async () => {
+          for (let i = 0; i < 3; i++) {
+            await new Promise((done) => setTimeout(done, 0));
+            await setup.renderOnce();
+          }
+          return setup.captureCharFrame();
+        };
+        await frame();
+        setup.mockInput.pressKey("W", { shift: true });
+        await frame();
+        setup.mockInput.pressKey("n");
+        expect(squish(await frame())).toContain(squish("New session"));
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        // Sessions now, though the new row has not arrived yet.
+        expect(isActiveTab("Sessions")).toBe(true);
+        sseCallbacks!.onSessionCreated(
+          mockEnrichedSession({
+            id: "fresh",
+            project: "myapp",
+            cwd: "/code/myapp/wt/feature",
+            mainRepoRoot: "/code/myapp",
+            tmuxPane: "%9",
+            tmuxTarget: "dev:2.1",
+          }),
+        );
+        await frame();
+        expect(cursorLine()).toContain("dev:2.1");
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  });
+
+  // The panel stays up behind the dialog, so a widened scope, its rows and
+  // its scan are simply still there on Esc: nothing is re-read or re-scanned.
   it("keeps a s-widened scope across the dialog round trip", async () => {
     const urls: string[] = [];
     const originalFetch = globalThis.fetch;
@@ -9206,13 +9450,12 @@ describe("App worktrees panel (W)", () => {
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
 
-      expect(setup.captureCharFrame()).toContain("Worktrees");
-      const reopened = urls.slice(before);
-      // The reopened panel reads the widened scope, not the opening repo...
-      expect(reopened.some((u) => u.includes("/worktrees"))).toBe(true);
-      expect(reopened.every((u) => !u.includes("repo="))).toBe(true);
-      // ...and its widened scan is the cached one, so none is re-fired.
-      expect(reopened.every((u) => !u.includes("prune-candidates"))).toBe(true);
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Worktrees");
+      expect(frame).toContain("all repos");
+      const after = urls.slice(before);
+      expect(after.some((u) => u.includes("/worktrees"))).toBe(false);
+      expect(after.some((u) => u.includes("prune-candidates"))).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
     }

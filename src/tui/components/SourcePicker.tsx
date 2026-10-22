@@ -25,12 +25,12 @@ import { describeHttpFailure } from "../../daemon/worktree-prune";
 import { getDaemonUrl } from "../../lib/config";
 import type { IconStyle } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
-import { theme } from "../theme";
+import { DIMMED_OPACITY, theme } from "../theme";
 import { padStartWidth, truncateText } from "../utils/format";
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
+import { FOOTER_BAR_ROWS, FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
 import { isPRRowKey } from "./pr-rows";
 import { oneLine, scrollTargetFor, type VisualLayout } from "./row-segments";
 import {
@@ -91,6 +91,9 @@ export interface SourcePickerProps {
   embedded?: boolean;
   /** Whether `d`/`D` review is installed, for the footer's hint. */
   reviewable?: boolean;
+  /** A dialog opened from this view sits over it: the view stays, dimmed,
+   *  so it is still the view the user is in. */
+  dimmed?: boolean;
   enabled?: boolean;
   onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
   onScope?: (repo: string | null) => void;
@@ -843,6 +846,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       : emptyStateText(visible(), filter()),
   );
 
+  /** Embedded and not the key owner: App's footer shows through instead. */
+  const footerYielded = () => !!props.embedded && props.enabled === false;
   const footerLine = () => (
     <Show
       when={!filtering()}
@@ -962,7 +967,11 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         width="100%"
         flexDirection="row"
         backgroundColor={isCursor() ? theme.surface : undefined}
-        onMouseDown={() => setCursorKey(row.key)}
+        onMouseDown={() => {
+          // Behind a dialog the row under the cursor is the one the dialog
+          // returns to: a stray click must not move it.
+          if (props.enabled !== false) setCursorKey(row.key);
+        }}
       >
         <Text fg={theme.mauve}>
           {sessions().some((s) => s.id === props.activeSessionId) ? "▎" : " "}
@@ -995,7 +1004,11 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       top={props.embedded ? 1 : 0}
       left={0}
       width="100%"
-      height={props.embedded ? dims().height - 1 : "100%"}
+      height={
+        props.embedded
+          ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+          : "100%"
+      }
       backgroundColor={theme.base}
       border={props.embedded ? false : true}
       borderColor={props.embedded ? undefined : theme.border}
@@ -1005,134 +1018,151 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       // so the list's right margin moves onto the rows above it.
       paddingRight={props.embedded ? 0 : 1}
     >
-      <Show when={!props.embedded}>
-        <box width="100%" height={1} flexDirection="row">
-          <Text fg={theme.text} attributes={1}>
-            {title()}
-          </Text>
-        </box>
-      </Show>
-
-      {/* Drawn only while filtering, in the session picker's own shape: the
-          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
-          The footer's `/ filter` hint is what teaches the key, which is how
-          the session picker teaches it too. */}
-      <Show when={filtering()}>
-        <box
-          width="100%"
-          height={1}
-          flexDirection="row"
-          paddingRight={props.embedded ? 1 : 0}
-        >
-          <Text fg={theme.overlay} width={2}>
-            {"/ "}
-          </Text>
-          <input
-            value={filter()}
-            onInput={(value: string) => {
-              // 0.1.97 emits `input` for programmatic assignments too, the
-              // seed at mount included, so only a changed value is the user.
-              if (value !== filter()) setFilterEdited(true);
-              setFilter(value);
-            }}
-            focused
-            placeholder="Filter pull requests and issues..."
-            placeholderColor={theme.overlay}
-            textColor={theme.text}
-            focusedTextColor={theme.text}
-            cursorColor={theme.blue}
-            backgroundColor="transparent"
-            focusedBackgroundColor="transparent"
-            width="100%"
-          />
-        </box>
-      </Show>
-
+      {/* Dimmed INSIDE the root, whose opaque base is what keeps the session
+          list underneath from showing through. */}
       <box
         flexGrow={1}
         flexDirection="column"
-        paddingRight={props.embedded ? 1 : 0}
+        opacity={props.dimmed ? DIMMED_OPACITY : 1}
       >
-        <Show when={phase() === "error"}>
-          <box paddingTop={1} flexDirection="column">
-            <Text fg={theme.red}>
-              {truncateText(error() ?? "", contentWidth())}
+        <Show when={!props.embedded}>
+          <box width="100%" height={1} flexDirection="row">
+            <Text fg={theme.text} attributes={1}>
+              {title()}
             </Text>
-            <Text fg={theme.subtext}>R retry · q back</Text>
           </box>
         </Show>
 
-        <Show when={phase() !== "error"}>
-          <Show
-            when={hasRows(visible())}
-            fallback={
-              <box paddingTop={1}>
-                <Text fg={emptyState().fg}>
-                  {truncateText(emptyState().text, contentWidth())}
-                </Text>
-              </box>
-            }
+        {/* Drawn only while filtering, in the session picker's own shape: the
+          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
+          The footer's `/ filter` hint is what teaches the key, which is how
+          the session picker teaches it too. */}
+        <Show when={filtering()}>
+          <box
+            width="100%"
+            height={1}
+            flexDirection="row"
+            paddingRight={props.embedded ? 1 : 0}
           >
-            <scrollbox
-              flexGrow={1}
-              ref={(r: ScrollBoxRenderable) => {
-                listBox = r;
-                syncScrollbarThumb(r);
-                const bump = () => setScrollboxLayout((v) => v + 1);
-                r.viewport.on("resize", bump);
-                r.content.on("resize", bump);
+            <Text fg={theme.overlay} width={2}>
+              {"/ "}
+            </Text>
+            <input
+              value={filter()}
+              onInput={(value: string) => {
+                // 0.1.97 emits `input` for programmatic assignments too, the
+                // seed at mount included, so only a changed value is the user.
+                if (value !== filter()) setFilterEdited(true);
+                setFilter(value);
               }}
-            >
-              <For
-                each={visible().filter(
-                  (r) => r.prs.length + r.issues.length > 0,
-                )}
-              >
-                {(repo) => (
-                  <box flexDirection="column">
-                    <GroupHeader
-                      label={repo.repoName}
-                      count={repo.prs.length + repo.issues.length}
-                      width={listWidth()}
-                      // Rows here have no right padding, so neither does
-                      // the header: its rule ends where they do.
-                      flushRight
-                      collapsed={collapsed().has(repo.repoRoot)}
-                      selected={headerRepo()?.repoRoot === repo.repoRoot}
-                      members={[]}
-                      onActivate={() => {
-                        setCursorKey(`repo:${repo.repoRoot}`);
-                        toggleGroup(repo.repoRoot);
-                      }}
-                    />
-                    <Show when={!collapsed().has(repo.repoRoot)}>
-                      <For each={[...repo.prs, ...repo.issues]}>
-                        {renderRow}
-                      </For>
-                    </Show>
-                  </box>
-                )}
-              </For>
-            </scrollbox>
-          </Show>
+              // Not while a dialog owns the keys: Enter in the filter opens one
+              // with the filter still up, and two focused inputs would both
+              // take the keystrokes.
+              focused={props.enabled !== false}
+              placeholder="Filter pull requests and issues..."
+              placeholderColor={theme.overlay}
+              textColor={theme.text}
+              focusedTextColor={theme.text}
+              cursorColor={theme.blue}
+              backgroundColor="transparent"
+              focusedBackgroundColor="transparent"
+              width="100%"
+            />
+          </box>
         </Show>
-      </box>
 
-      {/* The session list's footer, built from the same registry: same
+        <box
+          flexGrow={1}
+          flexDirection="column"
+          paddingRight={props.embedded ? 1 : 0}
+        >
+          <Show when={phase() === "error"}>
+            <box paddingTop={1} flexDirection="column">
+              <Text fg={theme.red}>
+                {truncateText(error() ?? "", contentWidth())}
+              </Text>
+              <Text fg={theme.subtext}>R retry · q back</Text>
+            </box>
+          </Show>
+
+          <Show when={phase() !== "error"}>
+            <Show
+              when={hasRows(visible())}
+              fallback={
+                <box paddingTop={1}>
+                  <Text fg={emptyState().fg}>
+                    {truncateText(emptyState().text, contentWidth())}
+                  </Text>
+                </box>
+              }
+            >
+              <scrollbox
+                flexGrow={1}
+                ref={(r: ScrollBoxRenderable) => {
+                  listBox = r;
+                  syncScrollbarThumb(r);
+                  const bump = () => setScrollboxLayout((v) => v + 1);
+                  r.viewport.on("resize", bump);
+                  r.content.on("resize", bump);
+                }}
+              >
+                <For
+                  each={visible().filter(
+                    (r) => r.prs.length + r.issues.length > 0,
+                  )}
+                >
+                  {(repo) => (
+                    <box flexDirection="column">
+                      <GroupHeader
+                        label={repo.repoName}
+                        count={repo.prs.length + repo.issues.length}
+                        width={listWidth()}
+                        // Rows here have no right padding, so neither does
+                        // the header: its rule ends where they do.
+                        flushRight
+                        collapsed={collapsed().has(repo.repoRoot)}
+                        selected={headerRepo()?.repoRoot === repo.repoRoot}
+                        members={[]}
+                        onActivate={() => {
+                          if (props.enabled === false) return;
+                          setCursorKey(`repo:${repo.repoRoot}`);
+                          toggleGroup(repo.repoRoot);
+                        }}
+                      />
+                      <Show when={!collapsed().has(repo.repoRoot)}>
+                        <For each={[...repo.prs, ...repo.issues]}>
+                          {renderRow}
+                        </For>
+                      </Show>
+                    </box>
+                  )}
+                </For>
+              </scrollbox>
+            </Show>
+          </Show>
+        </box>
+
+        {/* The session list's footer, built from the same registry: same
           order, same verbs, the same pinned four. While the filter owns the
           keys it teaches the session search's keys instead. A note (a flash,
           a source still loading or failing) leads the hints, never
           displacing the pinned four. */}
-      <Show
-        when={props.embedded}
-        fallback={
-          <box width="100%" height={1} flexDirection="row">
-            {footerLine()}
-          </box>
-        }
-      >
-        <FooterBar>{footerLine()}</FooterBar>
-      </Show>
+        <Show
+          when={props.embedded}
+          fallback={
+            <box width="100%" height={1} flexDirection="row">
+              {footerLine()}
+            </box>
+          }
+        >
+          {/* While a dialog, help or a confirmation owns the keys, the bar's
+            rows go back to App's footer, which shows THAT surface's keys;
+            the view ends two rows higher, so its list keeps its height. */}
+          <Show when={!footerYielded()}>
+            <FooterBar>{footerLine()}</FooterBar>
+          </Show>
+        </Show>
+      </box>
     </box>
   );
 };

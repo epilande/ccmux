@@ -731,7 +731,6 @@ export function App(props: AppProps) {
      */
     cursor?: string;
   }) {
-    store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
     if (worktree) {
       const live = store.state.sessions.find((session) =>
@@ -742,10 +741,13 @@ export function App(props: AppProps) {
         ),
       );
       if (live) {
+        store.actions.hideWorktrees();
         activateSession(live);
         return;
       }
     }
+    // The panel stays up behind the dialog, dimmed: it is still the view the
+    // user is in until a session actually starts.
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
@@ -784,7 +786,7 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn(target);
-    store.actions.hideSourcePicker();
+    // Start stays up behind the dialog, dimmed, until a session starts.
     openNewSession({
       cwd: target.repoRoot,
       pr: {
@@ -814,7 +816,7 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn(target);
-    store.actions.hideSourcePicker();
+    // Start stays up behind the dialog, dimmed, until a session starts.
     openNewSession({
       cwd: target.repoRoot,
       issue: {
@@ -841,7 +843,6 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn({ repoRoot: target.path, ...target });
-    store.actions.hideSourcePicker();
     const live = store.state.sessions.find((session) =>
       worktreeHoldsPath(
         target.path,
@@ -850,6 +851,7 @@ export function App(props: AppProps) {
       ),
     );
     if (live) {
+      store.actions.hideSourcePicker();
       activateSession(live);
       return;
     }
@@ -968,6 +970,9 @@ export function App(props: AppProps) {
    * connection and never answers latches `forkInFlight` for the rest of the
    * picker's life, and `F` silently stops working. */
   const FORK_TIMEOUT_MS = 15_000;
+
+  /** How long a landed spawn waits for its session row to take the cursor. */
+  const SPAWN_SELECT_MS = 15_000;
 
   /**
    * Open the new-session dialog in fork mode over `session`: continue this
@@ -2523,6 +2528,11 @@ export function App(props: AppProps) {
     const sources = store.state.newSession?.returnToSources ?? null;
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
+    // The view that opened the dialog stayed up behind it, so its row, scope
+    // and filter are all still there: closing the dialog IS the return. The
+    // markers below are the fallback for an origin that is no longer open.
+    if (sources && store.state.sourcePicker) return;
+    if (marker && store.state.worktrees) return;
     if (sources) {
       store.actions.showSourcePicker(
         sources.repo,
@@ -2813,6 +2823,47 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * A spawn's pane, until its session row arrives over SSE and takes the
+   * cursor. The row comes from the daemon's next scan, not the spawn reply,
+   * so the selection waits for it, but not forever (`SPAWN_SELECT_MS`), and
+   * never over the user: a cursor moved in the meantime wins.
+   */
+  const [pendingSpawn, setPendingSpawn] = createSignal<{
+    paneId: string;
+    sessionId: string | null;
+    headerKey: string | null;
+  } | null>(null);
+  function selectWhenArrives(paneId: string) {
+    const pending = {
+      paneId,
+      sessionId: store.state.selectedSessionId,
+      headerKey: store.selectedHeaderKey(),
+    };
+    setPendingSpawn(pending);
+    setTimeout(
+      () => setPendingSpawn((p) => (p === pending ? null : p)),
+      SPAWN_SELECT_MS,
+    );
+  }
+  createEffect(() => {
+    const pending = pendingSpawn();
+    if (!pending) return;
+    if (
+      store.state.selectedSessionId !== pending.sessionId ||
+      store.selectedHeaderKey() !== pending.headerKey
+    ) {
+      setPendingSpawn(null);
+      return;
+    }
+    const session = store.state.sessions.find(
+      (s) => s.tmuxPane === pending.paneId,
+    );
+    if (!session) return;
+    setPendingSpawn(null);
+    store.actions.applySidebarSelection(session.id, null);
+  });
+
   async function submitNewSession(): Promise<void> {
     const draft = store.state.newSession;
     if (!draft) return;
@@ -3003,6 +3054,13 @@ export function App(props: AppProps) {
       store.actions.closeNewSessionDialog();
       spawnInFlight = false;
     }
+
+    // A session started: the board is the session list now (ending any
+    // Worktrees/Start view the dialog was opened over, and with it any jump
+    // scope), with the cursor going to the new row as soon as it arrives.
+    store.actions.hideWorktrees();
+    store.actions.hideSourcePicker();
+    if (landed.paneId) selectWhenArrives(landed.paneId);
 
     /** Hand the board over to the new pane, which is what the picker is for. */
     const enterPane = () => {
@@ -4286,7 +4344,7 @@ export function App(props: AppProps) {
               onRefresh={refreshAll}
               onNew={(cwd) => {
                 const scope = store.state.scope;
-                store.actions.hideWorktrees();
+                // The panel stays up behind the dialog, dimmed.
                 openNewSession({
                   cwd,
                   returnToWorktrees: {
@@ -4320,6 +4378,7 @@ export function App(props: AppProps) {
               // reason its `d` key is inert on a session row.
               onReview={props.sidebar ? undefined : reviewWorktree}
               reviewable={reviewEnabled && !props.sidebar}
+              dimmed={store.state.newSession !== null}
             />
           )}
         </Show>
@@ -4354,7 +4413,7 @@ export function App(props: AppProps) {
                   cursor: sourceMemory?.cursor ?? "",
                   filter: sourceMemory?.filter ?? "",
                 });
-                store.actions.hideSourcePicker();
+                // Start stays up behind the dialog, dimmed.
                 openNewSession({ cwd, returnToSources: marker });
               }}
               onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
@@ -4381,6 +4440,7 @@ export function App(props: AppProps) {
                       })
               }
               reviewable={reviewEnabled && !props.sidebar}
+              dimmed={store.state.newSession !== null}
               repo={picker().repo}
               cwd={pickerCwd()}
               compact={props.sidebar}

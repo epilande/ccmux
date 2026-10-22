@@ -164,12 +164,15 @@ export function hintLine(
 
 const NOTE_GAP = "  ";
 
+/** The rows `FooterBar` takes: its top border and its line. */
+export const FOOTER_BAR_ROWS = 2;
+
 /** The footer's frame: a border-topped line. Shared by the session list's
  *  footer and the Worktrees and Start views, so all three look alike. */
 export const FooterBar: Component<{ children: JSX.Element }> = (props) => (
   <box
     width="100%"
-    height={2}
+    height={FOOTER_BAR_ROWS}
     flexShrink={0}
     paddingLeft={1}
     paddingRight={1}
