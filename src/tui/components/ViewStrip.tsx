@@ -39,8 +39,9 @@ const SEP = " · ";
  *  then drops it, before the name after it is ever cut. */
 const SCOPE_PREFIXES = ["scope: ", "in ", ""] as const;
 /** Columns the right end spends around its content: the space that ends the
- *  rule's fill, and the ` ──` that closes the line. */
-const RIGHT_DRESSING = 4;
+ *  rule's fill. Nothing follows the scope's name: the strip ends on it, at
+ *  the last column, the way it starts on "Sessions" at the first. */
+const RIGHT_DRESSING = 1;
 /** Columns every tab spends besides its name and count: the `── ` stub and
  *  the space after it. The first tab has no stub (see `tabDressing`). */
 const TAB_DRESSING = 4;
@@ -207,11 +208,12 @@ export function fitStrip(input: {
 
 /**
  * The view strip is a titled RULE, not a row of chips: `Sessions (2) ──
- * Worktrees ── Start ───────── scope: all repos ──`. Drawn that way so the
+ * Worktrees ── Start ───────── scope: all repos`. Drawn that way so the
  * line above the list reads as chrome at a glance. A row of names on a plain
  * background looked like one more data row, and the column-header line that
  * follows it (see `SessionList`) then had nothing to set it apart from. The
- * first tab starts flush at column 0, with no rule before it.
+ * first tab starts flush at column 0 with no rule before it, and the line
+ * ends on the scope's name at the last column with none after it.
  *
  * The active view is marked by its label alone, the lazygit way: its name
  * and count are bold and in the accent color (`theme.blue`), where the
@@ -227,7 +229,7 @@ export function fitStrip(input: {
  *
  * Board-wide signals (see `StripStatus`) sit inside the rule's right end,
  * ahead of `scope:` and joined to it by the same ` · `: `──── ● reconnecting
- * · 1 invoking · scope: all repos ──`. A healthy board draws none of them,
+ * · 1 invoking · scope: all repos`. A healthy board draws none of them,
  * so its strip is exactly the plain titled rule.
  */
 export const ViewStrip: Component<
@@ -306,8 +308,9 @@ export const ViewStrip: Component<
       },
       status: props,
       scopeName: props.scope?.split("/").pop() ?? "all repos",
-      // Right padding only: the first tab starts at column 0.
-      width: dims().width - 1,
+      // No padding either side: the first tab starts at column 0, and the
+      // scope's name ends on the last.
+      width: dims().width,
     }),
   );
   const tabsWidth = () =>
@@ -340,25 +343,21 @@ export const ViewStrip: Component<
         ...(prefix ? [{ text: prefix, fg: theme.subtext }] : []),
         { text: scope, fg: props.scope ? theme.blue : theme.subtext },
       ]);
-    nodes.forEach((node, i) =>
-      node.push(
-        i < nodes.length - 1
-          ? { text: SEP, fg: theme.overlay }
-          : { text: " ──", fg: theme.border },
-      ),
-    );
+    nodes.forEach((node, i) => {
+      if (i < nodes.length - 1) node.push({ text: SEP, fg: theme.overlay });
+    });
     return nodes;
   };
   /** A tab's name and its count, as fitted. */
   const tabLabel = (view: View) =>
     fit().tabs[view].name + fit().tabs[view].count;
-  const fill = () => Math.max(0, dims().width - 1 - tabsWidth() - rightWidth());
+  const fill = () => Math.max(0, dims().width - tabsWidth() - rightWidth());
   return (
     <box
       height={1}
       width="100%"
       paddingLeft={0}
-      paddingRight={1}
+      paddingRight={0}
       flexDirection="row"
     >
       <For each={VIEWS}>
@@ -390,8 +389,8 @@ export const ViewStrip: Component<
       <Text fg={theme.border}>
         {"─".repeat(fill()) + (rightWidth() ? " " : "")}
       </Text>
-      {/* One text node per item, each carrying the separator or closing
-          rule that FOLLOWS it: dynamic children inside a single text node
+      {/* One text node per item, each carrying the separator that FOLLOWS
+          it (the last carries none): dynamic children inside a single text node
           are appended rather than inserted in place (a signal arriving after
           the scope drew behind it), and a node's leading space is dropped. */}
       <For each={rightNodes()}>

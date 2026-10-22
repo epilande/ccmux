@@ -38,9 +38,9 @@ it("draws a titled rule, marks the active view by its label, and fills counts on
   // an accent rule before it.
   expect(line.startsWith("Sessions (2) ── Worktrees ── Start ─")).toBe(true);
   expect(line).not.toContain("━");
-  expect(line.trimEnd().endsWith(" scope: all repos ──")).toBe(true);
-  // The rule runs to the edge inside the one-column right padding.
-  expect(line.trimEnd().length).toBe(95);
+  expect(line.trimEnd().endsWith(" scope: all repos")).toBe(true);
+  // The line ends on the scope's name, in the last column: no rule after it.
+  expect(line.trimEnd().length).toBe(96);
   const spans = setup.captureSpans().lines[0]!.spans;
   const active = spans.find((s) => s.text.includes("Worktrees"));
   expect(active?.fg.toInts()).toEqual(hex(theme.blue));
@@ -188,7 +188,7 @@ it("scopes totals to the repo and names it, colored, at the right edge", async (
   const frame = setup.captureCharFrame();
   // Scoped, the count carries the total the scope hides, as Sessions' does.
   expect(frame).toContain("Start (3/33)");
-  expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
+  expect(frame.trimEnd().endsWith(" scope: repo")).toBe(true);
   const scope = setup
     .captureSpans()
     .lines[0]!.spans.find((s) => s.text === "repo");
@@ -234,7 +234,7 @@ it("counts the other views in the base scope while a jump narrows this one", asy
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("Sessions (4) ── Worktrees (2/5) ── Start (11) ─");
-  expect(frame.trimEnd().endsWith(" scope: repo ──")).toBe(true);
+  expect(frame.trimEnd().endsWith(" scope: repo")).toBe(true);
 });
 
 it("sums the repos that answered and marks the total partial when one never did", async () => {
@@ -276,10 +276,10 @@ it("sums the repos that answered and marks the total partial when one never did"
 // tabs' own width the strip CLIPS (line 2 must stay blank: OpenTUI wraps an
 // overflowing row onto the next line, which here is the head line).
 for (const [width, expected] of [
-  [53, "Sessions (2) ── Worktrees ── Start ─ scope: scope ──"],
-  [52, "Sessions (2) ── Worktrees ── Start ──── in scope ──"],
-  [48, "Sessions ── Worktrees ── Start ──── in scope ──"],
-  [44, "Se ── Wt ── St ──────────────── in scope ──"],
+  [49, "Sessions (2) ── Worktrees ── Start ─ scope: scope"],
+  [48, "Sessions (2) ── Worktrees ── Start ──── in scope"],
+  [44, "Sessions ── Worktrees ── Start ──── in scope"],
+  [40, "Se ── Wt ── St ──────────────── in scope"],
 ] as const) {
   it(`keeps the scope's name whole at ${width} columns`, async () => {
     setup = await testRender(
@@ -298,7 +298,7 @@ for (const [width, expected] of [
     const frame = setup.captureCharFrame();
     const line = frame.split("\n")[0]!.trimEnd();
     expect(line).toBe(expected);
-    expect(line.length).toBe(width - 1);
+    expect(line.length).toBe(width);
     expect(frame.split("\n")[1]?.trim()).toBe("");
   });
 }
@@ -338,20 +338,21 @@ it("renders the healthy board exactly as the plain titled rule", async () => {
     hideIdle: false,
   });
   expect(healthy).toBe(bare);
-  // Tabs 35, padding 1, scope dressing 11, name 9: 96 - 56 = 40 rule cells.
+  // Tabs 35, the space before the right end 1, `scope: ` 7, name 9:
+  // 96 - 52 = 44 rule cells, and nothing after the name.
   expect(healthy).toBe(
-    `Sessions (3) ── Worktrees ── Start ${"─".repeat(40)} scope: all repos ──`,
+    `Sessions (3) ── Worktrees ── Start ${"─".repeat(44)} scope: all repos`,
   );
 });
 
 it("marks a lost connection with its state color, never when connected", async () => {
   expect(await strip(96, { connectionState: "reconnecting" })).toEndWith(
-    "─ ● reconnecting · scope: all repos ──",
+    "─ ● reconnecting · scope: all repos",
   );
   expect(fgOf("reconnecting")).toEqual(hex(theme.yellow));
   setup.renderer.destroy();
   expect(await strip(96, { connectionState: "disconnected" })).toEndWith(
-    "─ ● disconnected · scope: all repos ──",
+    "─ ● disconnected · scope: all repos",
   );
   expect(fgOf("disconnected")).toEqual(hex(theme.red));
   setup.renderer.destroy();
@@ -362,12 +363,12 @@ it("marks a lost connection with its state color, never when connected", async (
 
 it("shows degraded and in-flight invokes only while they hold", async () => {
   expect(await strip(96, { daemonDegraded: true })).toEndWith(
-    "─ ▲ degraded · scope: all repos ──",
+    "─ ▲ degraded · scope: all repos",
   );
   expect(fgOf("degraded")).toEqual(hex(theme.yellow));
   setup.renderer.destroy();
   expect(await strip(96, { invokeInFlight: 2 })).toEndWith(
-    "─ 2 invoking · scope: all repos ──",
+    "─ 2 invoking · scope: all repos",
   );
   expect(fgOf("invoking")).toEqual(hex(theme.peach));
   setup.renderer.destroy();
@@ -378,17 +379,17 @@ it("shows degraded and in-flight invokes only while they hold", async () => {
 
 it("counts hidden rows as (n/total) and flags hide-idle apart from search", async () => {
   const idle = await strip(96, { total: 8, hideIdle: true });
-  expect(idle).toContain("Sessions (3/8) ──");
+  expect(idle).toContain("Sessions (3/8)");
   // The active tab's count rides in its accent; the rest of the strip's
   // read text is subtext, not overlay (under 4.5:1 on base in every
   // built-in theme).
   expect(fgOf("3/8")).toEqual(hex(theme.blue));
-  expect(idle).toEndWith("─ active · scope: all repos ──");
+  expect(idle).toEndWith("─ active · scope: all repos");
   expect(fgOf("active")).toEqual(hex(theme.subtext));
   expect(fgOf("scope: ")).toEqual(hex(theme.subtext));
   setup.renderer.destroy();
   const search = await strip(96, { total: 8 });
-  expect(search).toContain("Sessions (3/8) ──");
+  expect(search).toContain("Sessions (3/8)");
   expect(search).not.toContain("active");
 });
 
@@ -401,9 +402,9 @@ it("orders every signal ahead of the scope and keeps the rule edge to edge", asy
     total: 8,
   });
   expect(line).toEndWith(
-    "─ ● reconnecting · ▲ degraded · 1 invoking · active · scope: all repos ──",
+    "─ ● reconnecting · ▲ degraded · 1 invoking · active · scope: all repos",
   );
-  expect(line.length).toBe(119);
+  expect(line.length).toBe(120);
 });
 
 describe("fitStrip priority", () => {
@@ -440,43 +441,45 @@ describe("fitStrip priority", () => {
       "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · 2 invoking · active · scope: dotfiles",
     );
     // Signals first: invoking, active, then the words behind the glyphs.
-    expect(line(110)).toBe(
+    expect(line(107)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · active · scope: dotfiles",
     );
-    expect(line(107)).toBe(
+    expect(line(104)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · scope: dotfiles",
     );
-    expect(line(97)).toBe(
+    expect(line(94)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ degraded · scope: dotfiles",
     );
-    expect(line(77)).toBe(
+    expect(line(74)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ · scope: dotfiles",
     );
     // Then the shorter prefix, before any count.
-    expect(line(76)).toBe(
+    expect(line(73)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ · in dotfiles",
     );
     // Then every count at once: never one tab's alone.
-    expect(line(72)).toBe("Sessions Worktrees Start | ● · ▲ · in dotfiles");
+    expect(line(69)).toBe("Sessions Worktrees Start | ● · ▲ · in dotfiles");
     // Then every name at once, and the prefix itself.
-    expect(line(52)).toBe("Se Wt St | ● · ▲ · in dotfiles");
-    expect(line(37)).toBe("Se Wt St | ● · ▲ · dotfiles");
+    expect(line(50)).toBe("Se Wt St | ● · ▲ · in dotfiles");
+    expect(line(34)).toBe("Se Wt St | ● · ▲ · dotfiles");
   });
 
   it("cuts the name only when nothing else is left to give", () => {
-    expect(line(34)).toBe("Se Wt St | ● · ▲ · dotfi…");
+    expect(line(31)).toBe("Se Wt St | ● · ▲ · dotfi…");
     // A one-column name would be a lone `…`: it goes, the glyphs stay.
     expect(line(0)).toBe("Se Wt St | ● · ▲");
   });
 
   it("keeps a healthy strip's counts while the name fits beside them", () => {
-    expect(line(70, {})).toBe(
+    // The right end costs only the space before it: no rule follows the
+    // name, so those columns go to the text.
+    expect(line(66, {})).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | scope: dotfiles",
     );
-    expect(line(66, {})).toBe(
+    expect(line(63, {})).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | in dotfiles",
     );
-    expect(line(62, {})).toBe("Sessions Worktrees Start | in dotfiles");
+    expect(line(58, {})).toBe("Sessions Worktrees Start | in dotfiles");
   });
 
   it("shrinks every tab together, whatever their counts", () => {
@@ -497,9 +500,9 @@ it("keeps connection and degraded, and the scope's name, on a narrow strip", asy
     invokeInFlight: 3,
     scope: "/code/some-repo",
   });
-  expect(line).toEndWith("● · ▲ · in some-repo ──");
+  expect(line).toEndWith("● · ▲ · in some-repo");
   expect(line).not.toContain("invoking");
-  expect(line.length).toBe(59);
+  expect(line.length).toBe(60);
 });
 
 /**
@@ -550,20 +553,22 @@ describe("the scope's name at 70 and 80 columns", () => {
           hideIdle: true,
           facts,
         });
-        expect(line).toMatch(new RegExp(` (scope: |in )?${name} ──$`));
+        expect(line).toMatch(new RegExp(` (scope: |in )?${name}$`));
+        // No rule after the name: it ends the line, in the last column.
+        expect(line).not.toMatch(/─\s*$/);
         expect(right(line)).not.toContain("…");
-        expect(line.length).toBe(width - 1);
+        expect(line.length).toBe(width);
       });
 
   it("gives way in order: the prefix, then every count, for a long name at 80 and 70", async () => {
     const scope = `/code/${LONG}`;
     const extra = { scope, sessions: 12, total: 16, facts };
     expect(await strip(80, extra)).toMatch(
-      new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
+      new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG}$`),
     );
     setup.renderer.destroy();
     expect(await strip(70, extra)).toMatch(
-      new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
+      new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG}$`),
     );
   });
 
@@ -573,7 +578,7 @@ describe("the scope's name at 70 and 80 columns", () => {
       lines.push(
         await strip(70, {
           view,
-          scope: "/code/dotfiles",
+          scope: "/code/api-server",
           sessions: 12,
           total: 16,
           facts,
@@ -582,11 +587,26 @@ describe("the scope's name at 70 and 80 columns", () => {
       setup.renderer.destroy();
     }
     expect(lines[0]).toMatch(
-      /^Sessions \(12\/16\) ── Worktrees \(2\/9\) ── Start \(8\/48\) ─+ in dotfiles ──$/,
+      /^Sessions \(12\/16\) ── Worktrees \(3\/9\) ── Start \(16\/48\) ─+ in api-server$/,
     );
     expect(lines[0]).not.toContain("scope:");
     expect(lines[1]).toBe(lines[0]);
     expect(lines[2]).toBe(lines[0]);
+  });
+
+  it("gives nothing up at 70 when the text fits once the trailing rule is gone", async () => {
+    // `scope: dotfiles` and every count fit in the columns a closing rule
+    // used to take.
+    expect(
+      await strip(70, {
+        scope: "/code/dotfiles",
+        sessions: 12,
+        total: 16,
+        facts,
+      }),
+    ).toMatch(
+      /^Sessions \(12\/16\) ── Worktrees \(2\/9\) ── Start \(8\/48\) ─+ scope: dotfiles$/,
+    );
   });
 
   // Switching views changes only color and weight: every label, count and
@@ -596,15 +616,16 @@ describe("the scope's name at 70 and 80 columns", () => {
   // the inactive names shortened.
   const LONGER = "acme-platform-infrastructure-cdk-ops";
   const longerFacts = factsFor("dotfiles", "api-server", LONGER);
-  // What each width gives way to, in order: nothing at 160, the prefix at
-  // 100 (the counts stay), and the counts and names too at 70.
+  // What each width gives way to: nothing at 160 or at 100 (the columns
+  // a trailing rule used to take let `scope:` and the counts stay), and the
+  // prefix, the counts and the names at 70. Every line ends on the name.
   const expected: Record<number, RegExp> = {
-    70: new RegExp(`^Se ── Wt ── St ─+ in ${LONGER} ──$`),
+    70: new RegExp(`^Se ── Wt ── St ─+ in ${LONGER}$`),
     100: new RegExp(
-      `^Sessions \\(12/16\\) ── Worktrees \\(4/9\\) ── Start \\(24/48\\) ─+ in ${LONGER} ──$`,
+      `^Sessions \\(12/16\\) ── Worktrees \\(4/9\\) ── Start \\(24/48\\) ─+ scope: ${LONGER}$`,
     ),
     160: new RegExp(
-      `^Sessions \\(12/16\\) ── Worktrees \\(4/9\\) ── Start \\(24/48\\) ─+ scope: ${LONGER} ──$`,
+      `^Sessions \\(12/16\\) ── Worktrees \\(4/9\\) ── Start \\(24/48\\) ─+ scope: ${LONGER}$`,
     ),
   };
   for (const width of [70, 100, 160])
@@ -630,8 +651,10 @@ describe("the scope's name at 70 and 80 columns", () => {
       expect(columns(lines[2]!)).toEqual(columns(lines[0]!));
       expect(lines[1]).toBe(lines[0]);
       expect(lines[2]).toBe(lines[0]);
-      // And the long scope is still whole.
+      // And the long scope is still whole, ending the line in its last
+      // column with no rule after it.
       expect(lines[0]).toMatch(expected[width]!);
+      expect(lines[0]!.length).toBe(width);
     });
 
   it("starts the first tab at column 0 in every view", async () => {
@@ -662,15 +685,15 @@ it("draws a signal that arrives after the first paint ahead of the scope", async
   );
   await setup.renderOnce();
   const line = () => setup.captureCharFrame().split("\n")[0]!.trimEnd();
-  expect(line()).toEndWith("─ scope: all repos ──");
+  expect(line()).toEndWith("─ scope: all repos");
   setDegraded(true);
   setInvoking(1);
   await setup.renderOnce();
-  expect(line()).toEndWith("─ ▲ degraded · 1 invoking · scope: all repos ──");
-  expect(line().length).toBe(95);
+  expect(line()).toEndWith("─ ▲ degraded · 1 invoking · scope: all repos");
+  expect(line().length).toBe(96);
   setDegraded(false);
   setInvoking(0);
   await setup.renderOnce();
-  expect(line()).toEndWith("─ scope: all repos ──");
-  expect(line().length).toBe(95);
+  expect(line()).toEndWith("─ scope: all repos");
+  expect(line().length).toBe(96);
 });
