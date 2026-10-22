@@ -15,6 +15,9 @@ export interface FooterHint {
   key: string;
   verb: string | Readonly<Record<View, string>>;
   rank: number;
+  /** A different rank in some views, where the key matters more (or less)
+   *  than its default says. */
+  rankIn?: Readonly<Partial<Record<View, number>>>;
   /** The view the key opens. Its hint is left off that view's own footer,
    *  where it would only point at the screen already showing. */
   opens?: View;
@@ -96,7 +99,10 @@ export const ACTIONS = [
     key: "n",
     desc: "New session here",
     section: "Actions",
-    hint: { key: "n", verb: "new", rank: 2 },
+    // In Worktrees `n` starts a session in the worktree under the cursor
+    // (cancelling returns to the row), the view's main way to put an agent
+    // in a checkout: it ranks with `r restart` there, above `N start`.
+    hint: { key: "n", verb: "new", rank: 2, rankIn: { worktrees: 4 } },
   },
   {
     id: "start",

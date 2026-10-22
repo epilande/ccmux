@@ -281,6 +281,28 @@ describe("footerHints", () => {
     ).not.toContain("d/D review");
   });
 
+  it("ranks n higher in Worktrees, where it starts a session in the row's worktree", () => {
+    const rankOf = (view: "sessions" | "worktrees" | "start") =>
+      footerHints(view).find((s) => s.text === "n new")?.rank;
+    expect(rankOf("worktrees")).toBe(4);
+    expect(rankOf("sessions")).toBe(2);
+    expect(rankOf("start")).toBe(2);
+    const worktrees = (width: number) =>
+      fitHints(footerHints("worktrees", { reviewable: true }), width - 2);
+    // 100 columns: `n new` stays, ahead of `N start`.
+    expect(worktrees(100)).toBe(
+      "j/k nav · h/l views · enter go · s scope · x remove · n new · r restart · ? help · q back",
+    );
+    // 70 columns: the existing rules drop it, the pinned four stay.
+    expect(worktrees(70)).toBe(
+      "j/k nav · h/l views · enter go · s scope · ? help · q back",
+    );
+    // The other views' lines are unchanged at 100.
+    expect(
+      fitHints(footerHints("start", { reviewable: true }), 98),
+    ).not.toContain("n new");
+  });
+
   it("leaves off the hint for the view it is on", () => {
     expect(texts("start")).not.toContain("N start");
     expect(texts("start")).toContain("W worktrees");

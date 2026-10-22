@@ -2,7 +2,7 @@ import type { Component, JSX } from "solid-js";
 import { Switch, Match, Show } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { DEFAULT_GROUP_BY, type GroupBy } from "../../lib/preferences";
-import { ACTIONS, PINNED, type View } from "../actions";
+import { ACTIONS, PINNED, type FooterHint, type View } from "../actions";
 import { displayWidth, truncateText } from "../utils/format";
 import { theme } from "../theme";
 import { Text } from "./Text";
@@ -101,11 +101,10 @@ export function footerHints(
     // The sidebar's session list neither cycles views nor previews.
     if (opts.sidebar && view === "sessions" && action.id === "views") continue;
     if (opts.sidebar && action.id === "preview") continue;
-    const { key, rank } = action.hint;
-    const verb =
-      typeof action.hint.verb === "string"
-        ? action.hint.verb
-        : action.hint.verb[view];
+    const hint: FooterHint = action.hint;
+    const { key } = hint;
+    const rank = hint.rankIn?.[view] ?? hint.rank;
+    const verb = typeof hint.verb === "string" ? hint.verb : hint.verb[view];
     const text =
       action.id === "group"
         ? `${key} ${verb}:${opts.groupBy ?? DEFAULT_GROUP_BY}`
