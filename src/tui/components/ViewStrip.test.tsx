@@ -277,7 +277,7 @@ it("sums the repos that answered and marks the total partial when one never did"
 // overflowing row onto the next line, which here is the head line).
 for (const [width, expected] of [
   [53, "Sessions (2) ── Worktrees ── Start ─ scope: scope ──"],
-  [52, "Sessions ── Worktrees ── Start ──── scope: scope ──"],
+  [52, "Sessions (2) ── Worktrees ── Start ──── in scope ──"],
   [48, "Sessions ── Worktrees ── Start ──── in scope ──"],
   [44, "Se ── Wt ── St ──────────────── in scope ──"],
 ] as const) {
@@ -435,7 +435,7 @@ describe("fitStrip priority", () => {
     return `${tabs} | ${right}`;
   };
 
-  it("gives up signal words, then counts, then the prefix, then names, before the scope's name", () => {
+  it("gives up signal words, then the prefix, then counts, then names, before the scope's name", () => {
     expect(line(200)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● reconnecting · ▲ degraded · 2 invoking · active · scope: dotfiles",
     );
@@ -452,10 +452,13 @@ describe("fitStrip priority", () => {
     expect(line(77)).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ · scope: dotfiles",
     );
+    // Then the shorter prefix, before any count.
+    expect(line(76)).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | ● · ▲ · in dotfiles",
+    );
     // Then every count at once: never one tab's alone.
-    expect(line(76)).toBe("Sessions Worktrees Start | ● · ▲ · scope: dotfiles");
-    // Then the shorter prefix, every name at once, and the prefix itself.
-    expect(line(58)).toBe("Sessions Worktrees Start | ● · ▲ · in dotfiles");
+    expect(line(72)).toBe("Sessions Worktrees Start | ● · ▲ · in dotfiles");
+    // Then every name at once, and the prefix itself.
     expect(line(52)).toBe("Se Wt St | ● · ▲ · in dotfiles");
     expect(line(37)).toBe("Se Wt St | ● · ▲ · dotfiles");
   });
@@ -470,7 +473,10 @@ describe("fitStrip priority", () => {
     expect(line(70, {})).toBe(
       "Sessions (12/16) Worktrees (9) Start (124) | scope: dotfiles",
     );
-    expect(line(66, {})).toBe("Sessions Worktrees Start | scope: dotfiles");
+    expect(line(66, {})).toBe(
+      "Sessions (12/16) Worktrees (9) Start (124) | in dotfiles",
+    );
+    expect(line(62, {})).toBe("Sessions Worktrees Start | in dotfiles");
   });
 
   it("shrinks every tab together, whatever their counts", () => {
@@ -549,16 +555,38 @@ describe("the scope's name at 70 and 80 columns", () => {
         expect(line.length).toBe(width - 1);
       });
 
-  it("gives way in order: every count at 80, the long prefix too at 70", async () => {
+  it("gives way in order: the prefix, then every count, for a long name at 80 and 70", async () => {
     const scope = `/code/${LONG}`;
     const extra = { scope, sessions: 12, total: 16, facts };
     expect(await strip(80, extra)).toMatch(
-      new RegExp(`^Sessions ── Worktrees ── Start ─+ scope: ${LONG} ──$`),
+      new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
     );
     setup.renderer.destroy();
     expect(await strip(70, extra)).toMatch(
       new RegExp(`^Sessions ── Worktrees ── Start ─+ in ${LONG} ──$`),
     );
+  });
+
+  it("keeps every count at 70 with a short scope, shortening only the prefix", async () => {
+    const lines: string[] = [];
+    for (const view of ["sessions", "worktrees", "start"] as const) {
+      lines.push(
+        await strip(70, {
+          view,
+          scope: "/code/dotfiles",
+          sessions: 12,
+          total: 16,
+          facts,
+        }),
+      );
+      setup.renderer.destroy();
+    }
+    expect(lines[0]).toMatch(
+      /^Sessions \(12\/16\) ── Worktrees \(2\/9\) ── Start \(8\/48\) ─+ in dotfiles ──$/,
+    );
+    expect(lines[0]).not.toContain("scope:");
+    expect(lines[1]).toBe(lines[0]);
+    expect(lines[2]).toBe(lines[0]);
   });
 
   // Switching views changes only color and weight: every label, count and
@@ -568,6 +596,17 @@ describe("the scope's name at 70 and 80 columns", () => {
   // the inactive names shortened.
   const LONGER = "acme-platform-infrastructure-cdk-ops";
   const longerFacts = factsFor("dotfiles", "api-server", LONGER);
+  // What each width gives way to, in order: nothing at 160, the prefix at
+  // 100 (the counts stay), and the counts and names too at 70.
+  const expected: Record<number, RegExp> = {
+    70: new RegExp(`^Se ── Wt ── St ─+ in ${LONGER} ──$`),
+    100: new RegExp(
+      `^Sessions \\(12/16\\) ── Worktrees \\(4/9\\) ── Start \\(24/48\\) ─+ in ${LONGER} ──$`,
+    ),
+    160: new RegExp(
+      `^Sessions \\(12/16\\) ── Worktrees \\(4/9\\) ── Start \\(24/48\\) ─+ scope: ${LONGER} ──$`,
+    ),
+  };
   for (const width of [70, 100, 160])
     it(`keeps every label on the same columns in all three views at ${width} columns`, async () => {
       const lines: string[] = [];
@@ -592,7 +631,7 @@ describe("the scope's name at 70 and 80 columns", () => {
       expect(lines[1]).toBe(lines[0]);
       expect(lines[2]).toBe(lines[0]);
       // And the long scope is still whole.
-      expect(lines[0]).toEndWith(`${LONGER} ──`);
+      expect(lines[0]).toMatch(expected[width]!);
     });
 
   it("starts the first tab at column 0 in every view", async () => {

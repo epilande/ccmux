@@ -94,8 +94,9 @@ export interface StripFit {
  * 1. `N invoking` drops, then `active`, then the connection and degraded
  *    words shrink to `●` and `▲`. The glyphs are never dropped: a broken
  *    connection or a degraded daemon outranks anything else here.
- * 2. Every tab drops its count.
- * 3. `scope: ` shortens to `in `.
+ * 2. `scope: ` shortens to `in `: a word is cheaper to lose than the
+ *    counts, which are data.
+ * 3. Every tab drops its count.
  * 4. Every tab shortens its name to two letters.
  * 5. The prefix drops.
  * 6. Only then, on a strip too narrow for the name even so, the name is
@@ -186,8 +187,8 @@ export function fitStrip(input: {
           () =>
             (level[i] = signals[i]!.forms.length - 1),
       ),
-    () => VIEWS.forEach((v) => (tabs[v].count = "")),
     () => (prefix = SCOPE_PREFIXES[1]),
+    () => VIEWS.forEach((v) => (tabs[v].count = "")),
     () => VIEWS.forEach((v) => (tabs[v].name = SHORT_VIEW_NAMES[v])),
     () => (prefix = SCOPE_PREFIXES[2]),
   ];
