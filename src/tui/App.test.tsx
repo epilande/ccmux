@@ -2,6 +2,7 @@ import {
   describe,
   it,
   expect,
+  afterAll,
   afterEach,
   mock,
   beforeEach,
@@ -32,6 +33,19 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SwitchToPaneResult } from "./utils/client-switch";
 import type { OpenAgentsResult } from "./utils/tmux";
+
+// Both the sidebar watcher and getUIState use this test-only state path.
+const appTestDir = mkdtempSync(join(tmpdir(), "ccmux-app-test-"));
+const originalConfig = { ...(await import("../lib/config")) };
+mock.module("../lib/config", () => ({
+  ...originalConfig,
+  STATE_FILE: join(appTestDir, "state.json"),
+}));
+
+afterAll(() => {
+  mock.module("../lib/config", () => originalConfig);
+  rmSync(appTestDir, { recursive: true, force: true });
+});
 
 // Capture SSE callbacks so tests can fire events
 let sseCallbacks: SSECallbacks | null = null;
@@ -168,11 +182,9 @@ mock.module("./utils/tmux-window-state", () => ({
   }),
 }));
 
-// App builds its own store, whose persistence writes the REAL state.json
-// under the developer's ~/.config/ccmux. Any test that changes a persisted
-// setting (a spawn's last-agent memory, `f`, `p`, `b`) would otherwise
-// rewrite their live UI state. `getUIState` stays real: the sidebar's
-// state-file watcher reads it, and reading is harmless.
+// App builds its own store. Capture its persistence writes for assertions
+// (a spawn's last-agent memory, `f`, `p`, `b`) without writing them to disk.
+// getUIState reads state.json from the temporary directory above.
 const realUiState = await import("../lib/state");
 
 /** Everything the TUI tried to persist, newest last. Also the ordering
