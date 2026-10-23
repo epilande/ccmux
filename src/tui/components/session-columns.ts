@@ -17,7 +17,7 @@ import {
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
-import type { ColumnHeaderMode, GroupBy } from "../../lib/preferences";
+import type { ColumnHeaderMode } from "../../lib/preferences";
 import { DEFAULT_COLUMN_HEADER } from "../../lib/preferences";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { stripTerminalNoise } from "../../lib/strip-ansi";
@@ -831,15 +831,17 @@ export interface ProjectCellInput {
 export interface ProjectCellDisplay {
   prefix: string;
   dirname: string;
-  /** ":"-prefixed branch (with the `~`/`+` conventions), or "" when no branch. */
+  /** ":"-prefixed branch (with the `…`/`+` conventions), or "" when no branch. */
   branchLabel: string;
 }
 
 /**
  * The `:branch` label with the existing conventions: capped at `maxBranchLen`
- * COLUMNS with a trailing `~`, worktree `+` appended. Every budget in this
+ * COLUMNS with a trailing `…`, worktree `+` appended. Every budget in this
  * pipeline is a column count, so a branch of wide glyphs is capped by what it
- * draws rather than by how many code units it happens to spend.
+ * draws rather than by how many code units it happens to spend. The mark is
+ * the ellipsis every other cut uses: `~` means "stale" on the PR badge and
+ * the strip's counts.
  */
 function branchLabelFor(
   branch: string,
@@ -848,13 +850,13 @@ function branchLabelFor(
 ): string {
   const shown =
     displayWidth(branch) > maxBranchLen
-      ? sliceToWidth(branch, maxBranchLen - 1) + "~"
+      ? sliceToWidth(branch, maxBranchLen - 1) + "…"
       : branch;
   return ":" + shown + (isWorktree ? "+" : "");
 }
 
 /** Narrowest budget that could still render a label: ":" + one column of
- *  branch + "~" + the worktree "+". Anything less and `shortenBranchLabel`
+ *  branch + "…" + the worktree "+". Anything less and `shortenBranchLabel`
  *  returns "" outright; at or above it the label still drops when the branch
  *  has no grapheme narrow enough to fill that one column. */
 function minBranchLabelWidth(isWorktree: boolean): number {
@@ -862,7 +864,7 @@ function minBranchLabelWidth(isWorktree: boolean): number {
 }
 
 /**
- * Shorten a branch label to `avail` columns using the `~` marker; "" if too
+ * Shorten a branch label to `avail` columns using the `…` marker; "" if too
  * tight. "Too tight" counts the worktree `+` as well as the ":" and one
  * usable column, because a label that keeps a one-column body plus both
  * markers would come back WIDER than the room it was given, and on a worktree
@@ -870,7 +872,7 @@ function minBranchLabelWidth(isWorktree: boolean): number {
  *
  * A body that comes back empty drops the whole label. The one usable column
  * can hold no part of a wide-glyph branch (a CJK or emoji grapheme needs two),
- * and `:~` names no branch while still charging two columns the row would
+ * and `:…` names no branch while still charging two columns the row would
  * rather spend on identity.
  */
 function shortenBranchLabel(
@@ -880,11 +882,11 @@ function shortenBranchLabel(
 ): string {
   const wt = isWorktree ? "+" : "";
   if (avail < minBranchLabelWidth(isWorktree)) return "";
-  const bodyWidth = Math.max(1, avail - 1 /* colon */ - 1 /* ~ */ - wt.length);
+  const bodyWidth = Math.max(1, avail - 1 /* colon */ - 1 /* … */ - wt.length);
   if (displayWidth(branch) <= bodyWidth) return ":" + branch + wt;
   const body = sliceToWidth(branch, bodyWidth);
   if (!body) return "";
-  return ":" + body + "~" + wt;
+  return ":" + body + "…" + wt;
 }
 
 /** Fit the prefix into `avail` columns; dropped entirely under 2 usable ones. */
@@ -914,10 +916,12 @@ function fitDirname(
 
 /**
  * Fit the project (path:branch) cell into `budget` COLUMNS, never silently
- * clipping: any shortening shows `…` (or the existing `~` for the branch).
- * Shrink order matches the design: prefix first (drop it under 2 usable
- * columns), then the dirname (kept to a small floor), then the branch as a
- * last resort.
+ * clipping: any shortening shows `…`, and a cell shows at most ONE. Shrink
+ * order matches the design: prefix first (drop it under 2 usable columns),
+ * then the dirname (kept to a small floor), then the branch as a last resort.
+ * When that order would cut the path AND the branch (`alpha/fi…:fix-a-r…`),
+ * the cell keeps its identity whole and cuts only the branch, or, with no
+ * room for both, drops the branch and fits the path alone.
  *
  * Every budget here is measured with `displayWidth`, not `.length`: the parts
  * are cut by `truncateText`/`sliceToWidth`, which are column-true, so counting
@@ -941,6 +945,15 @@ function fitDirname(
  * saying which tree it is.
  */
 export function fitProjectCell(
+  input: ProjectCellInput,
+  budget: number,
+  maxBranchLen: number,
+): ProjectCellDisplay {
+  return oneMark(input, budget, shrinkProjectCell(input, budget, maxBranchLen));
+}
+
+/** The shrink cascade `fitProjectCell` describes, before `oneMark`. */
+function shrinkProjectCell(
   input: ProjectCellInput,
   budget: number,
   maxBranchLen: number,
@@ -1009,13 +1022,42 @@ export function fitProjectCell(
     return { prefix: outPrefix, dirname: outDirname, branchLabel };
   }
 
-  // 3. Last resort: shorten the branch further with the `~` marker.
+  // 3. Last resort: shorten the branch further.
   if (branch) {
     const availForBranch =
       budget - displayWidth(outPrefix) - displayWidth(outDirname);
     branchLabel = shortenBranchLabel(branch, isWorktree, availForBranch);
   }
   return { prefix: outPrefix, dirname: outDirname, branchLabel };
+}
+
+/**
+ * Hold a fitted project cell to one truncation mark. The path parts carry at
+ * most one between them (a plain prefix is cut only while the dirname stays
+ * whole, and a repo prefix is never cut), so the only way to two is a cut
+ * path beside a cut branch. Then the branch alone takes the cut beside a
+ * whole identity: the repo and worktree name when they leave room for its
+ * narrowest label, else the name alone (the repo goes before the branch
+ * does, so a widening terminal never trades the branch for the repo). With
+ * no room even for that, the name takes the whole cell.
+ */
+function oneMark(
+  input: ProjectCellInput,
+  budget: number,
+  fitted: ProjectCellDisplay,
+): ProjectCellDisplay {
+  const { prefix, dirname, branch, isWorktree, repoPrefix } = input;
+  const pathCut =
+    (fitted.prefix !== prefix && fitted.prefix !== "") ||
+    fitted.dirname !== dirname;
+  const branchCut = fitted.branchLabel.includes("…");
+  if (!branch || !pathCut || !branchCut) return fitted;
+  for (const keep of repoPrefix ? [prefix, ""] : [""]) {
+    const rest = budget - displayWidth(keep) - displayWidth(dirname);
+    const branchLabel = shortenBranchLabel(branch, isWorktree, rest);
+    if (branchLabel) return { prefix: keep, dirname, branchLabel };
+  }
+  return { prefix: "", dirname: fitDirname(dirname, budget), branchLabel: "" };
 }
 
 /** Width allocated to a resolved entry on a "right side" (right-aligned column). */
@@ -1068,6 +1110,13 @@ export interface HeaderCell {
   text: string;
   /** Fixed column width, or 0 for the one flexible cell. */
   width: number;
+  /**
+   * The label box's width on the header line, where it differs from the
+   * column's: a right-side label too wide for its cell borrows the next
+   * cell's unused columns (see {@link columnHeaderCells}), and that cell's
+   * box gives the same columns up.
+   */
+  span?: number;
 }
 
 export interface HeaderCells {
@@ -1078,8 +1127,34 @@ export interface HeaderCells {
 function labelFor(entry: ResolvedEntry, width: number): string {
   const label = COLUMN_LABELS[entry.field];
   // A cut label ("ag", "vers") explains nothing; a blank at least does not
-  // mislead, and the cell below still holds the data.
+  // mislead, and the cell below still holds the data. A right-side label
+  // gets a second chance by borrowing room (`lendRight`).
   return displayWidth(label) <= width ? label : "";
+}
+
+/**
+ * Give a right-side label that does not fit its cell the columns it is
+ * short, from the next cell's unused width. Right-side labels are
+ * right-aligned, so a cell wider than its label is blank at its START, which
+ * sits just past the borrower's column: the borrower's box grows, the
+ * lender's shrinks by the same amount, and the line's total (so every other
+ * label's position) is unchanged. The borrowed label starts on its own
+ * column, which is what the 2-column short `agent` code needs. A cell with
+ * no neighbor that can lend stays blank.
+ */
+function lendRight(cells: HeaderCell[]): HeaderCell[] {
+  const out = cells.map((cell) => ({ ...cell }));
+  for (let i = 0; i < out.length - 1; i++) {
+    const cell = out[i]!;
+    const lender = out[i + 1]!;
+    const label = COLUMN_LABELS[cell.field];
+    if (cell.text || !label || lender.span !== undefined) continue;
+    const short = displayWidth(label) - cell.width;
+    if (lender.width - short < displayWidth(lender.text)) continue;
+    out[i] = { ...cell, text: label, span: cell.width + short };
+    out[i + 1] = { ...lender, span: lender.width - short };
+  }
+  return out;
 }
 
 /**
@@ -1116,7 +1191,7 @@ export function columnHeaderCells(row1: ResolvedRow): HeaderCells {
     if (width === 0) break;
     right.unshift({ field: entry.field, text: labelFor(entry, width), width });
   }
-  return { left, right };
+  return { left, right: lendRight(right) };
 }
 
 /** Whether a header line would carry any label at all at this layout. */
@@ -1125,26 +1200,37 @@ export function hasHeaderLabels(cells: HeaderCells): boolean {
 }
 
 /**
- * Whether the picker draws the column-header line under this grouping.
- * `auto` follows the grouping: the flat list is a table and gets one; a
- * grouped list has a group line between the header and its rows and does
- * not. A flat list showing the `needs attention` band has group lines too,
- * so `auto` yields while the band is up. The width gate is the caller's
- * (the list knows its own width).
+ * Whether the picker draws the column-header line. `auto` draws it in every
+ * grouping: a group line between the header and a group's rows does not
+ * stop the labels from naming the columns those rows share, and a rule that
+ * only some groupings get was one nobody saw on the defaults. `auto` and
+ * `always` therefore agree today; `always` stays as the explicit opt-in a
+ * future `auto` rule cannot take back. The width gate is the caller's.
  */
-export function showColumnHeader(
-  mode: ColumnHeaderMode | undefined,
-  groupBy: GroupBy,
-  hasGroupHeaders = false,
+export function showColumnHeader(mode: ColumnHeaderMode | undefined): boolean {
+  return (mode ?? DEFAULT_COLUMN_HEADER) !== "never";
+}
+
+/** The header's label over the trailing tool/attention cell. */
+export const TOOL_LABEL = "tool";
+
+/**
+ * Whether the header labels the trailing tool cell (a pending tool, `Plan`,
+ * `N Agent`, the handoff badge). That cell is sized per row, so only its END
+ * is anchored, at the first right-side cell, and only when every right-side
+ * cell is fixed-width (`cells.right` labels them all). A label over a column
+ * no visible row draws would point at the prompt, so it also needs a row
+ * that has one.
+ */
+export function labelsToolCell(
+  row1: ResolvedRow,
+  cells: HeaderCells,
+  sessions: EnrichedSession[],
 ): boolean {
-  switch (mode ?? DEFAULT_COLUMN_HEADER) {
-    case "always":
-      return true;
-    case "never":
-      return false;
-    default:
-      return groupBy === "none" && !hasGroupHeaders;
-  }
+  return (
+    cells.right.length === row1.right.length &&
+    sessions.some((session) => trailingLabelsWidth(session, false) > 0)
+  );
 }
 
 /** Repository facts belong to project headers, never to cwd or tmux groups. */

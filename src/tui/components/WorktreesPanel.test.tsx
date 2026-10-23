@@ -30,6 +30,7 @@ import {
   resetScanCache,
   pruneFullySucceeded,
   cachedScanFor,
+  describeSessions,
 } from "./WorktreesPanel";
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -478,7 +479,7 @@ describe("Worktrees view", () => {
           finish = done;
         }),
     });
-    expect(await h.frame()).toContain("alpha +");
+    expect(await h.frame()).toContain("alpha+");
     expect(await h.frame()).toContain("scanning");
     finish({ candidates: [candidate()], skipped: [] });
     await h.frame();
@@ -489,14 +490,14 @@ describe("Worktrees view", () => {
   it("uses one line, the shared prefix, and no removable divider or PR tab", async () => {
     const h = await mount({ cursor: row().path });
     const frame = await h.frame();
-    expect(frame).toContain(" 2   alpha +");
+    expect(frame).toContain(" 2   alpha+");
     expect(frame).toContain("⌂ main checkout");
     expect(frame).not.toContain("Pull Requests");
     expect(frame).not.toContain("removable ·");
     expect(
       frame
         .split("\n")
-        .filter((l) => l.includes("alpha +") || l.includes("PR #68 merged")),
+        .filter((l) => l.includes("alpha+") || l.includes("PR #68 merged")),
     ).toHaveLength(1);
   });
   it("uses the index column for marks and A clears them", async () => {
@@ -513,9 +514,9 @@ describe("Worktrees view", () => {
     await h.keys.pressKey(" ");
     expect((await h.frame()).match(/✓/g)).toHaveLength(2);
     await h.keys.pressEnter();
-    expect(await h.frame()).not.toContain("alpha +");
+    expect(await h.frame()).not.toContain("alpha+");
     await h.keys.pressEnter();
-    expect(await h.frame()).toContain("alpha +");
+    expect(await h.frame()).toContain("alpha+");
   });
   it("reviews working tree with d and branch with D; neither opts into deletion", async () => {
     const h = await mount({ cursor: row().path });
@@ -674,7 +675,7 @@ it("keeps tracking, locks, dirty counts and all attached agents on one row", asy
     scan: async () => ({ candidates: [], skipped: [] }),
   });
   const frame = await h.frame();
-  const line = frame.split("\n").find((l) => l.includes("alpha +")) ?? "";
+  const line = frame.split("\n").find((l) => l.includes("alpha+")) ?? "";
   for (const field of [
     "locked",
     "2 modified",
@@ -695,7 +696,7 @@ it("preserves dirty and session facts from classification while the local snapsh
     }),
   });
   const line =
-    (await h.frame()).split("\n").find((l) => l.includes("alpha +")) ?? "";
+    (await h.frame()).split("\n").find((l) => l.includes("alpha+")) ?? "";
   expect(line).toContain("uncommitted work");
   expect(line).toContain("Claude");
   expect(line).not.toContain("ends it");
@@ -762,11 +763,11 @@ describe("Worktrees read and effect regressions", () => {
         list: async () =>
           fail ? new Response("", { status }) : listResponse([row()]),
       });
-      expect(await h.frame()).not.toContain("alpha +");
+      expect(await h.frame()).not.toContain("alpha+");
       expect(await h.frame()).toContain(status === 404 ? "daemon" : "500");
       fail = false;
       await h.keys.pressKey("R");
-      expect(await h.frame()).toContain("alpha +");
+      expect(await h.frame()).toContain("alpha+");
       expect(h.scanCalls()).toBe(2);
     });
   }
@@ -798,12 +799,12 @@ describe("Worktrees read and effect regressions", () => {
       });
       if (change === "refresh") await h.keys.pressKey("R");
       else h.setScope("/other");
-      expect(await h.frame()).toContain("fresh +");
+      expect(await h.frame()).toContain("fresh+");
       oldList(listResponse([row()]));
       oldScan({ candidates: [candidate()], skipped: [] });
       const frame = await h.frame();
-      expect(frame).toContain("fresh +");
-      expect(frame).not.toContain("alpha +");
+      expect(frame).toContain("fresh+");
+      expect(frame).not.toContain("alpha+");
       expect(frame).not.toContain("merged");
       if (change === "scope")
         expect(
@@ -984,7 +985,7 @@ describe("Worktrees removal outcomes and cache", () => {
     await h.keys.pressKey("y");
     const frame = await h.frame();
     expect(frame).toContain("removed 1 worktree");
-    expect(frame).not.toContain("alpha +");
+    expect(frame).not.toContain("alpha+");
     expect(h.refreshes()).toBe(1);
     destroyPanel();
     const returned = await mount({
@@ -1035,7 +1036,7 @@ describe("Worktrees removal outcomes and cache", () => {
     expect(await h.frame()).toContain("recheck refused");
     expect(h.refreshes()).toBe(0);
     await h.keys.pressKey("R");
-    expect(await h.frame()).toContain("alpha +");
+    expect(await h.frame()).toContain("alpha+");
   });
   it("sends exact scoped paths, caller context and empty consent for an agent-free clean row", async () => {
     const previous = process.env.TMUX_PANE;
@@ -1123,9 +1124,10 @@ describe("Worktrees scrollbar thumb", () => {
       height: 40,
       embedded: true,
     });
-    // 62 lines (header + 61 rows) in a 38-line viewport: 76 * 38 / 62 = 46.
-    // The pinned slider drew 3; OpenTUI's clamp alone draws 38 (half).
-    expect(thumb(await h.frame())).toBe(46);
+    // 62 lines (header + 61 rows) in a 37-line viewport (the footer bar
+    // takes two): 74 * 37 / 62 = 44. The pinned slider drew 3; OpenTUI's
+    // clamp alone draws 37 (half).
+    expect(thumb(await h.frame())).toBe(44);
   });
   it("resizes when the list grows from fitting and when it shrinks", async () => {
     let rows = many(10);
@@ -1135,16 +1137,110 @@ describe("Worktrees scrollbar thumb", () => {
       embedded: true,
       list: async () => listResponse(rows),
     });
-    expect(await h.frame()).toContain("r8 +");
+    expect(await h.frame()).toContain("r8+");
     expect(thumb(await h.frame())).toBe(0);
     rows = many(61);
     await h.keys.pressKey("R");
     await h.frame();
-    expect(thumb(await h.frame())).toBe(46);
+    expect(thumb(await h.frame())).toBe(44);
     rows = many(45);
     await h.keys.pressKey("R");
     await h.frame();
-    // 76 * 38 / 46 = 62, where the clamp would again draw 38.
-    expect(thumb(await h.frame())).toBe(62);
+    // 74 * 37 / 46 = 59.5, floored to 59, where the clamp would again draw 37.
+    expect(thumb(await h.frame())).toBe(59);
+  });
+});
+
+describe("status glyphs", () => {
+  it("draws a waiting worktree with the session list's icon, not the background diamond", async () => {
+    const h = await mount({
+      width: 120,
+      rows: [
+        mainRow(),
+        row({ sessions: [session({ id: "s2", status: "waiting" })] }),
+      ],
+      scan: async () => ({ candidates: [], skipped: [] }),
+    });
+    const line =
+      (await h.frame()).split("\n").find((l) => l.includes("alpha")) ?? "";
+    expect(line).toContain("■");
+    expect(line).not.toContain("◆");
+  });
+
+  it("uses the same glyphs in the compact agent count", () => {
+    const waiting = [
+      session({ status: "waiting" }),
+      session({ id: "s2", status: "idle" }),
+    ];
+    expect(describeSessions(waiting, true)).toBe("2 (1■)");
+    expect(
+      describeSessions(
+        [session({ status: "working" }), session({ id: "s2" })],
+        true,
+      ),
+    ).toBe("2 (1◐)");
+  });
+});
+
+describe("table layout", () => {
+  it("lines names, branches and agent counts up down the list", async () => {
+    const h = await mount({
+      width: 120,
+      rows: [
+        mainRow(),
+        row({
+          path: "/repo/wt/a",
+          name: "a",
+          branch: "feat/short",
+          sessions: [session()],
+        }),
+        row({
+          path: "/repo/wt/longer-name",
+          name: "longer-name",
+          branch: "feat/a-longer-branch",
+          sessions: [session(), session({ id: "s2", status: "waiting" })],
+        }),
+      ],
+      scan: async () => ({ candidates: [], skipped: [] }),
+    });
+    const lines = (await h.frame()).split("\n");
+    const short = lines.find((l) => l.includes(" a+"))!;
+    const long = lines.find((l) => l.includes("longer-name+"))!;
+    // The branch column starts on the same column on both rows.
+    expect(short.indexOf("feat/short")).toBe(long.indexOf("feat/a-longer"));
+    // The agents column is right-aligned to one edge.
+    const end = (line: string, text: string) =>
+      line.indexOf(text) + text.length;
+    expect(end(short, "Claude")).toBe(end(long, "1 waiting"));
+  });
+
+  it("leaves the main + N worktrees facts off the group header", async () => {
+    const h = await mount({
+      width: 120,
+      rows: [mainRow(), row()],
+      facts: {
+        headerPR: true,
+        repos: [
+          {
+            repoRoot: "/repo",
+            repoName: "repo",
+            worktrees: {
+              updatedAt: 1,
+              stale: false,
+              value: {
+                repoRoot: "/repo",
+                repoName: "repo",
+                worktrees: [
+                  { path: "/repo", branch: "main", isMain: true },
+                  { path: "/repo/wt/alpha", branch: "alpha", isMain: false },
+                ],
+              },
+            },
+          },
+        ],
+      },
+      scan: async () => ({ candidates: [], skipped: [] }),
+    });
+    expect(await h.frame()).not.toContain("main + 1 worktree");
   });
 });

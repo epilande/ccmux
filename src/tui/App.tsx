@@ -731,7 +731,6 @@ export function App(props: AppProps) {
      */
     cursor?: string;
   }) {
-    store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
     if (worktree) {
       const live = store.state.sessions.find((session) =>
@@ -742,10 +741,13 @@ export function App(props: AppProps) {
         ),
       );
       if (live) {
+        store.actions.hideWorktrees();
         activateSession(live);
         return;
       }
     }
+    // The panel stays up behind the dialog, dimmed: it is still the view the
+    // user is in until a session actually starts.
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
@@ -784,7 +786,7 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn(target);
-    store.actions.hideSourcePicker();
+    // Start stays up behind the dialog, dimmed, until a session starts.
     openNewSession({
       cwd: target.repoRoot,
       pr: {
@@ -814,7 +816,7 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn(target);
-    store.actions.hideSourcePicker();
+    // Start stays up behind the dialog, dimmed, until a session starts.
     openNewSession({
       cwd: target.repoRoot,
       issue: {
@@ -841,7 +843,6 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn({ repoRoot: target.path, ...target });
-    store.actions.hideSourcePicker();
     const live = store.state.sessions.find((session) =>
       worktreeHoldsPath(
         target.path,
@@ -850,6 +851,7 @@ export function App(props: AppProps) {
       ),
     );
     if (live) {
+      store.actions.hideSourcePicker();
       activateSession(live);
       return;
     }
@@ -968,6 +970,9 @@ export function App(props: AppProps) {
    * connection and never answers latches `forkInFlight` for the rest of the
    * picker's life, and `F` silently stops working. */
   const FORK_TIMEOUT_MS = 15_000;
+
+  /** How long a landed spawn waits for its session row to take the cursor. */
+  const SPAWN_SELECT_MS = 15_000;
 
   /**
    * Open the new-session dialog in fork mode over `session`: continue this
@@ -2523,6 +2528,11 @@ export function App(props: AppProps) {
     const sources = store.state.newSession?.returnToSources ?? null;
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
+    // The view that opened the dialog stayed up behind it, so its row, scope
+    // and filter are all still there: closing the dialog IS the return. The
+    // markers below are the fallback for an origin that is no longer open.
+    if (sources && store.state.sourcePicker) return;
+    if (marker && store.state.worktrees) return;
     if (sources) {
       store.actions.showSourcePicker(
         sources.repo,
@@ -2813,6 +2823,49 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * A spawn's pane, until its session row arrives over SSE and takes the
+   * cursor. The row comes from the daemon's next scan, not the spawn reply,
+   * so the selection waits for it, but not forever (`SPAWN_SELECT_MS`), and
+   * never over the user: a cursor moved in the meantime wins.
+   */
+  const [pendingSpawn, setPendingSpawn] = createSignal<{
+    paneId: string;
+    sessionId: string | null;
+    headerKey: string | null;
+  } | null>(null);
+  function selectWhenArrives(paneId: string) {
+    const pending = {
+      paneId,
+      sessionId: store.state.selectedSessionId,
+      headerKey: store.selectedHeaderKey(),
+    };
+    setPendingSpawn(pending);
+    setTimeout(
+      () => setPendingSpawn((p) => (p === pending ? null : p)),
+      SPAWN_SELECT_MS,
+    );
+  }
+  createEffect(() => {
+    const pending = pendingSpawn();
+    if (!pending) return;
+    if (
+      store.state.selectedSessionId !== pending.sessionId ||
+      store.selectedHeaderKey() !== pending.headerKey
+    ) {
+      setPendingSpawn(null);
+      return;
+    }
+    const session = store.state.sessions.find(
+      (s) => s.tmuxPane === pending.paneId,
+    );
+    if (!session) return;
+    setPendingSpawn(null);
+    // Only onto a row the list shows (expanding its group if collapsed); a
+    // session the scope, `f` or a search hides leaves the selection alone.
+    store.actions.revealSession(session.id);
+  });
+
   async function submitNewSession(): Promise<void> {
     const draft = store.state.newSession;
     if (!draft) return;
@@ -2886,6 +2939,13 @@ export function App(props: AppProps) {
     // The sidebar spawns without stealing focus; the picker's whole purpose
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
+    // A slow spawn can outlive its dialog: Esc, or a replacement draft, means
+    // the user has moved on, and the completion must not close, switch or
+    // select over what they are doing now. Same rule as `submitFork`.
+    const dialogSequence = newSessionDialogSequence;
+    const ownsDialog = () =>
+      newSessionDialogSequence === dialogSequence &&
+      store.state.newSession !== null;
     spawnInFlight = true;
     let spawned: SpawnBody | null = null;
     try {
@@ -2969,18 +3029,22 @@ export function App(props: AppProps) {
         // never arrived.
         const error = body?.error ?? response.statusText;
         const what = draft.moveChanges ? "Move failed" : "Spawn failed";
+        // A notice that says where the user's work went is the one thing a
+        // stale completion still shows: it is about their files, not the
+        // view, and nothing else would tell them.
         if (body && failureNeedsAcknowledgement(body)) {
           store.actions.showNotice(what, [
             error,
             ...stashRecoveryLines(body),
             ...(body.move ? moveReportLines(body.move, draft.cwd) : []),
           ]);
-        } else {
+        } else if (ownsDialog()) {
           store.actions.showToast(`${what}: ${error}`, 4000);
         }
       }
     } catch (err: unknown) {
-      store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
+      if (ownsDialog())
+        store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
     } finally {
       // Released only on the paths that leave the dialog open. A landed spawn
       // holds the guard until the draft is gone: the state write below is a
@@ -2997,12 +3061,30 @@ export function App(props: AppProps) {
     // failure. Remembering the agent is best-effort for exactly that reason:
     // an unwritable ~/.config would otherwise surface as "Spawn failed", and
     // the user — reasonably — would press Enter again and get a second pane.
+    // Decided once the agent is remembered, the last await before acting:
+    // an Esc during that write counts as moving on too.
+    let owns = false;
     try {
       await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
     } finally {
-      store.actions.closeNewSessionDialog();
+      owns = ownsDialog();
+      if (owns) store.actions.closeNewSessionDialog();
       spawnInFlight = false;
     }
+    if (!owns) {
+      // Moved on: nothing visible, bar the one notice about the user's own
+      // files (a move that left a stash or a split to rebuild).
+      const notice = landedMoveNotice(draft, landed);
+      if (notice) store.actions.showNotice(notice.title, notice.lines);
+      return;
+    }
+
+    // A session started: the board is the session list now (ending any
+    // Worktrees/Start view the dialog was opened over, and with it any jump
+    // scope), with the cursor going to the new row as soon as it arrives.
+    store.actions.hideWorktrees();
+    store.actions.hideSourcePicker();
+    if (landed.paneId) selectWhenArrives(landed.paneId);
 
     /** Hand the board over to the new pane, which is what the picker is for. */
     const enterPane = () => {
@@ -4198,11 +4280,7 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             ageFadeAfter={store.state.ageFadeAfter}
-            columnHeader={showColumnHeader(
-              store.state.columnHeader,
-              store.state.groupBy,
-              store.flatItems().some((item) => item.type === "header"),
-            )}
+            columnHeader={showColumnHeader(store.state.columnHeader)}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry
@@ -4254,7 +4332,6 @@ export function App(props: AppProps) {
             confirmMode={store.state.confirmMode}
             helpMode={store.state.showHelp}
             previewFocused={store.state.previewFocused}
-            persistent={props.persistent}
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
@@ -4291,7 +4368,7 @@ export function App(props: AppProps) {
               onRefresh={refreshAll}
               onNew={(cwd) => {
                 const scope = store.state.scope;
-                store.actions.hideWorktrees();
+                // The panel stays up behind the dialog, dimmed.
                 openNewSession({
                   cwd,
                   returnToWorktrees: {
@@ -4324,6 +4401,8 @@ export function App(props: AppProps) {
               // the sidebar has neither the room nor the focus for — the same
               // reason its `d` key is inert on a session row.
               onReview={props.sidebar ? undefined : reviewWorktree}
+              reviewable={reviewEnabled && !props.sidebar}
+              dimmed={store.state.newSession !== null}
             />
           )}
         </Show>
@@ -4358,7 +4437,7 @@ export function App(props: AppProps) {
                   cursor: sourceMemory?.cursor ?? "",
                   filter: sourceMemory?.filter ?? "",
                 });
-                store.actions.hideSourcePicker();
+                // Start stays up behind the dialog, dimmed.
                 openNewSession({ cwd, returnToSources: marker });
               }}
               onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
@@ -4384,6 +4463,8 @@ export function App(props: AppProps) {
                         }),
                       })
               }
+              reviewable={reviewEnabled && !props.sidebar}
+              dimmed={store.state.newSession !== null}
               repo={picker().repo}
               cwd={pickerCwd()}
               compact={props.sidebar}

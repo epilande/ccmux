@@ -311,3 +311,26 @@ describe("GroupPreview scrollbar thumb", () => {
     expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
   });
 });
+
+describe("GroupPreview long paths", () => {
+  it("cuts a long path with an ellipsis instead of clipping it", async () => {
+    // 40% of 100 columns: the detail line has about 32 to draw in.
+    const frame = await renderGroupPreview(
+      {
+        label: "repo",
+        count: 1,
+        statusSummary: { ...emptySummary(), idle: 1 },
+      },
+      [
+        mockEnrichedSession({
+          id: "s1",
+          cwd: "/very/long/path/to/a/project/that/does/not/fit/the/preview",
+          gitBranch: "feature/branch",
+        }),
+      ],
+    );
+    const line = frame.split("\n").find((l) => l.includes("/very/long"))!;
+    expect(line).toContain("…");
+    expect(line).not.toContain("feature/branch");
+  });
+});

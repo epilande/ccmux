@@ -1,11 +1,6 @@
 import { wrapText } from "../utils/format";
 import { GroupHeader } from "./GroupHeader";
-import {
-  factsText,
-  badgeText,
-  branchPRs,
-  badgeColor,
-} from "../utils/repo-facts";
+import { badgeText, branchPRs, badgeColor } from "../utils/repo-facts";
 import { getAgentDisplayName } from "../../lib/agents";
 import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
@@ -55,7 +50,7 @@ import type {
 
 import type { SessionStatus } from "../../types/session";
 
-import { displayWidth, truncateText } from "../utils/format";
+import { displayWidth, padStartWidth, truncateText } from "../utils/format";
 
 import {
   fitSegments,
@@ -65,7 +60,8 @@ import {
   type VisualLayout,
 } from "./row-segments";
 
-import { fitHints } from "./Footer";
+import { CONFIRM_HINTS, FOOTER_BAR_ROWS, FooterBar, HintLine } from "./Footer";
+import { DIMMED_OPACITY } from "../theme";
 
 import { useStatusIcon } from "../utils/useStatusIcon";
 
@@ -73,7 +69,12 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 
-import type { IconStyle } from "../../lib/icons";
+import {
+  DOT_SPINNER_FRAMES,
+  getStatusIcon,
+  type IconStyle,
+} from "../../lib/icons";
+import { getStatusColor } from "./StatusBadge";
 
 import { theme } from "../theme";
 import { Text } from "./Text";
@@ -149,6 +150,11 @@ interface WorktreesPanelProps {
   }) => void;
   /** Explicit so tests cannot launch a browser or write the real clipboard. */
   effects: PanelEffects;
+  /** Whether `d`/`D` review is installed, for the footer's hint. */
+  reviewable?: boolean;
+  /** A dialog opened from this view sits over it: the view stays, dimmed,
+   *  so it is still the view the user is in. */
+  dimmed?: boolean;
 }
 
 export function partitionSelection(
@@ -192,17 +198,6 @@ export function worktreeHoldsPath(
   return deepest === root;
 }
 
-function statusColor(status: SessionStatus): string {
-  switch (status) {
-    case "working":
-      return theme.peach;
-    case "waiting":
-      return theme.red;
-    case "idle":
-      return theme.overlay;
-  }
-}
-
 function prColor(pr: PRState): string {
   switch (pr.state) {
     case "OPEN":
@@ -242,7 +237,9 @@ export function describeSessions(
   const status = leadStatus(sessions);
   const count = sessions.filter((session) => session.status === status).length;
   if (compact)
-    return `${sessions.length} (${count}${status === "waiting" ? "◆" : status === "working" ? "◐" : "●"})`;
+    // The session list's own glyphs: `◆` is the background-agent row's.
+    // Working is the spinner's first frame, its static form.
+    return `${sessions.length} (${count}${status === "working" ? DOT_SPINNER_FRAMES[0] : getStatusIcon(status, null)})`;
   return count === sessions.length
     ? `${count} agents ${status}`
     : `${sessions.length} agents, ${count} ${status}`;
@@ -314,6 +311,29 @@ export function rowBranch(entry: PanelRow): string {
     return "";
   }
   return row.branch;
+}
+
+/** Columns a row spends before its name: active bar, index, glyph, and a
+ *  margin. */
+const ROW_PREFIX = 6;
+/** Widest the name and branch columns grow; longer cells truncate. */
+const NAME_COLUMN_MAX = 28;
+const BRANCH_COLUMN_MAX = 32;
+
+/** A row's name cell, worktree marker included: `name+`, attached the way
+ *  the session list attaches it to a worktree's branch. */
+export function nameText(entry: WorktreePanelRow): string {
+  return entry.row.isMain ? "⌂ main checkout" : `${entry.row.name}+`;
+}
+
+/** The name cell fitted to `width`, truncating the name and never the
+ *  worktree marker after it. */
+function fitName(entry: WorktreePanelRow, width: number): string {
+  if (entry.row.isMain) return truncateText(nameText(entry), width);
+  const marker = "+";
+  return (
+    truncateText(entry.row.name, Math.max(1, width - marker.length)) + marker
+  );
 }
 
 export function plural(count: number, one: string, many: string): string {
@@ -1082,8 +1102,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         }
     }
   });
-  const facts = (root: string) =>
-    props.facts?.repos.find((r) => r.repoRoot === root);
   const cachedPRs = (entry: WorktreePanelRow) =>
     branchPRs(
       {
@@ -1117,42 +1135,63 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const header = `▾ ${group.repoName} (${rows.length})   ${branch}${badge ? `   ${badge}` : ""}`;
     return displayWidth(header) <= width() - 2 ? branch : undefined;
   };
+  /** Embedded and not the key owner: App's footer shows through instead. */
+  const footerYielded = () => !!props.embedded && props.enabled === false;
+  const footerNote = () =>
+    note() || scanError() || (!scan() ? "scanning…" : undefined);
+  /** The agents cell's text for a row, at this width. */
+  const agentsText = (entry: WorktreePanelRow) =>
+    describeSessions(rowSessions(entry), width() < 100);
+  /** The branch cell's text for a row: empty where the group header
+   *  already carries the shared branch. */
+  const branchText = (entry: WorktreePanelRow) =>
+    groupBranch(entry.row.repoRoot) ? "" : rowBranch(entry);
+  /**
+   * Column widths, sized once for the visible rows the way the session
+   * list's are, so names, branches and agent counts line up down the list.
+   * The name and branch columns take the widest row up to a cap and a share
+   * of the row; the agents column is right-aligned at the right edge; the
+   * per-row facts (PR, dirty, lock, tracking) flex in between.
+   */
+  const columns = createMemo(() => {
+    const visible = rows();
+    const widest = (texts: string[], cap: number) =>
+      Math.min(
+        cap,
+        texts.reduce((n, t) => Math.max(n, displayWidth(t)), 0),
+      );
+    const agents = widest(visible.map(agentsText), Math.floor(width() / 3));
+    const room = Math.max(0, width() - ROW_PREFIX - (agents ? agents + 1 : 0));
+    const name = widest(
+      visible.map(nameText),
+      Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
+    );
+    const branch = widest(
+      visible.map(branchText),
+      Math.min(BRANCH_COLUMN_MAX, Math.floor(room * 0.3)),
+    );
+    return { name, branch, agents, room };
+  });
   const renderRow = (entry: WorktreePanelRow) => {
     const status = () => leadStatus(rowSessions(entry));
-    const spinner = useStatusIcon(
+    // The session list's icon for the same status, in the user's style.
+    const icon = useStatusIcon(
       () => status(),
       () => null,
-      () => "dot",
+      () => props.iconStyle,
     );
-    const glyph = () =>
-      !rowSessions(entry).length
-        ? " "
-        : status() === "waiting"
-          ? "◆"
-          : status() === "working"
-            ? spinner()
-            : "●";
+    const glyph = () => (rowSessions(entry).length ? icon() || " " : " ");
     const index = () => rows().findIndex((r) => r.key === entry.key) + 1;
-    const right = () =>
-      truncateText(
-        describeSessions(rowSessions(entry), width() < 100),
-        Math.floor(width() / 3),
-      );
-    const segments = () => {
+    const facts = () => {
       const dirty = dirtyPhrases(entry.row);
       const skip = entry.skip?.reason;
-      const metadata = [
+      const phrases = [
         ...(entry.candidate
-          ? [{ text: `  ${describeReason(entry.candidate)}`, fg: theme.yellow }]
+          ? [{ text: describeReason(entry.candidate), fg: theme.yellow }]
           : !groupBranch(entry.row.repoRoot) && cachedBadge(entry)
-            ? [
-                {
-                  text: `  ${cachedBadge(entry)}`,
-                  fg: badgeColor(cachedPRs(entry)),
-                },
-              ]
+            ? [{ text: cachedBadge(entry), fg: badgeColor(cachedPRs(entry)) }]
             : entry.pr && !groupBranch(entry.row.repoRoot)
-              ? [{ text: `  ${describePR(entry.pr)}`, fg: prColor(entry.pr) }]
+              ? [{ text: describePR(entry.pr), fg: prColor(entry.pr) }]
               : []),
         ...(dirty.length
           ? dirty
@@ -1160,56 +1199,33 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             ? [DIRTY_UNCOUNTED]
             : []
         ).map((text) => ({
-          text: `  ${text}`,
+          text,
           fg: entry.candidate ? theme.yellow : theme.subtext,
         })),
-        ...(entry.row.locked ? [{ text: "  locked", fg: theme.yellow }] : []),
+        ...(entry.row.locked ? [{ text: "locked", fg: theme.yellow }] : []),
         ...(skip &&
         !(entry.row.locked && skip === "locked") &&
         !(entry.row.detached && skip === "detached HEAD") &&
         !(rowSessions(entry).length && /^an agent is /.test(skip))
           ? [
               {
-                text: `  ${skip.replace(/^an agent is /, "agent ")}`,
+                text: skip.replace(/^an agent is /, "agent "),
                 fg: theme.subtext,
               },
             ]
           : []),
         ...(!entry.candidate && formatTracking(entry.row)
-          ? [{ text: `  ${formatTracking(entry.row)}`, fg: theme.blue }]
+          ? [{ text: formatTracking(entry.row), fg: theme.blue }]
           : []),
       ];
-      const budget = Math.max(1, width() - 6 - displayWidth(right()));
-      const wanted = metadata.reduce(
-        (n, part) => n + displayWidth(part.text),
-        0,
+      const { name, branch, room } = columns();
+      return fitSegments(
+        phrases.map((phrase, i) => ({
+          ...phrase,
+          text: `${i ? "  " : ""}${phrase.text}`,
+        })),
+        Math.max(0, room - name - (branch ? branch + 2 : 0) - 2),
       );
-      const identityBudget = Math.max(10, budget - wanted);
-      const identity = fitSegments(
-        [
-          {
-            text: entry.row.isMain
-              ? "⌂ main checkout"
-              : `${truncateText(entry.row.name, identityBudget - 2)} +`,
-            fg: entry.row.isMain ? theme.text : theme.blue,
-          },
-          ...(!groupBranch(entry.row.repoRoot) && rowBranch(entry)
-            ? [{ text: `  ${rowBranch(entry)}`, fg: theme.subtext }]
-            : []),
-        ],
-        identityBudget,
-      );
-      return [
-        ...identity,
-        ...fitSegments(
-          metadata,
-          Math.max(
-            0,
-            budget -
-              identity.reduce((n, part) => n + displayWidth(part.text), 0),
-          ),
-        ),
-      ];
     };
     return (
       <box
@@ -1217,7 +1233,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         width="100%"
         flexDirection="row"
         backgroundColor={cursor() === entry.key ? theme.surface : undefined}
-        onMouseDown={() => setCursor(entry.key)}
+        onMouseDown={() => {
+          // Behind a dialog the row under the cursor is the one the dialog
+          // returns to: a stray click must not move it.
+          if (props.enabled !== false) setCursor(entry.key);
+        }}
       >
         <Text fg={theme.mauve}>
           {rowSessions(entry).some((s) => s.id === props.activeSessionId)
@@ -1227,14 +1247,32 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         <Text
           fg={theme.overlay}
         >{`${marks().has(entry.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
-        <Text fg={status() === "idle" ? theme.overlay : statusColor(status())}>
-          {glyph()}{" "}
-        </Text>
-        <For each={segments()}>
+        <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
+        <box width={columns().name} flexShrink={0}>
+          <Text fg={entry.row.isMain ? theme.text : theme.blue}>
+            {fitName(entry, columns().name)}
+          </Text>
+        </box>
+        <Show when={columns().branch}>
+          <box width={columns().branch + 2} flexShrink={0} paddingLeft={2}>
+            <Text fg={theme.subtext}>
+              {truncateText(branchText(entry), columns().branch)}
+            </Text>
+          </box>
+        </Show>
+        <box width={2} flexShrink={0} />
+        <For each={facts()}>
           {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
         </For>
         <box flexGrow={1} />
-        <Text fg={theme.subtext}>{right()}</Text>
+        <Show when={columns().agents}>
+          <Text fg={theme.subtext}>
+            {padStartWidth(
+              truncateText(agentsText(entry), columns().agents),
+              columns().agents,
+            )}
+          </Text>
+        </Show>
       </box>
     );
   };
@@ -1244,134 +1282,176 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       top={props.embedded ? 1 : 0}
       left={0}
       width="100%"
-      height={props.embedded ? dims().height - 1 : "100%"}
+      height={
+        props.embedded
+          ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+          : "100%"
+      }
       backgroundColor={theme.base}
       border={props.embedded ? false : true}
       borderColor={props.embedded ? undefined : theme.border}
       flexDirection="column"
       paddingLeft={0}
-      paddingRight={1}
+      // Embedded, the footer bar runs edge to edge like the session list's,
+      // so the list's right margin moves onto the list itself.
+      paddingRight={props.embedded ? 0 : 1}
     >
-      <Show when={!props.embedded}>
-        <Text fg={theme.text}>
-          <b>Worktrees</b>
-        </Text>
-      </Show>
-      <box flexGrow={1} flexDirection="column">
-        <Show when={phase() === "loading"}>
-          <Text fg={theme.overlay}>Reading worktrees…</Text>
+      {/* Dimmed INSIDE the root, whose opaque base is what keeps the session
+          list underneath from showing through. */}
+      <box
+        flexGrow={1}
+        flexDirection="column"
+        opacity={props.dimmed ? DIMMED_OPACITY : 1}
+      >
+        <Show when={!props.embedded}>
+          <Text fg={theme.text}>
+            <b>Worktrees</b>
+          </Text>
         </Show>
-        <Show when={phase() === "running"}>
-          <Text fg={theme.yellow}>Removing worktrees…</Text>
-        </Show>
-        <Show when={phase() === "done"}>
-          <scrollbox
-            flexGrow={1}
-            ref={(r: ScrollBoxRenderable) => {
-              resultsBox = r;
-              syncScrollbarThumb(r);
-            }}
-          >
-            <For each={result()?.outcomes ?? []}>
-              {(outcome) => (
-                <box flexDirection="column" flexShrink={0}>
-                  <Text fg={outcome.error ? theme.yellow : theme.text}>
-                    {basename(outcome.path)}:{" "}
-                    {outcome.removed ? "removed" : "kept"}
-                  </Text>
-                  <Show when={outcome.error}>
-                    <Text fg={theme.yellow}>{outcome.error}</Text>
-                  </Show>
-                  <For each={outcome.steps}>
-                    {(step) => (
-                      <Text fg={step.ok ? theme.subtext : theme.yellow}>
-                        {step.ok ? "✓" : "!"} {step.detail}
-                      </Text>
-                    )}
-                  </For>
-                </box>
-              )}
-            </For>
-            <For each={result()?.state.filter((s) => s.error) ?? []}>
-              {(entry) => <Text fg={theme.yellow}>{entry.error}</Text>}
-            </For>
-            <Text fg={theme.overlay}>
-              j/k scroll · Enter returns · R refresh
-            </Text>
-          </scrollbox>
-        </Show>
-        <Show when={["list", "confirm", "dirty"].includes(phase())}>
-          <scrollbox
-            flexGrow={1}
-            ref={(r: ScrollBoxRenderable) => {
-              listBox = r;
-              syncScrollbarThumb(r);
-              const bump = () => setMeasured((v) => v + 1);
-              r.viewport.on("resize", bump);
-              r.content.on("resize", bump);
-            }}
-          >
-            <For each={items()}>
-              {(item) =>
-                item.kind === "header" ? (
-                  <GroupHeader
-                    label={item.repoName}
-                    count={item.rows.length}
-                    width={headerWidth()}
-                    flushRight
-                    sharedBranch={groupBranch(item.repoRoot)}
-                    facts={factsText(facts(item.repoRoot))}
-                    prBadgeColor={
-                      item.rows[0]
-                        ? cachedPRs(item.rows[0]).length
-                          ? badgeColor(cachedPRs(item.rows[0]))
-                          : item.rows[0].pr
-                            ? prColor(item.rows[0].pr)
-                            : undefined
-                        : undefined
+        <box
+          flexGrow={1}
+          flexDirection="column"
+          paddingRight={props.embedded ? 1 : 0}
+        >
+          <Show when={phase() === "loading"}>
+            <Text fg={theme.overlay}>Reading worktrees…</Text>
+          </Show>
+          <Show when={phase() === "running"}>
+            <Text fg={theme.yellow}>Removing worktrees…</Text>
+          </Show>
+          <Show when={phase() === "done"}>
+            <scrollbox
+              flexGrow={1}
+              ref={(r: ScrollBoxRenderable) => {
+                resultsBox = r;
+                syncScrollbarThumb(r);
+              }}
+            >
+              <For each={result()?.outcomes ?? []}>
+                {(outcome) => (
+                  <box flexDirection="column" flexShrink={0}>
+                    <Text fg={outcome.error ? theme.yellow : theme.text}>
+                      {basename(outcome.path)}:{" "}
+                      {outcome.removed ? "removed" : "kept"}
+                    </Text>
+                    <Show when={outcome.error}>
+                      <Text fg={theme.yellow}>{outcome.error}</Text>
+                    </Show>
+                    <For each={outcome.steps}>
+                      {(step) => (
+                        <Text fg={step.ok ? theme.subtext : theme.yellow}>
+                          {step.ok ? "✓" : "!"} {step.detail}
+                        </Text>
+                      )}
+                    </For>
+                  </box>
+                )}
+              </For>
+              <For each={result()?.state.filter((s) => s.error) ?? []}>
+                {(entry) => <Text fg={theme.yellow}>{entry.error}</Text>}
+              </For>
+              <Text fg={theme.overlay}>
+                j/k scroll · Enter returns · R refresh
+              </Text>
+            </scrollbox>
+          </Show>
+          <Show when={["list", "confirm", "dirty"].includes(phase())}>
+            <scrollbox
+              flexGrow={1}
+              ref={(r: ScrollBoxRenderable) => {
+                listBox = r;
+                syncScrollbarThumb(r);
+                const bump = () => setMeasured((v) => v + 1);
+                r.viewport.on("resize", bump);
+                r.content.on("resize", bump);
+              }}
+            >
+              <For each={items()}>
+                {(item) =>
+                  item.kind === "header" ? (
+                    <GroupHeader
+                      label={item.repoName}
+                      count={item.rows.length}
+                      width={headerWidth()}
+                      flushRight
+                      sharedBranch={groupBranch(item.repoRoot)}
+                      prBadgeColor={
+                        item.rows[0]
+                          ? cachedPRs(item.rows[0]).length
+                            ? badgeColor(cachedPRs(item.rows[0]))
+                            : item.rows[0].pr
+                              ? prColor(item.rows[0].pr)
+                              : undefined
+                          : undefined
+                      }
+                      prBadge={
+                        groupBranch(item.repoRoot) && item.rows[0]
+                          ? cachedBadge(item.rows[0]) ||
+                            (item.rows[0].pr ? describePR(item.rows[0].pr) : "")
+                          : ""
+                      }
+                      collapsed={collapsed().has(item.repoRoot)}
+                      selected={cursor() === item.key}
+                      members={[]}
+                      onActivate={() => {
+                        if (props.enabled === false) return;
+                        setCursor(item.key);
+                        toggleGroup(item.repoRoot);
+                      }}
+                    />
+                  ) : (
+                    renderRow(item)
+                  )
+                }
+              </For>
+            </scrollbox>
+          </Show>
+        </box>
+        {/* The session list's footer, built from the same registry: same
+          order, same verbs, the same pinned four. A note (a flash, a scan
+          error, the scan still running) leads it without displacing those. */}
+        <Show
+          when={props.embedded}
+          fallback={
+            <HintLine
+              view="worktrees"
+              width={width()}
+              sidebar={props.compact}
+              reviewable={props.reviewable}
+              note={footerNote()}
+              noteColor={note() || scanError() ? theme.yellow : theme.subtext}
+            />
+          }
+        >
+          {/* While a dialog, help or a confirmation owns the keys, the bar's two
+            rows go back to App's footer, which shows THAT surface's keys; the
+            panel ends two rows higher, so its list keeps its height. */}
+          <Show when={!footerYielded()}>
+            <FooterBar>
+              <Show
+                when={phase() === "confirm" || phase() === "dirty"}
+                fallback={
+                  <HintLine
+                    view="worktrees"
+                    width={width()}
+                    reviewable={props.reviewable}
+                    note={footerNote()}
+                    noteColor={
+                      note() || scanError() ? theme.yellow : theme.subtext
                     }
-                    prBadge={
-                      groupBranch(item.repoRoot) && item.rows[0]
-                        ? cachedBadge(item.rows[0]) ||
-                          (item.rows[0].pr ? describePR(item.rows[0].pr) : "")
-                        : ""
-                    }
-                    collapsed={collapsed().has(item.repoRoot)}
-                    selected={cursor() === item.key}
-                    members={[]}
-                    onActivate={() => {
-                      setCursor(item.key);
-                      toggleGroup(item.repoRoot);
-                    }}
                   />
-                ) : (
-                  renderRow(item)
-                )
-              }
-            </For>
-          </scrollbox>
+                }
+              >
+                <Text fg={theme.subtext}>
+                  {phase() === "dirty"
+                    ? "y include · n skip · esc cancel"
+                    : CONFIRM_HINTS}
+                </Text>
+              </Show>
+            </FooterBar>
+          </Show>
         </Show>
       </box>
-      <Text fg={note() || scanError() ? theme.yellow : theme.overlay}>
-        {truncateText(
-          note() ||
-            scanError() ||
-            (!scan() ? "scanning…  " : "") +
-              fitHints(
-                [
-                  { text: "h/l views", rank: 2 },
-                  { text: "enter open", rank: 4 },
-                  { text: "space mark", rank: 3 },
-                  { text: "x remove", rank: 3 },
-                  { text: "s scope", rank: 2 },
-                  { text: "R refresh", rank: 1 },
-                  { text: "? help", rank: 3 },
-                ],
-                width(),
-              ),
-          width(),
-        )}
-      </Text>
       <Show when={phase() === "dirty" && dirtyQueue()[0]}>
         {(candidate: () => PruneCandidate) => (
           <RemovalConfirm

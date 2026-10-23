@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
 import {
@@ -13,6 +15,7 @@ import {
   scrollbarThumb,
 } from "./test-helpers";
 import { buildFlatItems, type FlatItem } from "../utils/grouping";
+import { getAgentShortCode } from "../../lib/agents";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -651,6 +654,7 @@ describe("SessionList column header", () => {
     sidebar?: boolean;
     promptLines?: number;
     summary?: string | null;
+    showPreview?: boolean;
   }) {
     const [tick] = createSignal(0);
     const items = [
@@ -672,6 +676,7 @@ describe("SessionList column header", () => {
             columnHeader={opts.columnHeader}
             sidebar={opts.sidebar}
             promptLines={opts.promptLines}
+            showPreview={opts.showPreview}
           />
         </TickContext.Provider>
       ),
@@ -722,6 +727,37 @@ describe("SessionList column header", () => {
     const paneEnd = header.indexOf("pane") + "pane".length;
     const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
     expect(paneEnd).toBe(targetEnd);
+  });
+
+  it("draws the labels in subtext", async () => {
+    await renderHeaderCase({ columnHeader: true });
+    const label = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((span) => span.text.includes("version"));
+    expect(label?.fg.toInts()).toEqual(RGBA.fromHex(theme.subtext).toInts());
+  });
+
+  it("keeps the labels that fit when the preview narrows the list", async () => {
+    // 100 columns with a 30% preview: the list lays out at 70, below `md`,
+    // but the terminal is not, so the smaller layout's labels still draw.
+    const lines = await renderHeaderCase({
+      columnHeader: true,
+      width: 100,
+      showPreview: true,
+    });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    expect(header).toBeDefined();
+    expect(header).toContain("status");
+    // The two-column short agent code keeps its label: `agent` starts on
+    // the column the code does, borrowing the pane cell's unused width.
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    const code = getAgentShortCode("claude");
+    expect(header.indexOf("agent")).toBe(row.indexOf(` ${code} `) + 1);
+    // `pane` still ends where its column does.
+    expect(header.indexOf("pane") + "pane".length).toBe(
+      row.indexOf("main:1.1") + "main:1.1".length,
+    );
   });
 
   it("stays off when not asked, in the sidebar, and below md", async () => {

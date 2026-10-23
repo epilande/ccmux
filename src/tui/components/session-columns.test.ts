@@ -22,6 +22,7 @@ import {
   prColumnWidth,
   sizePrColumn,
   PR_COLUMN_MAX,
+  labelsToolCell,
   showColumnHeader,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
@@ -1222,14 +1223,14 @@ describe("fitProjectCell", () => {
     });
   });
 
-  it("appends the worktree marker and caps the branch with ~", () => {
+  it("appends the worktree marker and caps the branch with an ellipsis", () => {
     const out = fitProjectCell(
       { ...base, branch: "feature/really-long-branch", isWorktree: true },
       60,
       8,
     );
-    // 8-char cap: 7 chars + "~", then "+"
-    expect(out.branchLabel).toBe(":feature~+");
+    // 8-char cap: 7 chars + "…", then "+"
+    expect(out.branchLabel).toBe(":feature…+");
   });
 
   it("shrinks the prefix with an ellipsis before touching the dirname", () => {
@@ -1315,21 +1316,23 @@ describe("fitProjectCell", () => {
   it("takes the worktree name below the normal dirname floor to keep the repo", () => {
     // A plain path cell floors the dirname at 5 and would rather drop the
     // prefix; with repo identity in the prefix that trade is backwards.
+    // No branch here: with one, the branch takes the cut instead (see
+    // "never cuts both the path and the branch").
     const out = fitProjectCell(
       {
         prefix: "ccmux/",
         dirname: "parking",
-        branch: "feat/sidebar",
+        branch: null,
         isWorktree: true,
         repoPrefix: true,
       },
-      19,
+      10,
       8,
     );
     expect(out.prefix).toBe("ccmux/");
     expect(displayWidth(out.dirname)).toBeLessThan(5);
     expect(out.dirname.endsWith("…")).toBe(true);
-    expect(cellWidth(out)).toBeLessThanOrEqual(19);
+    expect(cellWidth(out)).toBeLessThanOrEqual(10);
   });
 
   it("drops a repo prefix that no longer names the repo, giving the space back", () => {
@@ -1490,8 +1493,9 @@ describe("fitProjectCell", () => {
       24,
     );
     expect(out.prefix).toBe("ccmux/");
-    expect(out.dirname.startsWith("p")).toBe(true);
-    expect(out.branchLabel.endsWith("~+")).toBe(true);
+    // One mark: the identity stays whole and only the branch is cut.
+    expect(out.dirname).toBe("parking");
+    expect(out.branchLabel).toBe(":feat/side…+");
     expect(cellWidth(out)).toBeLessThanOrEqual(25);
   });
 
@@ -1504,11 +1508,28 @@ describe("fitProjectCell", () => {
     expect(out.branchLabel).toBe("");
   });
 
-  it("shortens the branch as a last resort with a ~ marker", () => {
-    // Tight budget: even after dropping the prefix and flooring the dirname to
-    // its 5-char minimum, the branch still overflows, so step 3 truncates it
-    // with `~` rather than dropping it to "". Exercises the positive
-    // shortenBranchLabel path (avail >= 3), not the zero-budget drop.
+  it("keeps the branch whole while the path context and dirname yield", () => {
+    // The design order on a plain path cell: prefix, then dirname, then
+    // the branch as a last resort. One mark, on the dirname.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "claude-toolkit",
+        branch: "feature-x",
+        isWorktree: false,
+      },
+      20,
+      24,
+    );
+    expect(out.prefix).toBe("");
+    expect(out.dirname).toBe("claude-to…");
+    expect(out.branchLabel).toBe(":feature-x");
+    expect(cellWidth(out)).toBeLessThanOrEqual(20);
+  });
+
+  it("never cuts both the path and the branch", () => {
+    // At 12 the dirname cannot stay whole beside any branch label, so the
+    // branch drops rather than leaving `claude…:featu…`.
     const out = fitProjectCell(
       {
         prefix: "epilande/",
@@ -1519,13 +1540,30 @@ describe("fitProjectCell", () => {
       12,
       24,
     );
-    expect(out.prefix).toBe("");
-    expect(out.dirname.endsWith("…")).toBe(true);
-    // Branch truncated with the `~` marker: neither dropped to "" nor left whole.
-    expect(out.branchLabel).toBe(":featu~");
-    expect(out.branchLabel.endsWith("~")).toBe(true);
-    // The cascade never overshoots its budget.
-    expect(cellWidth(out)).toBeLessThanOrEqual(12);
+    expect(out).toEqual({
+      prefix: "",
+      dirname: "claude-tool…",
+      branchLabel: "",
+    });
+    for (let budget = 4; budget <= 70; budget++)
+      for (const repoPrefix of [false, true]) {
+        const cell = fitProjectCell(
+          {
+            prefix: repoPrefix ? "claude-toolkit/" : "epilande/",
+            dirname: "worktree-detection",
+            branch: "fix/worktree-detection",
+            isWorktree: true,
+            repoPrefix,
+          },
+          budget,
+          24,
+        );
+        const text = cell.prefix + cell.dirname + cell.branchLabel;
+        expect([budget, (text.match(/…|~/g) ?? []).length]).toEqual([
+          budget,
+          Math.min(1, (text.match(/…|~/g) ?? []).length),
+        ]);
+      }
   });
 });
 
@@ -1589,13 +1627,13 @@ describe("fitProjectCell with wide glyphs", () => {
   });
 
   it("caps an emoji branch at maxBranchLen columns", () => {
-    // Six rockets are 12 columns; the 8-column cap keeps three plus the `~`.
+    // Six rockets are 12 columns; the 8-column cap keeps three plus the `…`.
     const out = fitProjectCell(
       { prefix: "", dirname: "app", branch: "🚀🚀🚀🚀🚀🚀", isWorktree: false },
       40,
       8,
     );
-    expect(out.branchLabel).toBe(":🚀🚀🚀~");
+    expect(out.branchLabel).toBe(":🚀🚀🚀…");
     expect(displayWidth(out.branchLabel)).toBeLessThanOrEqual(8 + 1);
   });
 
@@ -1651,7 +1689,7 @@ describe("fitProjectCell with wide glyphs", () => {
       12,
       24,
     );
-    expect(out.branchLabel).toBe(":🚀🚀🚀~+");
+    expect(out.branchLabel).toBe(":🚀🚀🚀…+");
     expect(cellWidth(out)).toBeLessThanOrEqual(12);
   });
 
@@ -1910,15 +1948,40 @@ describe("columnHeaderCells", () => {
     ]);
   });
 
-  it("blanks a label that would not fit its cell rather than cutting it", () => {
-    // At `sm` the agent cell is the 2-column short code: no room for "agent".
+  it("lets a label too wide for its cell borrow the next cell's unused width", () => {
+    // At `sm` the agent cell is the 2-column short code. "agent" takes five
+    // header columns starting on the agent column, and the pane cell (12
+    // wide, its label 4) gives the same three up, so every label after it
+    // stays where it was.
     const sm = columnHeaderCells(inline(60));
     const agent = sm.right.find((c) => c.field === "agent");
-    expect(agent).toEqual({ field: "agent", text: "", width: 2 });
+    expect(agent).toEqual({ field: "agent", text: "agent", width: 2, span: 5 });
+    const pane = sm.right.find((c) => c.field === "pane");
+    expect(pane).toEqual({ field: "pane", text: "pane", width: 12, span: 9 });
+  });
+
+  it("blanks a label that would not fit and has no neighbor to borrow from", () => {
+    // Last on the right: nothing after it to lend columns.
+    const last = columnHeaderCells(
+      inline(60, { row1: { right: [{ field: "agent", mode: "short" }] } }),
+    );
+    expect(last.right).toEqual([{ field: "agent", text: "", width: 2 }]);
+    // A neighbor whose own label fills it cannot lend either.
+    const tight = columnHeaderCells(
+      inline(60, {
+        row1: { right: [{ field: "agent", mode: "short" }, "time"] },
+      }),
+    );
+    expect(tight.right[0]).toEqual({ field: "agent", text: "", width: 2 });
+  });
+
+  it("fits left-side labels to their own cells", () => {
     // The short status cell is exactly 6 wide, which "status" fills.
+    const sm = columnHeaderCells(inline(60));
     const status = sm.left.find((c) => c.field === "status");
     expect(status).toEqual({ field: "status", text: "status", width: 6 });
-    // Icon-only status at `xs` is one column: blank.
+    // Icon-only status at `xs` is one column: blank, since the cell after
+    // it is the flexible project, whose label has a fixed start to keep.
     const xs = columnHeaderCells(inline(40));
     expect(xs.left.find((c) => c.field === "status")?.text).toBe("");
   });
@@ -1963,22 +2026,46 @@ describe("columnHeaderCells", () => {
 });
 
 describe("showColumnHeader", () => {
-  it("auto follows the grouping: flat only", () => {
-    expect(showColumnHeader("auto", "none")).toBe(true);
-    expect(showColumnHeader(undefined, "none")).toBe(true);
-    for (const g of ["project", "cwd", "session", "window"] as const) {
-      expect(showColumnHeader("auto", g)).toBe(false);
-    }
+  it("auto draws it in every grouping, as always does", () => {
+    expect(showColumnHeader("auto")).toBe(true);
+    expect(showColumnHeader(undefined)).toBe(true);
+    expect(showColumnHeader("always")).toBe(true);
   });
 
-  it("auto yields to the needs-attention band in a flat list", () => {
-    expect(showColumnHeader("auto", "none", true)).toBe(false);
-    expect(showColumnHeader("always", "none", true)).toBe(true);
+  it("never turns it off", () => {
+    expect(showColumnHeader("never")).toBe(false);
+  });
+});
+
+describe("labelsToolCell", () => {
+  const row1 = sizePrColumn(
+    applyPromptDisplay(resolveColumns(160), "inline", false),
+    4,
+  ).row1;
+  const waiting = mockEnrichedSession({
+    status: "waiting",
+    attentionType: "permission",
+    pendingTool: "Bash",
+  });
+  const idle = mockEnrichedSession({ status: "idle" });
+
+  it("labels the tool cell while some row draws one", () => {
+    expect(labelsToolCell(row1, columnHeaderCells(row1), [idle, waiting])).toBe(
+      true,
+    );
+    expect(labelsToolCell(row1, columnHeaderCells(row1), [idle])).toBe(false);
   });
 
-  it("always and never override the grouping", () => {
-    expect(showColumnHeader("always", "project")).toBe(true);
-    expect(showColumnHeader("never", "none")).toBe(false);
+  it("leaves it unlabeled when a drifting right-side cell unanchors it", () => {
+    // The unsized `pr` is intrinsic-width, so the tool cell's end drifts.
+    const drifting = applyPromptDisplay(
+      resolveColumns(160),
+      "inline",
+      false,
+    ).row1;
+    expect(
+      labelsToolCell(drifting, columnHeaderCells(drifting), [waiting]),
+    ).toBe(false);
   });
 });
 

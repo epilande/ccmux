@@ -31,6 +31,8 @@ import {
   resolveLayout,
   applyPromptDisplay,
   columnHeaderCells,
+  labelsToolCell,
+  TOOL_LABEL,
   prColumnWidth,
   sizePrColumn,
   hasHeaderLabels,
@@ -46,7 +48,7 @@ import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { Text } from "./Text";
 import { socketErrorMessage } from "../../lib/tmux-socket";
-import { padStartWidth } from "../utils/format";
+import { displayWidth, padStartWidth } from "../utils/format";
 
 interface SessionListProps {
   items: FlatItem[];
@@ -65,8 +67,8 @@ interface SessionListProps {
   sidebar?: boolean;
   /**
    * Draw the column-header line above the rows. The list still withholds it
-   * below the `md` breakpoint, where the cells it would label are gone, and
-   * when the resolved layout leaves nothing to label.
+   * on a terminal below the `md` breakpoint, and when the resolved layout
+   * leaves nothing to label.
    */
   columnHeader?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
@@ -426,10 +428,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
   // The head is the quietest line on screen on purpose: the strip above it
   // owns weight and accent, rows own semantic color, and the head is told
-  // apart by being dimmer than both (the overlay color, lowercase). Caps,
+  // apart by being dimmer than both (the subtext color, lowercase). Caps,
   // bold, underline and a rule beneath were all tried; each either fought
-  // the strip for its cue or cost a row.
-  const headerFg = () => (props.dimmed ? theme.border : theme.overlay);
+  // the strip for its cue or cost a row. Not the overlay color: that is
+  // under 4.5:1 on base in every built-in theme (2.3:1 in latte), and these
+  // labels are read, not decoration.
+  const headerFg = () => (props.dimmed ? theme.border : theme.subtext);
 
   /**
    * Header cells for THIS layout, or null when no line should draw. Read off
@@ -443,10 +447,20 @@ export const SessionList: Component<SessionListProps> = (props) => {
   const headerCells = createMemo(() => {
     if (!props.columnHeader || props.sidebar) return null;
     const md = props.breakpoints?.md ?? DEFAULT_BREAKPOINTS.md;
-    if (effectiveWidth() < md) return null;
+    // The TERMINAL's width, not the list's: with the preview open the list
+    // lays out a smaller breakpoint, whose labels still fit or blank cell by
+    // cell (`labelFor`). Only a line with nothing left to label is withheld.
+    if (dims().width < md) return null;
     const row1 = blockActive() ? withBlock().row1 : layout().row1;
     const cells = columnHeaderCells(row1);
-    return hasHeaderLabels(cells) ? cells : null;
+    const tool = labelsToolCell(
+      row1,
+      cells,
+      props.items.flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session] : [],
+      ),
+    );
+    return hasHeaderLabels(cells) || tool ? { ...cells, tool } : null;
   });
 
   return (
@@ -456,7 +470,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       flexShrink={1}
     >
       <Show when={props.items.length > 0 && headerCells()}>
-        {(cells: () => HeaderCells) => (
+        {(cells: () => HeaderCells & { tool: boolean }) => (
           // Same geometry as a row: the item's 1-column padding either side
           // (the left one is where the active `▎` draws), cells one gap
           // apart, right-side labels right-aligned in their fixed boxes.
@@ -484,11 +498,21 @@ export const SessionList: Component<SessionListProps> = (props) => {
             <Show when={!cells().left.some((c) => c.width === 0)}>
               <box flexGrow={1} flexShrink={1} />
             </Show>
+            {/* Ends where every row's tool cell ends: one gap before the
+                first right-side cell. */}
+            <Show when={cells().tool}>
+              <box width={displayWidth(TOOL_LABEL)} flexShrink={0}>
+                <Text fg={headerFg()}>{TOOL_LABEL}</Text>
+              </box>
+            </Show>
+            {/* `span` is the label box when it differs from the column: a
+                borrowed label fills its box exactly, starting on its own
+                column, and the lender's label still ends on its own. */}
             <For each={cells().right}>
               {(cell) => (
-                <box width={cell.width} flexShrink={0}>
+                <box width={cell.span ?? cell.width} flexShrink={0}>
                   <Text fg={headerFg()}>
-                    {padStartWidth(cell.text, cell.width)}
+                    {padStartWidth(cell.text, cell.span ?? cell.width)}
                   </Text>
                 </box>
               )}

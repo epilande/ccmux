@@ -1,6 +1,5 @@
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { GroupHeader } from "./GroupHeader";
-import { factsText } from "../utils/repo-facts";
 import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
 import type { PanelEffects } from "./WorktreesPanel";
@@ -25,33 +24,32 @@ import type { WorktreeListResponse } from "../../daemon/worktree-list";
 import { describeHttpFailure } from "../../daemon/worktree-prune";
 import { getDaemonUrl } from "../../lib/config";
 import type { IconStyle } from "../../lib/icons";
-import { theme } from "../theme";
-import { truncateText } from "../utils/format";
+import { getStatusColor } from "./StatusBadge";
+import { DIMMED_OPACITY, theme } from "../theme";
+import { padStartWidth, truncateText } from "../utils/format";
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { fitHints } from "./Footer";
-import { describeChecks, describeReview, isPRRowKey } from "./pr-rows";
-import {
-  fitSegments,
-  oneLine,
-  scrollTargetFor,
-  type Phrase,
-  type VisualLayout,
-} from "./row-segments";
+import { FOOTER_BAR_ROWS, FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
+import { isPRRowKey } from "./pr-rows";
+import { oneLine, scrollTargetFor, type VisualLayout } from "./row-segments";
 import {
   buildSourceRepos,
   checkedOutPathFor,
   emptyStateText,
   filterRepos,
+  fitSourceRow,
   hasRows,
   isIssueRowKey,
   pickerRows,
+  sourceCellWidths,
+  sourceRowCells,
   sourceRowDim,
   sourceRowLabel,
   sourceRowMarker,
   type SourceRepo,
   type SourceRow,
+  type SourceRowCells,
 } from "./source-picker-rows";
 import { Text } from "./Text";
 
@@ -62,6 +60,8 @@ import { Text } from "./Text";
 /** Independent of the list read, so a slow GitHub cannot hold up the local
  *  worktrees that mark a row as already checked out. */
 const LIST_TIMEOUT_MS = 20_000;
+/** Content columns below which a row's author is left out of its middle. */
+const AUTHOR_MIN_WIDTH = 96;
 export function sourceAge(
   createdAt: string | null | undefined,
   now = Date.now(),
@@ -89,6 +89,11 @@ export interface SourcePickerProps {
   memory?: ViewMemory;
   onRemember?: (memory: ViewMemory) => void;
   embedded?: boolean;
+  /** Whether `d`/`D` review is installed, for the footer's hint. */
+  reviewable?: boolean;
+  /** A dialog opened from this view sits over it: the view stays, dimmed,
+   *  so it is still the view the user is in. */
+  dimmed?: boolean;
   enabled?: boolean;
   onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
   onScope?: (repo: string | null) => void;
@@ -841,27 +846,60 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       : emptyStateText(visible(), filter()),
   );
 
-  const hints = createMemo(() =>
-    fitHints(
-      filtering()
-        ? [
-            { text: "enter start", rank: 3 },
-            { text: "ctrl-n/p move", rank: 2 },
-            // "cancel", not "done": Esc drops the query, the same word the
-            // session picker's footer uses for the same key.
-            { text: "esc cancel", rank: 3 },
-          ]
-        : [
-            { text: "/ filter", rank: 3 },
-            { text: "enter start", rank: 3 },
-            { text: "j/k move", rank: 1 },
-            { text: "R refresh", rank: 1 },
-            { text: "q close", rank: 2 },
-          ],
-      contentWidth(),
+  /** Embedded and not the key owner: App's footer shows through instead. */
+  const footerYielded = () => !!props.embedded && props.enabled === false;
+  const footerLine = () => (
+    <Show
+      when={!filtering()}
+      fallback={
+        <Text fg={theme.subtext}>
+          {truncateText(SEARCH_HINTS, contentWidth())}
+        </Text>
+      }
+    >
+      <HintLine
+        view="start"
+        width={contentWidth()}
+        sidebar={props.compact}
+        reviewable={props.reviewable}
+        note={note() ?? sourceNotice() ?? undefined}
+        noteColor={note() ? theme.yellow : theme.subtext}
+      />
+    </Show>
+  );
+  /** One width per fixed right cell across every visible row. */
+  const cellWidths = createMemo(() =>
+    sourceCellWidths(
+      rows().map((row) =>
+        sourceRowCells(
+          row,
+          sourceAge(row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt),
+          false,
+        ),
+      ),
     ),
   );
-
+  const fixedCellsWidth = () => {
+    const { ci, review, age } = cellWidths();
+    return [ci, review, age].reduce((n, w) => n + (w ? w + 1 : 0), 0);
+  };
+  /** A row's fixed cells at the list's widths, blank where it has none. */
+  const fixedCells = (cells: SourceRowCells) => {
+    const { ci, review, age } = cellWidths();
+    return [
+      {
+        width: ci,
+        text: cells.ci?.text ?? "",
+        fg: cells.ci?.fg ?? theme.overlay,
+      },
+      {
+        width: review,
+        text: cells.review?.text ?? "",
+        fg: cells.review?.fg ?? theme.overlay,
+      },
+      { width: age, text: cells.age, fg: theme.overlay },
+    ].filter((cell) => cell.width > 0);
+  };
   const sourceNotice = () =>
     prError() ??
     issueError() ??
@@ -872,65 +910,40 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const isCursor = () => cursorKey() === row.key;
     const index = () => rows().findIndex((r) => r.key === row.key) + 1;
     const source = () => (row.kind === "pr" ? row.pr : row.issue);
-    const metadata = () => {
-      const phrases: Phrase[] = [];
-      if (row.kind === "pr") {
-        const checks = describeChecks(row.pr);
-        const review = describeReview(row.pr);
-        if (checks)
-          phrases.push({
-            ...checks,
-            text: `CI ${row.pr.ciStatus === "passing" ? "✓" : row.pr.ciStatus === "failing" ? "✗" : "◐"}`,
-          });
-        if (review)
-          phrases.push({
-            ...review,
-            text:
-              row.pr.reviewDecision === "CHANGES_REQUESTED"
-                ? "changes"
-                : "approved",
-          });
-        if (row.pr.isDraft) phrases.push({ text: "draft", fg: theme.subtext });
-      }
-      const labels = row.kind === "pr" ? row.pr.labels : row.issue.labels;
-      if (labels?.length)
-        phrases.push({ text: labels.join(","), fg: theme.subtext });
-      if (row.kind === "pr" && row.pr.headRefName)
-        phrases.push({ text: row.pr.headRefName, fg: theme.blue });
-      if (source().author && listWidth() >= 96)
-        phrases.push({ text: `@${source().author}`, fg: theme.overlay });
-      const age = sourceAge(source().createdAt);
-      if (age) phrases.push({ text: age, fg: theme.overlay });
-      // Status gets the first columns; author and long branch names yield
-      // before a check result. Fit before painting to prevent wrapping.
-      return fitSegments(
-        phrases.map((phrase, index) => ({
-          ...phrase,
-          text: `${index ? " · " : ""}${oneLine(phrase.text)}`,
-        })),
-        Math.max(
-          0,
-          Math.floor((listWidth() - 6) * (listWidth() < 50 ? 0.3 : 0.55)),
-        ),
-      );
-    };
-    const rightWidth = () =>
-      metadata().reduce((sum, phrase) => sum + displayWidth(phrase.text), 0);
-    const label = () => {
-      const budget = Math.max(1, listWidth() - 6 - rightWidth());
+    const cells = createMemo(() =>
+      sourceRowCells(
+        row,
+        sourceAge(source().createdAt),
+        listWidth() >= AUTHOR_MIN_WIDTH,
+      ),
+    );
+    // CI, review and age are fixed cells sized for the list, like the
+    // session list's right-side columns; labels, branch and author are the
+    // flexible middle and yield first (`fitSourceRow`), before the title.
+    const fitted = createMemo(() => {
       const checkout = row.checkedOutName
-        ? truncateText(
-            ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`,
-            Math.floor(budget / 2),
-          )
+        ? ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`
         : "";
-      return (
-        truncateText(
-          `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`,
-          Math.max(1, budget - displayWidth(checkout)),
-        ) + checkout
+      const title = `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`;
+      const fit = fitSourceRow(
+        title + checkout,
+        cells().middle,
+        Math.max(1, listWidth() - 6 - fixedCellsWidth()),
       );
-    };
+      // The checkout suffix changes what Enter does, so it keeps up to half
+      // the title's room and the title truncates before it.
+      const suffix = checkout
+        ? truncateText(checkout, Math.floor(fit.titleRoom / 2))
+        : "";
+      return {
+        label:
+          truncateText(
+            title,
+            Math.max(1, fit.titleRoom - displayWidth(suffix)),
+          ) + suffix,
+        middle: fit.middle,
+      };
+    });
     const sessions = () =>
       worktrees()
         ?.repos.flatMap((r) => r.worktrees)
@@ -941,26 +954,24 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         : sessions().some((s) => s.status === "working")
           ? "working"
           : "idle";
-    const spinner = useStatusIcon(
+    // The session list's icon for the same status, in the user's style.
+    const icon = useStatusIcon(
       status,
       () => null,
-      () => "dot",
+      () => props.iconStyle,
     );
-    const glyph = () =>
-      !sessions().length
-        ? " "
-        : status() === "waiting"
-          ? "◆"
-          : status() === "working"
-            ? spinner()
-            : "●";
+    const glyph = () => (sessions().length ? icon() || " " : " ");
     return (
       <box
         height={1}
         width="100%"
         flexDirection="row"
         backgroundColor={isCursor() ? theme.surface : undefined}
-        onMouseDown={() => setCursorKey(row.key)}
+        onMouseDown={() => {
+          // Behind a dialog the row under the cursor is the one the dialog
+          // returns to: a stray click must not move it.
+          if (props.enabled !== false) setCursorKey(row.key);
+        }}
       >
         <Text fg={theme.mauve}>
           {sessions().some((s) => s.id === props.activeSessionId) ? "▎" : " "}
@@ -968,23 +979,20 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         <Text
           fg={theme.overlay}
         >{`${marks().has(row.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
-        <Text
-          fg={
-            status() === "waiting"
-              ? theme.red
-              : status() === "working"
-                ? theme.peach
-                : theme.overlay
-          }
-        >
-          {glyph()}{" "}
-        </Text>
+        <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
         <Text fg={sourceRowDim(row) ? theme.subtext : theme.text}>
-          {label()}
+          {fitted().label}
         </Text>
         <box flexGrow={1} />
-        <For each={metadata()}>
+        <For each={fitted().middle}>
           {(phrase) => <Text fg={phrase.fg}>{phrase.text}</Text>}
+        </For>
+        <For each={fixedCells(cells())}>
+          {(cell) => (
+            <Text
+              fg={cell.fg}
+            >{` ${padStartWidth(cell.text, cell.width)}`}</Text>
+          )}
         </For>
       </box>
     );
@@ -996,127 +1004,164 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       top={props.embedded ? 1 : 0}
       left={0}
       width="100%"
-      height={props.embedded ? dims().height - 1 : "100%"}
+      height={
+        props.embedded
+          ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+          : "100%"
+      }
       backgroundColor={theme.base}
       border={props.embedded ? false : true}
       borderColor={props.embedded ? undefined : theme.border}
       flexDirection="column"
       paddingLeft={0}
-      paddingRight={1}
+      // Embedded, the footer bar runs edge to edge like the session list's,
+      // so the list's right margin moves onto the rows above it.
+      paddingRight={props.embedded ? 0 : 1}
     >
-      <Show when={!props.embedded}>
-        <box width="100%" height={1} flexDirection="row">
-          <Text fg={theme.text} attributes={1}>
-            {title()}
-          </Text>
-        </box>
-      </Show>
-
-      {/* Drawn only while filtering, in the session picker's own shape: the
-          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
-          The footer's `/ filter` hint is what teaches the key, which is how
-          the session picker teaches it too. */}
-      <Show when={filtering()}>
-        <box width="100%" height={1} flexDirection="row">
-          <Text fg={theme.overlay} width={2}>
-            {"/ "}
-          </Text>
-          <input
-            value={filter()}
-            onInput={(value: string) => {
-              // 0.1.97 emits `input` for programmatic assignments too, the
-              // seed at mount included, so only a changed value is the user.
-              if (value !== filter()) setFilterEdited(true);
-              setFilter(value);
-            }}
-            focused
-            placeholder="Filter pull requests and issues..."
-            placeholderColor={theme.overlay}
-            textColor={theme.text}
-            focusedTextColor={theme.text}
-            cursorColor={theme.blue}
-            backgroundColor="transparent"
-            focusedBackgroundColor="transparent"
-            width="100%"
-          />
-        </box>
-      </Show>
-
-      <box flexGrow={1} flexDirection="column">
-        <Show when={phase() === "error"}>
-          <box paddingTop={1} flexDirection="column">
-            <Text fg={theme.red}>
-              {truncateText(error() ?? "", contentWidth())}
+      {/* Dimmed INSIDE the root, whose opaque base is what keeps the session
+          list underneath from showing through. */}
+      <box
+        flexGrow={1}
+        flexDirection="column"
+        opacity={props.dimmed ? DIMMED_OPACITY : 1}
+      >
+        <Show when={!props.embedded}>
+          <box width="100%" height={1} flexDirection="row">
+            <Text fg={theme.text} attributes={1}>
+              {title()}
             </Text>
-            <Text fg={theme.overlay}>R retry · q close</Text>
           </box>
         </Show>
 
-        <Show when={phase() !== "error"}>
-          <Show
-            when={hasRows(visible())}
-            fallback={
-              <box paddingTop={1}>
-                <Text fg={emptyState().fg}>
-                  {truncateText(emptyState().text, contentWidth())}
-                </Text>
-              </box>
-            }
+        {/* Drawn only while filtering, in the session picker's own shape: the
+          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
+          The footer's `/ filter` hint is what teaches the key, which is how
+          the session picker teaches it too. */}
+        <Show when={filtering()}>
+          <box
+            width="100%"
+            height={1}
+            flexDirection="row"
+            paddingRight={props.embedded ? 1 : 0}
           >
-            <scrollbox
-              flexGrow={1}
-              ref={(r: ScrollBoxRenderable) => {
-                listBox = r;
-                syncScrollbarThumb(r);
-                const bump = () => setScrollboxLayout((v) => v + 1);
-                r.viewport.on("resize", bump);
-                r.content.on("resize", bump);
+            <Text fg={theme.overlay} width={2}>
+              {"/ "}
+            </Text>
+            <input
+              value={filter()}
+              onInput={(value: string) => {
+                // 0.1.97 emits `input` for programmatic assignments too, the
+                // seed at mount included, so only a changed value is the user.
+                if (value !== filter()) setFilterEdited(true);
+                setFilter(value);
               }}
+              // Not while a dialog owns the keys: Enter in the filter opens one
+              // with the filter still up, and two focused inputs would both
+              // take the keystrokes.
+              focused={props.enabled !== false}
+              placeholder="Filter pull requests and issues..."
+              placeholderColor={theme.overlay}
+              textColor={theme.text}
+              focusedTextColor={theme.text}
+              cursorColor={theme.blue}
+              backgroundColor="transparent"
+              focusedBackgroundColor="transparent"
+              width="100%"
+            />
+          </box>
+        </Show>
+
+        <box
+          flexGrow={1}
+          flexDirection="column"
+          paddingRight={props.embedded ? 1 : 0}
+        >
+          <Show when={phase() === "error"}>
+            <box paddingTop={1} flexDirection="column">
+              <Text fg={theme.red}>
+                {truncateText(error() ?? "", contentWidth())}
+              </Text>
+              <Text fg={theme.subtext}>R retry · q back</Text>
+            </box>
+          </Show>
+
+          <Show when={phase() !== "error"}>
+            <Show
+              when={hasRows(visible())}
+              fallback={
+                <box paddingTop={1}>
+                  <Text fg={emptyState().fg}>
+                    {truncateText(emptyState().text, contentWidth())}
+                  </Text>
+                </box>
+              }
             >
-              <For
-                each={visible().filter(
-                  (r) => r.prs.length + r.issues.length > 0,
-                )}
+              <scrollbox
+                flexGrow={1}
+                ref={(r: ScrollBoxRenderable) => {
+                  listBox = r;
+                  syncScrollbarThumb(r);
+                  const bump = () => setScrollboxLayout((v) => v + 1);
+                  r.viewport.on("resize", bump);
+                  r.content.on("resize", bump);
+                }}
               >
-                {(repo) => (
-                  <box flexDirection="column">
-                    <GroupHeader
-                      label={repo.repoName}
-                      count={repo.prs.length + repo.issues.length}
-                      width={listWidth()}
-                      // Rows here have no right padding, so neither does
-                      // the header: its rule ends where they do.
-                      flushRight
-                      facts={factsText(
-                        props.facts?.repos.find(
-                          (r) => r.repoRoot === repo.repoRoot,
-                        ),
-                      )}
-                      collapsed={collapsed().has(repo.repoRoot)}
-                      selected={headerRepo()?.repoRoot === repo.repoRoot}
-                      members={[]}
-                      onActivate={() => {
-                        setCursorKey(`repo:${repo.repoRoot}`);
-                        toggleGroup(repo.repoRoot);
-                      }}
-                    />
-                    <Show when={!collapsed().has(repo.repoRoot)}>
-                      <For each={[...repo.prs, ...repo.issues]}>
-                        {renderRow}
-                      </For>
-                    </Show>
-                  </box>
-                )}
-              </For>
-            </scrollbox>
+                <For
+                  each={visible().filter(
+                    (r) => r.prs.length + r.issues.length > 0,
+                  )}
+                >
+                  {(repo) => (
+                    <box flexDirection="column">
+                      <GroupHeader
+                        label={repo.repoName}
+                        count={repo.prs.length + repo.issues.length}
+                        width={listWidth()}
+                        // Rows here have no right padding, so neither does
+                        // the header: its rule ends where they do.
+                        flushRight
+                        collapsed={collapsed().has(repo.repoRoot)}
+                        selected={headerRepo()?.repoRoot === repo.repoRoot}
+                        members={[]}
+                        onActivate={() => {
+                          if (props.enabled === false) return;
+                          setCursorKey(`repo:${repo.repoRoot}`);
+                          toggleGroup(repo.repoRoot);
+                        }}
+                      />
+                      <Show when={!collapsed().has(repo.repoRoot)}>
+                        <For each={[...repo.prs, ...repo.issues]}>
+                          {renderRow}
+                        </For>
+                      </Show>
+                    </box>
+                  )}
+                </For>
+              </scrollbox>
+            </Show>
+          </Show>
+        </box>
+
+        {/* The session list's footer, built from the same registry: same
+          order, same verbs, the same pinned four. While the filter owns the
+          keys it teaches the session search's keys instead. A note (a flash,
+          a source still loading or failing) leads the hints, never
+          displacing the pinned four. */}
+        <Show
+          when={props.embedded}
+          fallback={
+            <box width="100%" height={1} flexDirection="row">
+              {footerLine()}
+            </box>
+          }
+        >
+          {/* While a dialog, help or a confirmation owns the keys, the bar's
+            rows go back to App's footer, which shows THAT surface's keys;
+            the view ends two rows higher, so its list keeps its height. */}
+          <Show when={!footerYielded()}>
+            <FooterBar>{footerLine()}</FooterBar>
           </Show>
         </Show>
-      </box>
-
-      <box width="100%" height={1} flexDirection="row">
-        <Text fg={note() ? theme.yellow : theme.overlay}>
-          {truncateText(note() ?? sourceNotice() ?? hints(), contentWidth())}
-        </Text>
       </box>
     </box>
   );

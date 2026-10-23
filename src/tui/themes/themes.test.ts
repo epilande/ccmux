@@ -92,5 +92,27 @@ describe.each(Object.entries(BUILTIN_THEMES))(
       const used = AGENT_ACCENT_KEYS.map((key) => palette.semantic[key]);
       expect(new Set(used).size).toBe(AGENT_ACCENT_KEYS.length);
     });
+
+    // Chrome text that has to be READ (column labels, footer hints, strip
+    // counts) is drawn in `subtext`, because `overlay` falls under 4.5:1 on
+    // `base` in every built-in theme (2.3:1 in latte, 1.7:1 in nord). This
+    // pins the premise: subtext is never the dimmer of the two.
+    it("keeps subtext at least as legible on base as overlay", () => {
+      const { base, subtext, overlay } = palette.semantic;
+      expect(contrast(subtext, base)).toBeGreaterThan(contrast(overlay, base));
+    });
   },
 );
+
+/** WCAG 2 contrast ratio between two `#rrggbb` colors. */
+function contrast(a: string, b: string): number {
+  const luminance = (hex: string) => {
+    const [r, g, bl] = [1, 3, 5].map((i) => {
+      const v = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r! + 0.7152 * g! + 0.0722 * bl!;
+  };
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi! + 0.05) / (lo! + 0.05);
+}

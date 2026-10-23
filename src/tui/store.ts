@@ -2884,6 +2884,34 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       });
     },
 
+    /**
+     * Put the cursor on session `id`, but only onto a row the list draws. A
+     * session the scope, `f` or a search hides is left alone, and so is the
+     * selection: a cursor on a row nobody can see splits the highlight (which
+     * falls back to the first row) from the preview and the `x`/`r` targets
+     * (which read the selected id directly). One hidden only by a collapsed
+     * group has that group expanded first. Returns whether the cursor moved.
+     */
+    revealSession(id: string): boolean {
+      const drawn = () =>
+        flatItems().some(
+          (item) =>
+            item.type === "session" && item.filteredSession.session.id === id,
+        );
+      if (!drawn()) {
+        const session = state.sessions.find((s) => s.id === id);
+        if (!session || !filteredSessions().some((fs) => fs.session.id === id))
+          return false;
+        this.expandGroup(getGroupKey(session, state.groupBy));
+        if (!drawn()) return false;
+      }
+      batch(() => {
+        setState("selectedSessionId", id);
+        setSelectedHeaderKey(null);
+      });
+      return true;
+    },
+
     applyGroupOrder(newOrder: string[], groupKey: string, sessionId?: string) {
       const next = computePinnedFromOrder(
         newOrder,

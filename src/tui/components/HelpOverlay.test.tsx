@@ -225,6 +225,8 @@ describe("HelpOverlay sidebar mode", () => {
       expect(frame).not.toContain(desc);
     expect(frame).toContain("Collapse all groups");
     expect(frame).toContain("Kill or remove");
+    // `n`, which the footer teaches here too, from the same registry entry.
+    expect(frame).toContain("New session here");
   });
 
   it("shows scroll hint in close instruction", async () => {

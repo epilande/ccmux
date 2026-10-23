@@ -12,7 +12,13 @@ import { getStatusColor } from "./StatusBadge";
 import { getEffectiveStatus } from "../../daemon/status-machine";
 import { getMarkerKey } from "../../daemon/sessions";
 import { useStatusIcon } from "../utils/useStatusIcon";
-import { formatRelativeTime, formatVersion, shortenCwd } from "../utils/format";
+import {
+  displayWidth,
+  formatRelativeTime,
+  formatVersion,
+  shortenCwd,
+  truncateText,
+} from "../utils/format";
 import { theme } from "../theme";
 import { Text } from "./Text";
 
@@ -48,9 +54,14 @@ function staticSummaryParts(
 }
 
 /** Individual session row with animated status icon */
+/** Columns the detail line under a session's label is indented by. */
+const DETAIL_INDENT = 3;
+
 const SessionRow: Component<{
   session: EnrichedSession;
   iconStyle?: IconStyle;
+  /** Columns the row may draw in; its detail line truncates to fit. */
+  width: number;
 }> = (props) => {
   const effective = createMemo(() => getEffectiveStatus(props.session));
   const attentionState = () => props.session.attentionState;
@@ -103,8 +114,12 @@ const SessionRow: Component<{
       </box>
       <Show when={meta()}>
         {(m: () => string) => (
-          <box height={1} paddingLeft={3}>
-            <Text fg={theme.subtext}>{m()}</Text>
+          <box height={1} paddingLeft={DETAIL_INDENT}>
+            {/* A one-line box clips without a mark, so a long path is cut
+                here, where it can say so. */}
+            <Text fg={theme.subtext}>
+              {truncateText(m(), Math.max(1, props.width - DETAIL_INDENT))}
+            </Text>
           </box>
         )}
       </Show>
@@ -179,6 +194,8 @@ export function worktreeEntries(sessions: EnrichedSession[]): WorktreeEntry[] {
 const WorktreeRow: Component<{
   entry: WorktreeEntry;
   iconStyle?: IconStyle;
+  /** Columns the row may draw in; the branch truncates to fit. */
+  width: number;
 }> = (props) => {
   const effective = createMemo(() => getEffectiveStatus(props.entry.session));
   const icon = useStatusIcon(
@@ -188,6 +205,19 @@ const WorktreeRow: Component<{
     () => props.entry.session.attentionState,
   );
 
+  // What the icon, the name, the count and their gaps leave the branch.
+  const branchRoom = () =>
+    Math.max(
+      1,
+      props.width -
+        displayWidth(icon()) -
+        displayWidth(props.entry.name) -
+        (props.entry.count > 1
+          ? displayWidth(`×${props.entry.count}`) + 1
+          : 0) -
+        2,
+    );
+
   return (
     <box flexDirection="row" height={1} gap={1}>
       <Text fg={getStatusColor(effective().status, effective().attentionType)}>
@@ -195,7 +225,9 @@ const WorktreeRow: Component<{
       </Text>
       <Text fg={theme.text}>{props.entry.name}</Text>
       <Show when={props.entry.session.gitBranch}>
-        {(branch: () => string) => <Text fg={theme.blue}>{branch()}</Text>}
+        {(branch: () => string) => (
+          <Text fg={theme.blue}>{truncateText(branch(), branchRoom())}</Text>
+        )}
       </Show>
       <Show when={props.entry.count > 1}>
         <Text fg={theme.overlay}>{`×${props.entry.count}`}</Text>
@@ -209,6 +241,8 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   const separatorWidth = createMemo(() =>
     Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
   );
+  // Inside the border and padding, less the scrollbar the list may grow.
+  const rowWidth = () => Math.max(1, separatorWidth() - 1);
 
   // Derived in this component's reactive scope (not the flat-item memo) so a
   // subagent-driven status change re-renders only the preview header.
@@ -270,14 +304,22 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
               </Text>
               <For each={worktrees()}>
                 {(entry) => (
-                  <WorktreeRow entry={entry} iconStyle={props.iconStyle} />
+                  <WorktreeRow
+                    entry={entry}
+                    iconStyle={props.iconStyle}
+                    width={rowWidth()}
+                  />
                 )}
               </For>
             </box>
           </Show>
           <For each={props.sessions}>
             {(session) => (
-              <SessionRow session={session} iconStyle={props.iconStyle} />
+              <SessionRow
+                session={session}
+                iconStyle={props.iconStyle}
+                width={rowWidth()}
+              />
             )}
           </For>
         </box>

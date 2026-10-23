@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { GroupHeader } from "./GroupHeader";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { emptySummary, membersFromSummary } from "./test-helpers";
 import type { StatusSummary } from "../utils/grouping";
 
@@ -286,5 +288,19 @@ describe("GroupHeader", () => {
 
     expect(activateCalls).toBe(1);
     expect(contextMenuCalls).toBe(0);
+  });
+});
+
+describe("GroupHeader legibility", () => {
+  it("draws the collapse triangle and the count in subtext", async () => {
+    await renderHeader({ collapsed: true, label: "ccmux", count: 4 });
+    const spans = setup.captureSpans().lines.flatMap((l) => l.spans);
+    const subtext = RGBA.fromHex(theme.subtext).toInts();
+    expect(spans.find((s) => s.text.includes("▸"))?.fg.toInts()).toEqual(
+      subtext,
+    );
+    expect(spans.find((s) => s.text.includes("(4)"))?.fg.toInts()).toEqual(
+      subtext,
+    );
   });
 });
