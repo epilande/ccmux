@@ -1,7 +1,9 @@
 preload = ["@opentui/solid/preload"]
 
 [test]
-preload = ["@opentui/solid/preload"]
+# test-preload must run first: it isolates CCMUX_HOME before anything imports
+# lib/config. Listing it here replaces the top-level preload, hence the repeat.
+preload = ["./src/test-preload.ts", "@opentui/solid/preload"]
 
 [install]
 peer = false
