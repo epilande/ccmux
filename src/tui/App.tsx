@@ -1,4 +1,4 @@
-import { watch } from "fs";
+import { watch } from "chokidar";
 import {
   batch,
   on,
@@ -257,6 +257,44 @@ const SWITCH_REFUSAL_TOAST: Record<
   "no-client": { text: "Cannot switch: no tmux client found" },
   "switch-failed": { text: "Failed to switch: pane or client unavailable" },
 };
+
+/** Coalesce state-file updates; closing also cancels a pending reload. */
+export function watchStateFile(
+  file: string,
+  onChange: () => void,
+): () => Promise<void> {
+  let closed = false;
+  let debounce: Timer | undefined;
+  const scheduleReload = () => {
+    if (closed) return;
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      debounce = undefined;
+      onChange();
+    }, 200);
+  };
+
+  // setUIState uses temp + rename. Chokidar follows the replacement inode;
+  // a raw fs.watch stays attached to the old file after the first save.
+  const watcher = watch(file, {
+    persistent: false,
+    ignoreInitial: true,
+    atomic: true,
+  })
+    // Catch writes between the caller's initial read and watcher startup.
+    .on("ready", scheduleReload)
+    .on("add", scheduleReload)
+    .on("change", scheduleReload)
+    .on("error", () => {
+      // Local UI controls still work when the state path is unavailable.
+    });
+
+  return () => {
+    closed = true;
+    clearTimeout(debounce);
+    return watcher.close();
+  };
+}
 
 export function App(props: AppProps) {
   const renderer = useRenderer();
@@ -3434,22 +3472,17 @@ export function App(props: AppProps) {
   if (props.sidebar) {
     onMount(() => {
       let disposed = false;
-      let stateWatchDebounce: Timer | null = null;
       try {
-        const watcher = watch(STATE_FILE, { persistent: false }, () => {
-          if (stateWatchDebounce) clearTimeout(stateWatchDebounce);
-          stateWatchDebounce = setTimeout(async () => {
-            const freshState = await getUIState();
-            if (!disposed) store.actions.reloadUIState(freshState);
-          }, 200);
+        const stopWatching = watchStateFile(STATE_FILE, async () => {
+          const freshState = await getUIState();
+          if (!disposed) store.actions.reloadUIState(freshState);
         });
         onCleanup(() => {
           disposed = true;
-          watcher.close();
-          if (stateWatchDebounce) clearTimeout(stateWatchDebounce);
+          void stopWatching();
         });
       } catch {
-        // state.json may not exist yet; watcher will be set up on next launch
+        // Keep local controls usable if the watcher cannot be created.
       }
     });
   }
