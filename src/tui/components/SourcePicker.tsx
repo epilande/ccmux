@@ -89,8 +89,6 @@ export interface SourcePickerProps {
   memory?: ViewMemory;
   onRemember?: (memory: ViewMemory) => void;
   embedded?: boolean;
-  /** Whether `d`/`D` review is installed, for the footer's hint. */
-  reviewable?: boolean;
   /** A dialog opened from this view sits over it: the view stays, dimmed,
    *  so it is still the view the user is in. */
   dimmed?: boolean;
@@ -861,7 +859,6 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         view="start"
         width={contentWidth()}
         sidebar={props.compact}
-        reviewable={props.reviewable}
         note={note() ?? sourceNotice() ?? undefined}
         noteColor={note() ? theme.yellow : theme.subtext}
       />

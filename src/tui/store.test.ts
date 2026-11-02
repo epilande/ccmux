@@ -1,4 +1,12 @@
-import { describe, it, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
+import {
+  describe,
+  it,
+  expect,
+  mock,
+  beforeEach,
+  afterEach,
+  spyOn,
+} from "bun:test";
 import { createRoot } from "solid-js";
 import {
   getGroupKey,
@@ -932,6 +940,27 @@ describe("store", () => {
 
       store.actions.cycleGroupBy();
       expect(store.state.groupBy).toBe("project");
+    });
+
+    it("sets a grouping directly, and leaves the current one alone", async () => {
+      const persisted: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        onPersistState: (updates) => {
+          persisted.push(updates);
+        },
+      });
+      store.actions.setGroupBy("window");
+      expect(store.state.groupBy).toBe("window");
+      await new Promise((r) => setTimeout(r, 350));
+      expect(persisted).toContainEqual(
+        expect.objectContaining({ groupBy: "window" }),
+      );
+      // Choosing what is already on screen is not a reset: nothing is
+      // cleared, so nothing is written.
+      persisted.length = 0;
+      store.actions.setGroupBy("window");
+      await new Promise((r) => setTimeout(r, 350));
+      expect(persisted).toEqual([]);
     });
 
     it("should reset selection when cycling", () => {

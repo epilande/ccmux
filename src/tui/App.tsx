@@ -1,5 +1,13 @@
 import { ViewStrip } from "./components/ViewStrip";
-import { nextView, actionForKey, type View, type ViewMemory } from "./actions";
+import {
+  nextView,
+  actionForKey,
+  filterPalette,
+  keySequence,
+  paletteCommands,
+  type View,
+  type ViewMemory,
+} from "./actions";
 import { branchPR, createRepoFacts } from "./utils/repo-facts";
 import { watch } from "chokidar";
 import {
@@ -14,6 +22,7 @@ import {
   untrack,
 } from "solid-js";
 import { useKeyboard, useRenderer } from "@opentui/solid";
+import { parseKeypress } from "@opentui/core";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
 import type { TmuxSocketError } from "../types";
@@ -89,7 +98,7 @@ import {
 import { agentColorFor } from "./components/SessionItem";
 import { getAgentDisplayName } from "../lib/agents";
 import { applyTurnsKey } from "./turns-selection";
-import { renderTurns } from "../daemon/transcript-read";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
   failureNeedsAcknowledgement,
@@ -112,6 +121,12 @@ import {
 import { SourcePicker } from "./components/SourcePicker";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
+import {
+  CommandPalette,
+  paletteActiveIndex,
+} from "./components/CommandPalette";
+import { openInPager, type PagerDeps } from "./utils/pager";
+import { truncateMiddle } from "./utils/format";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
 import { theme } from "./theme";
 import type { IconStyle } from "../lib/icons";
@@ -122,6 +137,7 @@ import type {
   Preferences,
   ColumnHeaderMode,
 } from "../lib/preferences";
+import type { PaletteOnlyId } from "./actions";
 import {
   getGroupKey,
   isSyntheticGroupKey,
@@ -171,6 +187,9 @@ interface AppProps {
    * Fork action, which is otherwise hidden rather than offered-then-refused.
    */
   forkableAgents?: string[];
+  /** How "Open transcript" runs the pager. Explicit so tests never start a
+   *  real one; the default is `$PAGER`, then `less`. */
+  pager?: PagerDeps;
 }
 
 /** Message text for a rejected fetch/parse, for a toast. */
@@ -1117,7 +1136,8 @@ export function App(props: AppProps) {
       store.state.sourcePicker !== null ||
       store.state.notice !== null ||
       store.state.copyDialog !== null ||
-      store.state.handoffDialog !== null
+      store.state.handoffDialog !== null ||
+      store.state.palette !== null
     );
   }
 
@@ -1424,6 +1444,16 @@ export function App(props: AppProps) {
       : store.state.sourcePicker
         ? "start"
         : "sessions";
+  /** Whether a Worktrees or Start body owns the keyboard: not while help, a
+   *  confirmation, a dialog or the palette is over it, and not while its
+   *  preview is focused (App scrolls that). A disabled body also yields its
+   *  footer to App's, which shows the keys of whatever does own them. */
+  const panelOwnsKeys = () =>
+    !store.state.showHelp &&
+    !store.state.confirmMode &&
+    !store.state.newSession &&
+    !store.state.palette &&
+    !store.state.previewFocused;
   const repoFacts = createRepoFacts({
     connected: () => store.state.connectionState === "connected",
     sources: () => view() === "start",
@@ -1436,9 +1466,13 @@ export function App(props: AppProps) {
       worktreeModal() ||
       store.state.newSession ||
       store.state.confirmMode ||
-      store.state.showHelp
+      store.state.showHelp ||
+      store.state.palette
     )
       return;
+    // A focused preview belongs to the view it is in; the next view's
+    // preview starts unfocused (and a strip click is how one gets here).
+    store.actions.exitPreviewFocus();
     // The base scope: a `W`/`N` jump narrowed only the view it opened, and
     // leaving it for another view ends the jump.
     const scope = store.baseScope();
@@ -1474,9 +1508,154 @@ export function App(props: AppProps) {
     } else if (action?.id === "worktrees") store.actions.showWorktrees(repo);
     else if (action?.id === "start") store.actions.showSourcePicker(repo);
     else if (action?.id === "help") store.actions.toggleHelp();
+    else if (action?.id === "palette" && !props.sidebar)
+      store.actions.openPalette();
     else return false;
     event.preventDefault();
     return true;
+  }
+
+  /** What the open palette lists: the current view's commands, filtered. */
+  const paletteMatches = createMemo(() => {
+    const open = store.state.palette;
+    if (!open) return [];
+    return filterPalette(
+      paletteCommands(view(), {
+        sidebar: props.sidebar,
+        reviewable: reviewEnabled,
+      }),
+      open.query,
+    );
+  });
+
+  function movePaletteHighlight(delta: number) {
+    const matches = paletteMatches();
+    if (!matches.length) return;
+    const at = paletteActiveIndex(
+      matches,
+      store.state.palette?.highlight ?? null,
+    );
+    const next = (at + delta + matches.length) % matches.length;
+    store.actions.setPaletteHighlight(matches[next]!.command.id);
+  }
+
+  function runActivePaletteCommand() {
+    const open = store.state.palette;
+    const matches = paletteMatches();
+    // Nothing matches: Enter does nothing, so the query can be corrected.
+    if (!open || !matches.length) return;
+    runPaletteCommand(
+      matches[paletteActiveIndex(matches, open.highlight)]!.command.id,
+    );
+  }
+
+  /**
+   * Run a palette row. A keyed command presses its key: the palette closes
+   * first, so the replay meets the same routing a typed key does (a panel's
+   * own handler included), and it runs on the next microtask, after the
+   * Enter that chose it has finished its own dispatch. A palette row can
+   * therefore never do anything its key does not. Palette-only commands
+   * have no key and run here.
+   */
+  function runPaletteCommand(id: string) {
+    const command = paletteMatches().find((m) => m.command.id === id)?.command;
+    store.actions.closePalette();
+    if (!command) return;
+    const keys = command.keys;
+    if (keys) queueMicrotask(() => replayKeys(keys));
+    else if (command.id in paletteOnly)
+      paletteOnly[command.id as PaletteOnlyId]();
+  }
+
+  function replayKeys(keys: string) {
+    for (const raw of keySequence(keys)) {
+      const parsed = parseKeypress(raw);
+      if (parsed) renderer.keyInput.processParsedKey(parsed);
+    }
+  }
+
+  /** The palette-only commands. A `Record` over every id, so a command added
+   *  to `PALETTE_ONLY` without a runner here does not compile. */
+  const paletteOnly: Record<PaletteOnlyId, () => void> = {
+    "groupBy:project": () => store.actions.setGroupBy("project"),
+    "groupBy:cwd": () => store.actions.setGroupBy("cwd"),
+    "groupBy:session": () => store.actions.setGroupBy("session"),
+    "groupBy:window": () => store.actions.setGroupBy("window"),
+    "groupBy:none": () => store.actions.setGroupBy("none"),
+    copySessionId: () => void copySessionId(),
+    openTranscript: () => void openTranscript(),
+  };
+
+  /** The agent's own session id (what `claude --resume` takes), or ccmux's
+   *  where the agent has none. */
+  async function copySessionId() {
+    const session = store.selectedSession();
+    if (!session) {
+      store.actions.showToast("No session on this row");
+      return;
+    }
+    const id = session.nativeSessionId ?? session.id;
+    const result = await copyToClipboard(id, {
+      osc52: (payload) => renderer.copyToClipboardOSC52(payload),
+    });
+    // The toast caps at 40 columns and a UUID alone is 36.
+    store.actions.showToast(
+      result.ok
+        ? `Copied ${truncateMiddle(id, 32)}`
+        : "Copy failed: no clipboard available",
+      result.ok ? 2_500 : 4_000,
+    );
+  }
+
+  /**
+   * The selected session's last turns in a pager, read through the daemon's
+   * transcript endpoint (every built-in agent has a reader) and rendered the
+   * way `ccmux last` prints them. A pane capture is not a transcript, so an
+   * agent without a readable one gets a toast rather than a screen grab.
+   */
+  async function openTranscript() {
+    const session = store.selectedSession();
+    if (!session) {
+      store.actions.showToast("No session on this row");
+      return;
+    }
+    try {
+      const url = new URL(
+        `${getDaemonUrl()}/sessions/${session.id}/transcript`,
+      );
+      url.searchParams.set("turns", String(MAX_TURNS));
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await response.json()) as {
+        source?: string;
+        turns?: { role?: string; text?: string }[];
+        error?: string;
+      };
+      if (!response.ok) {
+        store.actions.showToast(
+          `No transcript: ${data.error ?? `HTTP ${response.status}`}`,
+          4_000,
+        );
+        return;
+      }
+      const turns = (data.turns ?? []).map((turn) => ({
+        role: turn.role === "user" ? ("user" as const) : ("assistant" as const),
+        text: turn.text ?? "",
+      }));
+      if (data.source !== "transcript" || !turns.some((t) => t.text.trim())) {
+        store.actions.showToast("No transcript to open yet", 3_000);
+        return;
+      }
+      const result = await openInPager(
+        renderer,
+        `${renderTurns(turns)}\n`,
+        props.pager,
+      );
+      if (!result.ok) store.actions.showToast(result.error, 4_000);
+    } catch {
+      store.actions.showToast("Transcript failed: daemon unreachable", 4_000);
+    }
   }
 
   function selectedRepoRoot(): string | null {
@@ -3691,6 +3870,22 @@ export function App(props: AppProps) {
       return;
     }
 
+    // The palette owns the keyboard while open. Only the keys that move,
+    // run and close are taken here; text keys are left undefaulted for its
+    // `<input>`, the way Start's filter is (and the panels, disabled while
+    // it is up, ignore them).
+    if (store.state.palette) {
+      if (key === "escape") store.actions.closePalette();
+      else if (key === "up" || (key === "p" && event.ctrl))
+        movePaletteHighlight(-1);
+      else if (key === "down" || (key === "n" && event.ctrl))
+        movePaletteHighlight(1);
+      else if (key === "return" || key === "enter") runActivePaletteCommand();
+      else if (key !== "tab") return;
+      event.preventDefault();
+      return;
+    }
+
     if (store.state.showHelp) {
       if (key === "?" || key === "q" || key === "escape") {
         store.actions.hideHelp();
@@ -4183,6 +4378,11 @@ export function App(props: AppProps) {
         event.preventDefault();
         break;
 
+      case ":":
+        store.actions.openPalette();
+        event.preventDefault();
+        break;
+
       case "q":
       case "escape":
         if (key === "escape" && props.sidebar) break;
@@ -4373,7 +4573,8 @@ export function App(props: AppProps) {
             handoffPickMode={store.state.handoffPick !== null}
             handoffDialogMode={store.state.handoffDialog !== null}
             copyDialogMode={store.state.copyDialog !== null}
-            reviewable={reviewEnabled}
+            paletteMode={store.state.palette !== null}
+            view={view()}
           />
         </Show>
 
@@ -4393,11 +4594,7 @@ export function App(props: AppProps) {
                 worktreeMemory = value;
               }}
               embedded={!props.sidebar}
-              enabled={
-                !store.state.showHelp &&
-                !store.state.confirmMode &&
-                !store.state.newSession
-              }
+              enabled={panelOwnsKeys()}
               onNavigate={navigateView}
               onScope={store.actions.setScope}
               onRefresh={refreshAll}
@@ -4436,7 +4633,6 @@ export function App(props: AppProps) {
               // the sidebar has neither the room nor the focus for — the same
               // reason its `d` key is inert on a session row.
               onReview={props.sidebar ? undefined : reviewWorktree}
-              reviewable={reviewEnabled && !props.sidebar}
               dimmed={store.state.newSession !== null}
             />
           )}
@@ -4458,11 +4654,7 @@ export function App(props: AppProps) {
                 sourceMemory = value;
               }}
               embedded={!props.sidebar}
-              enabled={
-                !store.state.showHelp &&
-                !store.state.confirmMode &&
-                !store.state.newSession
-              }
+              enabled={panelOwnsKeys()}
               onNavigate={navigateView}
               onScope={store.actions.setScope}
               onRefresh={refreshAll}
@@ -4498,7 +4690,6 @@ export function App(props: AppProps) {
                         }),
                       })
               }
-              reviewable={reviewEnabled && !props.sidebar}
               dimmed={store.state.newSession !== null}
               repo={picker().repo}
               cwd={pickerCwd()}
@@ -4639,6 +4830,19 @@ export function App(props: AppProps) {
               items={groupMenuItems()}
               highlight={cm().highlight}
               onClose={store.actions.hideGroupContextMenu}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.palette}>
+          {(open: () => NonNullable<typeof store.state.palette>) => (
+            <CommandPalette
+              query={open().query}
+              matches={paletteMatches()}
+              highlight={open().highlight}
+              onQuery={(query) => store.actions.setPaletteQuery(query)}
+              onSubmit={runActivePaletteCommand}
+              onRun={runPaletteCommand}
             />
           )}
         </Show>

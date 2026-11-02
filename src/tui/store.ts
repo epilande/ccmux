@@ -503,6 +503,13 @@ interface TUIState {
   previewFocused: boolean;
   showHelp: boolean;
   /**
+   * The open `:` palette, or null. `highlight` is a command id rather than a
+   * row number for the reason the row menu's is: the list is re-filtered
+   * under it on every keystroke, and by position the highlight would ride
+   * onto whatever command slid into its row.
+   */
+  palette: { query: string; highlight: string | null } | null;
+  /**
    * The repo the CURRENT view is narrowed to, or null for all repos. It is
    * the view's own: `W`/`N` narrow only the view they open (see
    * `baseScope`), and `s` changes it for every view.
@@ -1007,6 +1014,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
+    palette: null,
     scope: null,
     markedSessions: new Set<string>(),
     worktrees: null,
@@ -2642,7 +2650,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     cycleGroupBy() {
       const currentIdx = VALID_GROUP_BY.indexOf(state.groupBy);
       const nextIdx = (currentIdx + 1) % VALID_GROUP_BY.length;
-      const next = VALID_GROUP_BY[nextIdx];
+      this.setGroupBy(VALID_GROUP_BY[nextIdx]!);
+    },
+
+    /** Group by `next` directly (the palette's "Group by …" rows), with
+     *  exactly what a `b` press to it does: selection, collapse and pins are
+     *  keyed by the old grouping's names and are cleared with it. Choosing
+     *  the grouping already on screen is a no-op rather than a reset. */
+    setGroupBy(next: GroupBy) {
+      if (next === state.groupBy) return;
       batch(() => {
         setState("groupBy", next);
         setState("selectedSessionId", null);
@@ -2663,6 +2679,26 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     toggleHelp() {
       setState("showHelp", (show) => !show);
+    },
+
+    openPalette() {
+      if (options.sidebar) return;
+      setState("palette", { query: "", highlight: null });
+    },
+
+    closePalette() {
+      setState("palette", null);
+    },
+
+    setPaletteQuery(query: string) {
+      if (!state.palette) return;
+      // A new query re-ranks the list, so the highlight goes back to its top.
+      setState("palette", { query, highlight: null });
+    },
+
+    setPaletteHighlight(id: string | null) {
+      if (!state.palette) return;
+      setState("palette", "highlight", id);
     },
 
     hideHelp() {

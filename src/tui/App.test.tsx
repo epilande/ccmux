@@ -692,6 +692,157 @@ describe("App", () => {
     expect(frame).not.toContain("Select a session to preview");
   });
 
+  it("runs the palette's Toggle preview through the P key's own path", async () => {
+    await renderApp();
+    expect(setup.captureCharFrame()).not.toContain(
+      "Select a session to preview",
+    );
+
+    setup.mockInput.pressKey(":");
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Type a command");
+
+    for (const ch of "toggle pre") setup.mockInput.pressKey(ch);
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Toggle preview");
+    setup.mockInput.pressEnter();
+    // The palette closes first; the key it stands for is replayed on the
+    // next microtask, through the same keyboard handler a real `P` reaches.
+    await Promise.resolve();
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Select a session to preview");
+    expect(frame).not.toContain("Toggle preview");
+    // The same debounced write a `P` makes.
+    await Bun.sleep(350);
+    expect(uiStateWrites).toContainEqual({ showPreview: true });
+  });
+
+  describe("the : palette", () => {
+    const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+    const type = async (text: string) => {
+      for (const ch of text) setup.mockInput.pressKey(ch);
+      await setup.renderOnce();
+    };
+    const run = async (query: string) => {
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      await type(query);
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+    };
+    const oneSession = (overrides: Record<string, unknown> = {}) => {
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+            ...overrides,
+          }),
+        ],
+        null,
+      );
+    };
+
+    it("opens on : and closes on Esc without running anything", async () => {
+      await renderApp();
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Type a command");
+      expect(setup.captureCharFrame()).toContain("enter run");
+
+      deliverEscape(setup.renderer);
+      await settle(30);
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Type a command");
+      // Esc closed the palette; it did not also quit or go back.
+      expect(frame).toContain("Sessions (0)");
+    });
+
+    it("runs a palette-only command: Group by directory", async () => {
+      await renderApp(120, 20, { groupBy: "project" });
+      await run("group by dir");
+      await settle(350);
+      expect(uiStateWrites).toContainEqual(
+        expect.objectContaining({ groupBy: "cwd" }),
+      );
+    });
+
+    it("is not offered in the sidebar", async () => {
+      await renderApp(30, 20, { sidebar: true });
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Type a command");
+    });
+
+    it("copies the agent's own session id", async () => {
+      const copied: string[] = [];
+      const copySpy = spyOn(clipboard, "copyToClipboard").mockImplementation(
+        async (text: string) => {
+          copied.push(text);
+          return { ok: true, via: "command" };
+        },
+      );
+      try {
+        await renderApp(120, 20, { groupBy: "none" });
+        oneSession({ nativeSessionId: "native-123" });
+        await setup.renderOnce();
+        await run("copy session id");
+        expect(copied).toEqual(["native-123"]);
+      } finally {
+        copySpy.mockRestore();
+      }
+    });
+
+    it("pipes the session's rendered turns to the pager", async () => {
+      const original = globalThis.fetch;
+      const asked: string[] = [];
+      globalThis.fetch = (async (url: string | URL) => {
+        const href = String(url);
+        if (href.includes("/transcript")) {
+          asked.push(href);
+          return Response.json({
+            source: "transcript",
+            turns: [
+              { role: "user", text: "fix the bug" },
+              { role: "assistant", text: "fixed it" },
+            ],
+          });
+        }
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      const piped: { argv: string[]; text: string }[] = [];
+      try {
+        await renderApp(120, 20, {
+          groupBy: "none",
+          pager: {
+            env: {},
+            spawn: async (argv: string[], text: string) => {
+              piped.push({ argv, text });
+              return 0;
+            },
+          },
+        });
+        oneSession();
+        await setup.renderOnce();
+        await run("open transcript");
+        await settle(20);
+        expect(asked[0]).toContain("/sessions/s1/transcript");
+        expect(piped).toHaveLength(1);
+        expect(piped[0]!.argv).toEqual(["less", "+G"]);
+        expect(piped[0]!.text).toContain("fix the bug");
+        expect(piped[0]!.text).toContain("fixed it");
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  });
+
   it("updates session count in header after SSE init", async () => {
     await renderApp();
     expect(setup.captureCharFrame()).toContain("Sessions (0)");
@@ -10021,7 +10172,7 @@ describe("one footer across views", () => {
       for (const text of ["j/k nav", "h/l views", "s scope", "? help"])
         expect(sessions).toContain(text);
       expect(sessions).toContain("q quit");
-      for (const text of ["P preview", "r restart", "x kill"])
+      for (const text of [": more", "r restart", "x kill"])
         expect(sessions).toContain(text);
       setup.mockInput.pressKey("l");
       const worktrees = await footer();

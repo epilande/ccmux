@@ -150,8 +150,6 @@ interface WorktreesPanelProps {
   }) => void;
   /** Explicit so tests cannot launch a browser or write the real clipboard. */
   effects: PanelEffects;
-  /** Whether `d`/`D` review is installed, for the footer's hint. */
-  reviewable?: boolean;
   /** A dialog opened from this view sits over it: the view stays, dimmed,
    *  so it is still the view the user is in. */
   dimmed?: boolean;
@@ -1417,7 +1415,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               view="worktrees"
               width={width()}
               sidebar={props.compact}
-              reviewable={props.reviewable}
               note={footerNote()}
               noteColor={note() || scanError() ? theme.yellow : theme.subtext}
             />
@@ -1434,7 +1431,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                   <HintLine
                     view="worktrees"
                     width={width()}
-                    reviewable={props.reviewable}
                     note={footerNote()}
                     noteColor={
                       note() || scanError() ? theme.yellow : theme.subtext
