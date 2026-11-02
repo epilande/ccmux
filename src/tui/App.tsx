@@ -2547,7 +2547,7 @@ export function App(props: AppProps) {
       },
       {
         id: "rename",
-        label: "Rename Group",
+        label: "Rename group",
         hint: "e",
         color: theme.text,
         action: groupContextMenuRename,
@@ -2557,7 +2557,7 @@ export function App(props: AppProps) {
         ? [
             {
               id: "reset-name",
-              label: "Reset Name",
+              label: "Reset name",
               hint: "",
               color: theme.text,
               action: groupContextMenuResetName,

@@ -10646,12 +10646,12 @@ describe("App group rename and merge (#42)", () => {
   });
 
   describe("from the group menu", () => {
-    it("offers Rename Group, and Reset Name only on a renamed group", async () => {
+    it("offers Rename group, and Reset name only on a renamed group", async () => {
       await twoGroups();
       await press("m");
       let frame = setup.captureCharFrame();
-      expect(frame).toContain("Rename Group");
-      expect(frame).not.toContain("Reset Name");
+      expect(frame).toContain("Rename group");
+      expect(frame).not.toContain("Reset name");
       await press("m");
 
       await press("e");
@@ -10660,14 +10660,14 @@ describe("App group rename and merge (#42)", () => {
       await enter();
       await press("m");
       frame = setup.captureCharFrame();
-      expect(frame).toContain("Rename Group");
-      expect(frame).toContain("Reset Name");
+      expect(frame).toContain("Rename group");
+      expect(frame).toContain("Reset name");
     });
 
-    it("opens the prompt from Rename Group", async () => {
+    it("opens the prompt from Rename group", async () => {
       await twoGroups();
       await press("m");
-      // Collapse, New session, then Rename Group.
+      // Collapse, New session, then Rename group.
       await press("j");
       await press("j");
       await enter();
