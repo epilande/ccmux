@@ -139,16 +139,55 @@ const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
  * means a name can never collide with a synthetic header key.
  */
 export function sanitizeGroupName(name: string): string {
-  return sliceToWidth(
-    name.replace(CONTROL_CHARS, "").trim(),
-    GROUP_NAME_MAX_WIDTH,
-  ).trimEnd();
+  return sliceToWidth(cleanGroupName(name), GROUP_NAME_MAX_WIDTH).trimEnd();
+}
+
+/** {@link sanitizeGroupName} without the width cap: what a name says before
+ *  it is cut to fit, for matching it against keys that are longer. */
+function cleanGroupName(name: string): string {
+  return name.replace(CONTROL_CHARS, "").trim();
+}
+
+/** What a group's header says: a name the user typed is its own label, and
+ *  only a derived key gets the mode's formatting (a cwd key's
+ *  home-shortening). */
+function groupLabelOf(
+  key: string,
+  rawKeys: readonly string[],
+  groupBy: GroupBy,
+): string {
+  return rawKeys.includes(key) ? getGroupLabel(key, groupBy) : key;
+}
+
+/**
+ * The group key a typed name means. A name that is an existing group's key,
+ * or (when only one group shows it) an existing group's displayed label,
+ * means that group, so typing what a header says merges into it even where
+ * the label is not the key (cwd's `~/Code/beta` for `/home/me/Code/beta`).
+ * Both matches run before the width cap, so a full path past it still finds
+ * its group. Anything else is a new name, under {@link sanitizeGroupName}.
+ * Empty means no name.
+ */
+export function resolveGroupName(
+  typed: string,
+  groups: readonly AliasedGroupEntry[],
+  groupBy: GroupBy,
+): string {
+  const clean = cleanGroupName(typed);
+  if (!clean) return "";
+  if (groups.some((group) => group.key === clean)) return clean;
+  const shown = groups.filter(
+    (group) => groupLabelOf(group.key, group.rawKeys, groupBy) === clean,
+  );
+  return shown.length === 1 ? shown[0]!.key : sanitizeGroupName(clean);
 }
 
 /**
  * `groupAliases` as read from disk, reduced to what the fold can trust: known
- * modes, string-to-string entries, names that are already sanitized and are
- * not a no-op (a name equal to its raw key is no alias). Entries are copied
+ * modes, string-to-string entries, names stripped of control characters and
+ * trimmed, and no no-ops (a name equal to its raw key is no alias). Not
+ * width-capped: a merge into a group whose raw key is a long path writes
+ * that path as the name, and a cap here would cut it off its group. Entries are copied
  * with `Object.fromEntries`, so a raw key spelled `__proto__` stays data.
  */
 export function normalizeGroupAliases(input: unknown): GroupAliases {
@@ -160,7 +199,7 @@ export function normalizeGroupAliases(input: unknown): GroupAliases {
     if (!map || typeof map !== "object" || Array.isArray(map)) continue;
     const entries = Object.entries(map).flatMap(([raw, value]) => {
       if (typeof value !== "string") return [];
-      const name = sanitizeGroupName(value);
+      const name = cleanGroupName(value);
       return name && name !== raw ? [[raw, name] as const] : [];
     });
     if (entries.length) out[mode] = Object.fromEntries(entries);
@@ -497,9 +536,7 @@ export function buildFlatItems(
     items.push({
       type: "header",
       groupKey: key,
-      // A name the user typed is its own label; only a derived key gets the
-      // mode's formatting (a cwd key's home-shortening).
-      label: rawKeys.includes(key) ? getGroupLabel(key, groupBy) : key,
+      label: groupLabelOf(key, rawKeys, groupBy),
       count: members.length,
       collapsed: isCollapsed,
       members,

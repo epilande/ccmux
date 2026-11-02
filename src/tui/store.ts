@@ -57,7 +57,7 @@ import {
   groupKeyOf,
   groupSessions,
   normalizeGroupAliases,
-  sanitizeGroupName,
+  resolveGroupName,
   sortGroups,
   VALID_GROUP_BY,
   DEFAULT_GROUP_BY,
@@ -520,7 +520,7 @@ interface TUIState {
      *  then the name being typed, prefilled with `label`, and there is no
      *  command list. One modal slot for both, so the prompt is a modal
      *  everywhere the palette already is. */
-    rename?: { groupKey: string; label: string };
+    rename?: { groupKey: string; label: string; groupBy: GroupBy };
   } | null;
   /**
    * The repo the CURRENT view is narrowed to, or null for all repos. It is
@@ -766,6 +766,12 @@ function computePinnedFromOrder(
 
   // Pin everything from the start up to and including desiredIdx
   return cleaned.slice(0, desiredIdx + 1);
+}
+
+/** A selected header as {@link followGroupSelection} needs it. */
+interface HeaderSnapshot {
+  key: string;
+  rawKeys: string[];
 }
 
 /** `aliases` with mode `mode`'s map replaced by `entries` (dropped when
@@ -1690,15 +1696,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     );
   }
 
-  /** The raw keys behind the selected header, so a change of names can put
-   *  the cursor back on whichever group they fold into now. */
-  function selectedHeaderRawKeys(): string[] | null {
-    const key = selectedHeaderKey();
-    if (!key) return null;
-    const header = flatItems().find(
-      (item) => item.type === "header" && item.groupKey === key,
-    );
-    return header?.type === "header" ? (header.rawKeys ?? null) : null;
+  /**
+   * The header the cursor is on and the raw keys behind it, so a change of
+   * names can put the cursor back on whichever group they fold into now.
+   * Read through `selectedFlatItem`, not `selectedHeaderKey`: with nothing
+   * chosen yet the cursor sits on the first row by fallback, and a rename
+   * that re-sorts that header must still take the cursor with it.
+   */
+  function selectedHeaderSnapshot(): HeaderSnapshot | null {
+    const item = selectedFlatItem();
+    return item?.type === "header" && item.rawKeys
+      ? { key: item.groupKey, rawKeys: item.rawKeys }
+      : null;
   }
 
   /**
@@ -1707,17 +1716,18 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    * in display order, for a reset that split it), and a selected row a merge
    * tucked into a collapsed group gives way to that group's header.
    */
-  function followGroupSelection(rawKeys: string[] | null) {
+  function followGroupSelection(before: HeaderSnapshot | null) {
     const items = flatItems();
     const headers = items.filter(
       (item): item is Extract<FlatItem, { type: "header" }> =>
         item.type === "header",
     );
-    if (rawKeys) {
-      const current = selectedHeaderKey();
+    if (before) {
       const holds = (header: (typeof headers)[number]) =>
-        header.rawKeys?.some((raw) => rawKeys.includes(raw)) ?? false;
-      if (!headers.some((h) => h.groupKey === current && holds(h)))
+        header.rawKeys?.some((raw) => before.rawKeys.includes(raw)) ?? false;
+      // Still there under the same name: leave the selection as it was (an
+      // implicit first-row cursor stays implicit).
+      if (!headers.some((h) => h.groupKey === before.key && holds(h)))
         setSelectedHeaderKey(headers.find(holds)?.groupKey ?? null);
     }
     const id = state.selectedSessionId;
@@ -1748,7 +1758,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     pinned: string[],
     collapsed: Set<string>,
   ) {
-    const follow = selectedHeaderRawKeys();
+    const follow = selectedHeaderSnapshot();
     batch(() => {
       setGroupAliases(aliases);
       setPinnedGroups(pinned);
@@ -2988,15 +2998,22 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     /**
-     * Take another instance's writes from `state.json`. A key this instance
-     * still has queued is skipped: the file is older than that change, and
-     * applying it would undo a keypress until the queued write lands. An
-     * unchanged value is skipped too, so the daemon's own writes to the file
-     * do not rebuild the list.
+     * Take another instance's writes from `state.json`. Every key this
+     * instance still has queued in the 300ms debounce is skipped: the file
+     * is older than that keypress, and applying it would undo a `b`, `f`,
+     * `p`, pin or collapse until the queued write lands. An unchanged value
+     * is skipped too, so the daemon's own writes to the file do not rebuild
+     * the list.
+     *
+     * Writes flushed at once (group names with their layout, the last
+     * spawned agent) are never queued, so that guard never applies to them.
+     * What keeps them is the watcher: this instance's own write is a change
+     * to the file, which re-arms its 200ms debounce, so the reload that
+     * follows reads the file with the write in it.
      */
     reloadUIState(freshState: UIState) {
       const queued = (key: keyof UIState) => Object.hasOwn(pendingUpdates, key);
-      const follow = selectedHeaderRawKeys();
+      const follow = selectedHeaderSnapshot();
       batch(() => {
         const collapsed = freshState.collapsedGroups;
         if (
@@ -3011,10 +3028,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           if (JSON.stringify(aliases) !== JSON.stringify(groupAliases()))
             setGroupAliases(aliases);
         }
-        if (freshState.groupBy !== undefined) {
+        if (freshState.groupBy !== undefined && !queued("groupBy")) {
           setState("groupBy", freshState.groupBy);
         }
-        if (freshState.hideIdle !== undefined) {
+        if (freshState.hideIdle !== undefined && !queued("hideIdle")) {
           setState("hideIdle", freshState.hideIdle);
         }
         // Only an explicit `promptDisplay` (written by the `p` key) syncs across
@@ -3022,7 +3039,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // default are resolved once at launch (picker.ts / sidebar.ts); re-running
         // the migration on reload without the config default would let a stale
         // `showPrompt: false` clobber a newer config `promptDisplay`.
-        if (freshState.promptDisplay !== undefined) {
+        if (
+          freshState.promptDisplay !== undefined &&
+          !queued("promptDisplay")
+        ) {
           setState("promptDisplay", freshState.promptDisplay);
         }
         const pinned = freshState.pinnedGroups;
@@ -3034,7 +3054,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         ) {
           setPinnedGroups(pinned);
         }
-        if (freshState.lastSpawnAgent !== undefined) {
+        if (
+          freshState.lastSpawnAgent !== undefined &&
+          !queued("lastSpawnAgent")
+        ) {
           setState("lastSpawnAgent", freshState.lastSpawnAgent);
         }
       });
@@ -3052,15 +3075,17 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     renameGroup(key: string, rawName: string) {
       const mode = state.groupBy;
       if (mode === "none" || !key || isSyntheticGroupKey(key)) return;
-      const name = sanitizeGroupName(rawName);
-      if (!name || name === key) return;
       const aliases = groupAliases();
+      const groups = boardGroups(aliases);
+      // A name an existing header shows (its key, or its label where those
+      // differ, as cwd's home-shortened paths do) means that group.
+      const name = resolveGroupName(rawName, groups, mode);
+      if (!name || name === key) return;
       const map = aliases[mode] ?? {};
       const members = new Set(
         Object.keys(map).filter((raw) => map[raw] === key),
       );
-      for (const raw of boardGroups(aliases).find((g) => g.key === key)
-        ?.rawKeys ?? [])
+      for (const raw of groups.find((g) => g.key === key)?.rawKeys ?? [])
         members.add(raw);
       if (members.size === 0) members.add(key);
       const entries = Object.entries(map).filter(([raw]) => !members.has(raw));
@@ -3079,7 +3104,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           : spliceKey(pinnedGroups(), key, [name]),
         collapsed,
       );
-      const shown = truncateText(name, 28);
+      // Named the way its header now reads (a merged cwd group's label, not
+      // its raw path), cut so the message fits the toast's 36 columns.
+      const header = flatItems().find(
+        (item) => item.type === "header" && item.groupKey === name,
+      );
+      const shown = truncateText(
+        header?.type === "header" ? header.label : name,
+        24,
+      );
       actions.showToast(
         merging ? `Merged into ${shown}` : `Renamed to ${shown}`,
       );
@@ -3137,7 +3170,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("palette", {
         query: label,
         highlight: null,
-        rename: { groupKey: key, label },
+        rename: { groupKey: key, label, groupBy: state.groupBy },
       });
     },
 
@@ -3146,16 +3179,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     commitRenamePrompt() {
       const open = state.palette;
       if (!open?.rename) return;
-      const { groupKey: key, label } = open.rename;
+      const { groupKey: key, label, groupBy } = open.rename;
       const query = open.query;
       setState("palette", null);
-      // Untouched is compared before sanitizing: a label wider than a name
-      // may be (a deep cwd key) would otherwise come back truncated, look
-      // edited, and alias the key to a cut copy of itself.
+      // Untouched is no rename. Compared on the raw text: a label wider than
+      // a name may be (a deep cwd key) would come back from the name rules
+      // truncated, look edited, and alias the key to a cut copy of itself.
       if (query === label) return;
-      const name = sanitizeGroupName(query);
-      if (!name || name === label) return;
-      actions.renameGroup(key, name);
+      // Another instance changed the grouping while the prompt was up (the
+      // state watcher applied it). The key belongs to the old mode's
+      // namespace, so writing it now would name an unrelated group.
+      if (groupBy !== state.groupBy) {
+        actions.showToast("Grouping changed; rename cancelled", 3_000);
+        return;
+      }
+      // Uncapped: renameGroup matches it against existing keys and labels
+      // (a full path past the cap still merges) before the name rules.
+      actions.renameGroup(key, query);
     },
 
     toggleGroupCollapse(key: string) {

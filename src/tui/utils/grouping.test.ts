@@ -11,6 +11,7 @@ import {
   sortGroups,
   groupSessions,
   normalizeGroupAliases,
+  resolveGroupName,
   sanitizeGroupName,
   GROUP_NAME_MAX_WIDTH,
   NEEDS_YOU_GROUP_KEY,
@@ -1292,5 +1293,59 @@ describe("normalizeGroupAliases", () => {
     expect(
       groupKeyOf(mockSession({ project: "__proto__" }), "project", result),
     ).toBe("Weird");
+  });
+});
+
+describe("resolveGroupName", () => {
+  const home = process.env.HOME ?? "/home/user";
+  const groups = (...keys: string[]) =>
+    groupSessions(
+      keys.map((k, i) => toFiltered(mockSession({ id: `s${i}`, paneCwd: k }))),
+      "cwd",
+      {},
+    );
+
+  it("resolves a displayed label to the group's key", () => {
+    const beta = `${home}/Code/beta`;
+    expect(
+      resolveGroupName(getGroupLabel(beta, "cwd"), groups(beta), "cwd"),
+    ).toBe(beta);
+  });
+
+  it("matches a key past the width cap before cutting it", () => {
+    const long = `/srv/${"nested-directory/".repeat(5)}beta`;
+    expect(resolveGroupName(` ${long} `, groups(long), "cwd")).toBe(long);
+    expect(resolveGroupName(long, groups(), "cwd")).toBe(
+      sanitizeGroupName(long),
+    );
+  });
+
+  it("prefers the group whose key is the name over one that only shows it", () => {
+    // `/srv/x` was already named after beta's shortened label (what this
+    // fix stops new renames from doing): the name's own group wins.
+    const beta = `${home}/Code/beta`;
+    const shown = getGroupLabel(beta, "cwd");
+    const twins = groupSessions(
+      [
+        toFiltered(mockSession({ id: "a", paneCwd: beta })),
+        toFiltered(mockSession({ id: "b", paneCwd: "/srv/x" })),
+      ],
+      "cwd",
+      { cwd: { "/srv/x": shown } },
+    );
+    expect(resolveGroupName(shown, twins, "cwd")).toBe(shown);
+  });
+
+  it("is empty for a blank name", () => {
+    expect(resolveGroupName("  \0 ", groups("/a"), "cwd")).toBe("");
+  });
+});
+
+describe("normalizeGroupAliases width", () => {
+  it("keeps a merge target past the name cap whole", () => {
+    const long = `/srv/${"nested-directory/".repeat(5)}beta`;
+    expect(normalizeGroupAliases({ cwd: { "/a": long } })).toEqual({
+      cwd: { "/a": long },
+    });
   });
 });

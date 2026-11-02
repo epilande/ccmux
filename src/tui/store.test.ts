@@ -5432,6 +5432,90 @@ describe("group rename and merge (#42)", () => {
     expect(store.selectedGroupHeader()?.groupKey).toBe("Backend");
   });
 
+  it("follows a header selected only by the first-row fallback", () => {
+    const { store } = setup();
+    // No explicit selection: the cursor is on the first header, alpha.
+    expect(store.selectedGroupHeader()?.groupKey).toBe("alpha");
+    store.actions.renameGroup("alpha", "Zed");
+    // Zed now sorts last; the cursor goes with it rather than staying on
+    // whatever took row 0.
+    expect(store.selectedGroupHeader()?.groupKey).toBe("Zed");
+  });
+
+  describe("cwd grouping, whose labels are home-shortened", () => {
+    const home = process.env.HOME ?? "/home/user";
+    const alpha = `${home}/Code/alpha`;
+    const beta = `${home}/Code/beta`;
+
+    function cwdSetup(sessions: { id: string; paneCwd: string }[]) {
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "cwd",
+        collapsedGroups: [sessions[1]!.paneCwd],
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+      });
+      store.actions.setSessions(
+        sessions.map((s) => createMockSession({ ...s, project: "p" })),
+      );
+      return { store, writes };
+    }
+
+    it("merges into a group named by its displayed label", () => {
+      const { store } = cwdSetup([
+        { id: "a", paneCwd: alpha },
+        { id: "b", paneCwd: beta },
+      ]);
+      const target = headersOf(store.flatItems()).find(
+        (h) => h.groupKey === beta,
+      )!;
+      expect(target.label).not.toBe(beta);
+      store.actions.renameGroup(alpha, target.label);
+      const headers = headersOf(store.flatItems());
+      expect(headers).toHaveLength(1);
+      expect(headers[0]!.groupKey).toBe(beta);
+      expect(headers[0]!.rawKeys).toEqual([alpha, beta]);
+      // The target's layout wins, as in any merge.
+      expect(store.collapsedGroups().has(beta)).toBe(true);
+      expect(store.groupAliases()).toEqual({ cwd: { [alpha]: beta } });
+      // The toast names the group the way its header does.
+      expect(store.state.toastMessage).toBe(`Merged into ${target.label}`);
+    });
+
+    it("keeps the toast to one line for a long name", () => {
+      const { store } = cwdSetup([
+        { id: "a", paneCwd: alpha },
+        { id: "b", paneCwd: beta },
+      ]);
+      store.actions.renameGroup(alpha, "x".repeat(60));
+      // The toast's box is 40 columns, 36 inside its border and padding.
+      expect(store.state.toastMessage!.length).toBeLessThanOrEqual(36);
+    });
+
+    it("merges from the prompt into a group named by its full path past the name cap", () => {
+      const deep = (leaf: string) =>
+        `/srv/${"nested-directory/".repeat(5)}${leaf}`;
+      const { store } = cwdSetup([
+        { id: "a", paneCwd: deep("alpha") },
+        { id: "b", paneCwd: deep("beta") },
+      ]);
+      expect(deep("beta").length).toBeGreaterThan(64);
+      store.actions.openRenamePrompt(deep("alpha"));
+      store.actions.setPaletteQuery(deep("beta"));
+      store.actions.commitRenamePrompt();
+      const headers = headersOf(store.flatItems());
+      expect(headers).toHaveLength(1);
+      expect(headers[0]!.rawKeys).toEqual([deep("alpha"), deep("beta")]);
+      // The merge survives a reload of what was written.
+      store.actions.reloadUIState({ groupAliases: {} });
+      store.actions.reloadUIState({
+        groupAliases: { cwd: { [deep("alpha")]: deep("beta") } },
+      });
+      expect(headersOf(store.flatItems())).toHaveLength(1);
+    });
+  });
+
   it("rewrites every member's entry when a merged group is renamed", () => {
     const { store } = setup({
       groupAliases: { project: { alpha: "X", beta: "X" } },
@@ -5617,6 +5701,25 @@ describe("group rename and merge (#42)", () => {
       expect(store.selectedHeaderKey()).toBe("Backend");
     });
 
+    it("does not revert a b, f or p press still waiting to be written", () => {
+      const { store } = setup();
+      store.actions.cycleGroupBy(); // project -> cwd
+      store.actions.toggleHideIdle(); // false -> true
+      const prompt = store.state.promptDisplay;
+      store.actions.cyclePrompt();
+      const cycled = store.state.promptDisplay;
+      expect(cycled).not.toBe(prompt);
+      // An older file lands (the daemon's write, say) before the debounce.
+      store.actions.reloadUIState({
+        groupBy: "project",
+        hideIdle: false,
+        promptDisplay: prompt,
+      });
+      expect(store.state.groupBy).toBe("cwd");
+      expect(store.state.hideIdle).toBe(true);
+      expect(store.state.promptDisplay).toBe(cycled);
+    });
+
     it("does not revert a local change still waiting to be written", () => {
       const { store } = setup();
       store.actions.toggleGroupCollapse("alpha");
@@ -5635,8 +5738,21 @@ describe("group rename and merge (#42)", () => {
       expect(store.state.palette).toEqual({
         query: "Backend",
         highlight: null,
-        rename: { groupKey: "Backend", label: "Backend" },
+        rename: { groupKey: "Backend", label: "Backend", groupBy: "project" },
       });
+    });
+
+    it("cancels when another instance changed the grouping under it", () => {
+      const { store, writes } = setup();
+      store.actions.openRenamePrompt("beta");
+      // The watcher applies another picker's `b` while the prompt is up.
+      store.actions.reloadUIState({ groupBy: "session" });
+      store.actions.setPaletteQuery("Backend");
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({});
+      expect(writes.some((w) => "groupAliases" in w)).toBe(false);
+      expect(store.state.toastMessage).toContain("Grouping changed");
     });
 
     it("opens in the sidebar, where the command palette does not", () => {
