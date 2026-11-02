@@ -125,6 +125,35 @@ export interface AliasedGroupEntry extends GroupEntry {
  */
 export type GroupAliases = NonNullable<UIState["groupAliases"]>;
 
+/** Merged-away groups' own layouts, per mode (UIState `groupLayouts`). */
+export type GroupLayouts = NonNullable<UIState["groupLayouts"]>;
+
+/**
+ * `groupLayouts` as read from disk: known modes, entries shaped like a
+ * layout (a non-negative integer pin or null, a boolean collapse), copied
+ * with `Object.fromEntries` so a `__proto__` key stays data.
+ */
+export function normalizeGroupLayouts(input: unknown): GroupLayouts {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const out: GroupLayouts = {};
+  for (const mode of VALID_GROUP_BY) {
+    if (mode === "none" || !Object.hasOwn(input, mode)) continue;
+    const map = (input as Record<string, unknown>)[mode];
+    if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+    const entries = Object.entries(map).flatMap(([raw, value]) => {
+      if (!value || typeof value !== "object") return [];
+      const { pin, collapsed } = value as Record<string, unknown>;
+      const pinOk =
+        pin === null || (Number.isInteger(pin) && (pin as number) >= 0);
+      return pinOk && typeof collapsed === "boolean"
+        ? [[raw, { pin: pin as number | null, collapsed }] as const]
+        : [];
+    });
+    if (entries.length) out[mode] = Object.fromEntries(entries);
+  }
+  return out;
+}
+
 /** The widest a group name may be, in terminal columns. */
 export const GROUP_NAME_MAX_WIDTH = 64;
 

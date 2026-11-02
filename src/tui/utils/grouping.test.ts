@@ -11,6 +11,7 @@ import {
   sortGroups,
   groupSessions,
   normalizeGroupAliases,
+  normalizeGroupLayouts,
   resolveGroupName,
   sanitizeGroupName,
   GROUP_NAME_MAX_WIDTH,
@@ -1347,5 +1348,34 @@ describe("normalizeGroupAliases width", () => {
     expect(normalizeGroupAliases({ cwd: { "/a": long } })).toEqual({
       cwd: { "/a": long },
     });
+  });
+});
+
+describe("normalizeGroupLayouts", () => {
+  it("keeps layout-shaped entries for known modes", () => {
+    expect(
+      normalizeGroupLayouts({
+        project: {
+          a: { pin: 0, collapsed: false },
+          b: { pin: null, collapsed: true },
+          c: { pin: -1, collapsed: true },
+          d: { pin: 1.5, collapsed: false },
+          e: { pin: 0, collapsed: "yes" },
+          f: "nope",
+        },
+        none: { x: { pin: 0, collapsed: false } },
+        bogus: { y: { pin: 0, collapsed: false } },
+      }),
+    ).toEqual({
+      project: {
+        a: { pin: 0, collapsed: false },
+        b: { pin: null, collapsed: true },
+      },
+    });
+  });
+
+  it("is empty for anything that is not an object", () => {
+    expect(normalizeGroupLayouts(undefined)).toEqual({});
+    expect(normalizeGroupLayouts([])).toEqual({});
   });
 });

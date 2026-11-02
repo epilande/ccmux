@@ -25,10 +25,21 @@ export interface UIState {
    *  (`{ project: { "px-api": "ProjectX" } }`). Always written whole, since
    *  `setUIState` merges only the top level, and never pruned for liveness. */
   groupAliases?: Partial<Record<GroupBy, Record<string, string>>>;
+  /** Per mode, the layout each raw key had of its own when it was merged into
+   *  another group, so a reset can give it back. Cleared with the alias, and
+   *  written whole beside `groupAliases`. */
+  groupLayouts?: Partial<Record<GroupBy, Record<string, GroupLayout>>>;
   /** Agent last spawned from the picker's new-session dialog. Persisted
    *  because the one-shot picker exits as soon as it spawns, so the
    *  "last agent" default only survives on disk. */
   lastSpawnAgent?: string;
+}
+
+/** A merged-away group's own layout: its index in `pinnedGroups` (null when
+ *  unpinned) and whether it was collapsed. */
+export interface GroupLayout {
+  pin: number | null;
+  collapsed: boolean;
 }
 
 /**

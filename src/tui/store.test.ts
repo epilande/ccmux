@@ -5376,6 +5376,8 @@ describe("group rename and merge (#42)", () => {
         session: { dev: "Development" },
         project: { beta: "Backend" },
       },
+      // A plain rename records no layout to restore: the layout moved with it.
+      groupLayouts: {},
       pinnedGroups: ["Backend"],
       collapsedGroups: [],
     });
@@ -5567,7 +5569,9 @@ describe("group rename and merge (#42)", () => {
     expect(writes).toEqual([]);
   });
 
-  it("resets a merged group back into its raw groups, copying the layout to each", () => {
+  it("resets a merge with no recorded layouts by copying the group's layout to each", () => {
+    // Aliases saved before layouts were recorded: every key carried the
+    // group's layout here, so each takes it back.
     const { store, writes } = setup({
       groupAliases: { project: { alpha: "X", beta: "X" } },
       pinnedGroups: ["gamma", "X"],
@@ -5588,8 +5592,162 @@ describe("group rename and merge (#42)", () => {
     expect(store.toastFit()?.(36)).toBe(resetToast(["alpha", "beta"], 36));
     expect(writes.at(-1)).toEqual({
       groupAliases: {},
+      groupLayouts: {},
       pinnedGroups: ["gamma", "alpha", "beta"],
       collapsedGroups: ["alpha", "beta"],
+    });
+  });
+
+  describe("reset restores each source's own layout", () => {
+    /** ccmux, dotfiles and x, with dotfiles pinned to the top and ccmux
+     *  pinned to the bottom (which pins everything above it) and collapsed:
+     *  the layout TUI Test merged dotfiles out of. */
+    function pinnedSetup(options: Parameters<typeof createTUIStore>[0] = {}) {
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["dotfiles", "x", "ccmux"],
+        collapsedGroups: ["ccmux"],
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+        ...options,
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "c", project: "ccmux" }),
+        createMockSession({ id: "d", project: "dotfiles" }),
+        createMockSession({ id: "x", project: "x" }),
+      ]);
+      return { store, writes };
+    }
+    const order = (store: ReturnType<typeof createTUIStore>) =>
+      headersOf(store.flatItems()).map((h) => h.groupKey);
+
+    it("gives a merged-away group back its pin and collapse, and the target keeps its own", () => {
+      const { store, writes } = pinnedSetup();
+      store.actions.renameGroup("dotfiles", "ccmux");
+      expect(order(store)).toEqual(["x", "ccmux"]);
+      // The merge recorded dotfiles' own layout, whole, beside the aliases.
+      expect(writes.at(-1)).toMatchObject({
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: { project: { dotfiles: { pin: 0, collapsed: false } } },
+      });
+
+      store.actions.resetGroupName("ccmux");
+      expect(order(store)).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(false);
+      expect(store.collapsedGroups().has("ccmux")).toBe(true);
+      // The snapshot is spent: cleared with the alias, in the same write.
+      expect(store.groupLayouts()).toEqual({});
+      expect(writes.at(-1)).toMatchObject({
+        groupAliases: {},
+        groupLayouts: {},
+        pinnedGroups: ["dotfiles", "x", "ccmux"],
+        collapsedGroups: ["ccmux"],
+      });
+    });
+
+    it("restores a collapsed source as collapsed", () => {
+      const { store } = pinnedSetup({
+        pinnedGroups: [],
+        collapsedGroups: ["dotfiles"],
+      });
+      store.actions.renameGroup("dotfiles", "ccmux");
+      expect(store.collapsedGroups().has("ccmux")).toBe(false);
+      store.actions.resetGroupName("ccmux");
+      expect(store.collapsedGroups().has("dotfiles")).toBe(true);
+      expect(store.collapsedGroups().has("ccmux")).toBe(false);
+    });
+
+    it("survives a restart: the snapshot comes back from state.json", () => {
+      const { store } = pinnedSetup({
+        pinnedGroups: ["x", "ccmux"],
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: {
+          project: { dotfiles: { pin: 0, collapsed: true } },
+        },
+      });
+      store.actions.resetGroupName("ccmux");
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(true);
+    });
+
+    it("restores a merge another instance made", () => {
+      const { store } = pinnedSetup({ pinnedGroups: [] });
+      store.actions.reloadUIState({
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: { project: { dotfiles: { pin: 0, collapsed: false } } },
+        pinnedGroups: ["x", "ccmux"],
+      });
+      store.actions.resetGroupName("ccmux");
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+    });
+
+    it("keeps the target's own changes made while merged", () => {
+      const { store } = pinnedSetup();
+      store.actions.renameGroup("dotfiles", "ccmux");
+      store.actions.toggleGroupCollapse("ccmux"); // expand the merged group
+      store.actions.moveGroupToEdge("ccmux", "top");
+      store.actions.resetGroupName("ccmux");
+      // ccmux keeps what was done to it while merged; dotfiles gets its own.
+      expect(store.collapsedGroups().has("ccmux")).toBe(false);
+      expect(order(store)[0]).toBe("dotfiles");
+      expect(order(store)).toContain("ccmux");
+      expect(store.collapsedGroups().has("dotfiles")).toBe(false);
+    });
+
+    it("lets a pin or collapse the source has now win over its snapshot", () => {
+      // Another instance (or a stale write) gave dotfiles its own entries
+      // while it was merged: newer than the snapshot, so they stand.
+      const { store } = pinnedSetup({
+        pinnedGroups: ["x", "ccmux", "dotfiles"],
+        collapsedGroups: ["dotfiles"],
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: {
+          project: { dotfiles: { pin: 0, collapsed: false } },
+        },
+      });
+      store.actions.resetGroupName("ccmux");
+      expect(store.pinnedGroups()).toEqual(["x", "ccmux", "dotfiles"]);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(true);
+    });
+
+    it("gives a renamed group's own key the group's layout, and a merged source its own", () => {
+      const { store } = pinnedSetup({
+        pinnedGroups: ["dotfiles", "x", "ccmux"],
+        collapsedGroups: ["ccmux"],
+      });
+      // ccmux is renamed (its layout moves to Main), then dotfiles merges in.
+      store.actions.renameGroup("ccmux", "Main");
+      store.actions.renameGroup("dotfiles", "Main");
+      store.actions.resetGroupName("Main");
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.collapsedGroups().has("ccmux")).toBe(true);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(false);
+    });
+
+    it("drops a snapshot once its key is no longer merged away", () => {
+      const { store } = pinnedSetup();
+      store.actions.renameGroup("dotfiles", "ccmux");
+      // Renaming the merged group to dotfiles' own key un-aliases dotfiles.
+      store.actions.renameGroup("ccmux", "dotfiles");
+      expect(store.groupAliases()).toEqual({
+        project: { ccmux: "dotfiles" },
+      });
+      expect(store.groupLayouts()).toEqual({});
+    });
+
+    it("keeps other modes' snapshots when writing one mode's", () => {
+      const { store, writes } = pinnedSetup({
+        groupAliases: { session: { a: "b" } },
+        groupLayouts: { session: { a: { pin: null, collapsed: true } } },
+      });
+      store.actions.renameGroup("dotfiles", "ccmux");
+      expect(writes.at(-1)?.groupLayouts).toEqual({
+        session: { a: { pin: null, collapsed: true } },
+        project: { dotfiles: { pin: 0, collapsed: false } },
+      });
     });
   });
 

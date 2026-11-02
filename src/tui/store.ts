@@ -62,6 +62,7 @@ import {
   groupKeyOf,
   groupSessions,
   normalizeGroupAliases,
+  normalizeGroupLayouts,
   resolveGroupName,
   sortGroups,
   VALID_GROUP_BY,
@@ -70,6 +71,7 @@ import {
   type GroupBy,
   type FilteredSession,
   type GroupAliases,
+  type GroupLayouts,
   type MatchSource,
 } from "./utils/grouping";
 
@@ -722,6 +724,8 @@ interface TUIStoreOptions {
   pinnedGroups?: string[];
   /** Group names, per groupBy mode (UIState `groupAliases`). */
   groupAliases?: GroupAliases;
+  /** Merged-away groups' own layouts (UIState `groupLayouts`). */
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   /** Last agent spawned from the new-session dialog, restored from UIState. */
   lastSpawnAgent?: string;
@@ -790,6 +794,27 @@ function withModeAliases(
   const map = Object.fromEntries(entries);
   const next: GroupAliases = { ...aliases };
   if (Object.keys(map).length) next[mode] = map;
+  else delete next[mode];
+  return next;
+}
+
+/**
+ * `layouts` with mode `mode`'s map replaced by `own`, keeping only keys
+ * `aliases` still renames in that mode (a key that is no longer merged away
+ * has no layout to get back). Dropped when empty; a new object every time.
+ */
+function withModeLayouts(
+  layouts: GroupLayouts,
+  mode: GroupBy,
+  own: Readonly<Record<string, { pin: number | null; collapsed: boolean }>>,
+  aliases: GroupAliases,
+): GroupLayouts {
+  const map = aliases[mode] ?? {};
+  const kept = Object.fromEntries(
+    Object.entries(own).filter(([raw]) => Object.hasOwn(map, raw)),
+  );
+  const next: GroupLayouts = { ...layouts };
+  if (Object.keys(kept).length) next[mode] = kept;
   else delete next[mode];
   return next;
 }
@@ -955,6 +980,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    *  mode's map: `setUIState` merges only one level deep. */
   const [groupAliases, setGroupAliases] = createSignal<GroupAliases>(
     normalizeGroupAliases(options.groupAliases),
+  );
+  /**
+   * The layout each merged-away raw key had of its own (pin index, collapse),
+   * recorded by a merge and spent by the reset that splits it back out, so a
+   * reset restores each source rather than handing it the target's layout.
+   * Per mode, written whole with the aliases, and pruned to keys that are
+   * still aliased.
+   */
+  const [groupLayouts, setGroupLayouts] = createSignal<GroupLayouts>(
+    normalizeGroupLayouts(options.groupLayouts),
   );
   /** The current grouping's key for `session`, renames applied. */
   const sessionGroupKey = (session: EnrichedSession): string =>
@@ -1765,12 +1800,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    */
   function commitGroupNames(
     aliases: GroupAliases,
+    layouts: GroupLayouts,
     pinned: string[],
     collapsed: Set<string>,
   ) {
     const follow = selectedHeaderSnapshot();
     batch(() => {
       setGroupAliases(aliases);
+      setGroupLayouts(layouts);
       setPinnedGroups(pinned);
       setCollapsedGroups(collapsed);
     });
@@ -1778,6 +1815,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     const active = activeGroupKeys(aliases);
     flushUIState({
       groupAliases: aliases,
+      groupLayouts: layouts,
       pinnedGroups: pinned,
       collapsedGroups: [...collapsed].filter((key) => active.has(key)),
     }).catch(() => {
@@ -3079,6 +3117,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           if (JSON.stringify(aliases) !== JSON.stringify(groupAliases()))
             setGroupAliases(aliases);
         }
+        if (freshState.groupLayouts !== undefined && !queued("groupLayouts")) {
+          const layouts = normalizeGroupLayouts(freshState.groupLayouts);
+          if (JSON.stringify(layouts) !== JSON.stringify(groupLayouts()))
+            setGroupLayouts(layouts);
+        }
         if (freshState.groupBy !== undefined && !queued("groupBy")) {
           setState("groupBy", freshState.groupBy);
         }
@@ -3148,8 +3191,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         if (wasCollapsed) collapsed.add(name);
         else collapsed.delete(name);
       }
+      // A merge takes this group's layout away (the target's wins), so each
+      // raw key it holds records the layout to get back on a reset. A key
+      // that already has one keeps it: it was merged in from elsewhere, and
+      // its own layout is older than this group's.
+      const own = { ...(groupLayouts()[mode] ?? {}) };
+      if (merging) {
+        const at = pinnedGroups().indexOf(key);
+        const layout = { pin: at >= 0 ? at : null, collapsed: wasCollapsed };
+        for (const raw of members)
+          if (raw !== name && !Object.hasOwn(own, raw)) own[raw] = layout;
+      }
+      const nextAliases = withModeAliases(aliases, mode, entries);
       commitGroupNames(
-        withModeAliases(aliases, mode, entries),
+        nextAliases,
+        withModeLayouts(groupLayouts(), mode, own, nextAliases),
         merging
           ? pinnedGroups().filter((k) => k !== key)
           : spliceKey(pinnedGroups(), key, [name]),
@@ -3187,11 +3243,37 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         Object.entries(map).filter(([, name]) => name !== key),
       );
       const active = activeGroupKeys(next);
-      const split = [key, ...members].filter((k) => active.has(k));
+      const own = groupLayouts()[mode] ?? {};
+      // A key with a recorded layout was merged in and gets that layout
+      // back. One without carried this group's layout here (a plain rename,
+      // or a merge saved before layouts were recorded) and takes it with it,
+      // beside the group itself if that is still a group.
+      const restored = members.filter((k) => Object.hasOwn(own, k));
+      const carriers = [key, ...members].filter(
+        (k) => active.has(k) && !Object.hasOwn(own, k),
+      );
       const collapsed = new Set(collapsedGroups());
-      if (collapsed.delete(key)) for (const k of split) collapsed.add(k);
-      commitGroupNames(next, spliceKey(pinnedGroups(), key, split), collapsed);
+      if (collapsed.delete(key)) for (const k of carriers) collapsed.add(k);
+      const pinned = spliceKey(pinnedGroups(), key, carriers);
+      // A pin or collapse the key has now is newer than its snapshot and
+      // stands; the snapshot fills in only what is missing.
+      for (const k of [...restored].sort(
+        (a, b) => (own[a]!.pin ?? 0) - (own[b]!.pin ?? 0),
+      )) {
+        if (!active.has(k)) continue;
+        const { pin, collapsed: wasCollapsed } = own[k]!;
+        if (wasCollapsed) collapsed.add(k);
+        if (pin !== null && !pinned.includes(k))
+          pinned.splice(Math.min(pin, pinned.length), 0, k);
+      }
+      commitGroupNames(
+        next,
+        withModeLayouts(groupLayouts(), mode, own, next),
+        pinned,
+        collapsed,
+      );
       // The groups that came back, by what their headers now say.
+      const split = [key, ...members].filter((k) => active.has(k));
       const back = (split.length ? split : members).map(headerLabel);
       actions.showFittedToast((width) => resetToast(back, width), 3_000);
     },
@@ -3440,6 +3522,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     collapsedGroups,
     pinnedGroups,
     groupAliases,
+    groupLayouts,
     toastFit,
     renameMergeTarget,
     /** Whether group `key` carries a name the user gave it (so Reset Name

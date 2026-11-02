@@ -145,6 +145,7 @@ import {
   type FlatItem,
   type GroupAliases,
   type GroupBy,
+  type GroupLayouts,
 } from "./utils/grouping";
 import {
   createSidebarWidthPersister,
@@ -180,6 +181,8 @@ interface AppProps {
   pinnedGroups?: string[];
   /** Group names, per groupBy mode, from state.json. */
   groupAliases?: GroupAliases;
+  /** Merged-away groups' own layouts, from state.json. */
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
@@ -358,6 +361,7 @@ export function App(props: AppProps) {
     collapsedGroups: props.collapsedGroups,
     pinnedGroups: props.pinnedGroups,
     groupAliases: props.groupAliases,
+    groupLayouts: props.groupLayouts,
     hideIdle: props.hideIdle,
     promptDisplay: props.promptDisplay,
     sidebar: props.sidebar,
