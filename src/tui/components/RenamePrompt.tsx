@@ -3,7 +3,6 @@ import { createMemo } from "solid-js";
 import { theme } from "../theme";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { displayWidth, truncateText } from "../utils/format";
-import { GROUP_NAME_MAX_WIDTH } from "../utils/grouping";
 import { Text } from "./Text";
 
 /** The widest the box gets, matching the command palette it stands in for. */
@@ -36,7 +35,9 @@ interface RenamePromptProps {
  * place on screen), drawn on its own because it has no command list.
  *
  * Keys are owned by App: it commits on Enter and cancels on Esc, and the
- * `<input>` sees every other key, `j`/`k` included, as text. Every string is
+ * `<input>` sees every other key, `j`/`k` included, as text. The input has
+ * no length cap: it counts code units, which would clip a long prefill, and
+ * the name rules (`sanitizeGroupName`) are applied once, at commit. Every string is
  * fitted before it is drawn, since OpenTUI wraps rather than clips, and the
  * box narrows to a sidebar's width.
  */
@@ -100,7 +101,6 @@ export const RenamePrompt: Component<RenamePromptProps> = (props) => {
             onInput={props.onInput}
             onSubmit={props.onSubmit}
             focused
-            maxLength={GROUP_NAME_MAX_WIDTH}
             placeholder="New name"
             placeholderColor={theme.overlay}
             textColor={theme.text}

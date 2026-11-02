@@ -47,6 +47,15 @@ describe("RenamePrompt", () => {
     expect(frame).toContain("existing name merges");
   });
 
+  it("keeps a prefilled name longer than a name may be whole", async () => {
+    const long = "x".repeat(70);
+    const { typed } = await render(long, long, 120);
+    setup!.mockInput.pressKey("y");
+    await setup!.renderOnce();
+    // The input does not clip the prefill; the name rules apply at commit.
+    expect(typed.at(-1)).toBe(`${long}y`);
+  });
+
   it("passes typing to onInput", async () => {
     const { typed } = await render("px-api", "");
     for (const ch of "Pro") setup!.mockInput.pressKey(ch);

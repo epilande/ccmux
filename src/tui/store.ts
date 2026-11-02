@@ -3147,8 +3147,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const open = state.palette;
       if (!open?.rename) return;
       const { groupKey: key, label } = open.rename;
-      const name = sanitizeGroupName(open.query);
+      const query = open.query;
       setState("palette", null);
+      // Untouched is compared before sanitizing: a label wider than a name
+      // may be (a deep cwd key) would otherwise come back truncated, look
+      // edited, and alias the key to a cut copy of itself.
+      if (query === label) return;
+      const name = sanitizeGroupName(query);
       if (!name || name === label) return;
       actions.renameGroup(key, name);
     },

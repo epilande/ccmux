@@ -5656,6 +5656,28 @@ describe("group rename and merge (#42)", () => {
       expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
     });
 
+    it("changes nothing when an over-long label is committed untouched", () => {
+      // A deep cwd key is wider than a name may be; committing it unedited
+      // must not alias the key to a truncated copy of itself.
+      const deep = `/srv/${"nested-directory/".repeat(5)}project`;
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "cwd",
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "d", paneCwd: deep }),
+      ]);
+      store.actions.openRenamePrompt(deep);
+      expect(store.state.palette?.query).toBe(deep);
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({});
+      expect(writes).toEqual([]);
+    });
+
     it("treats an empty name as a cancel", () => {
       const { store, writes } = setup();
       store.actions.openRenamePrompt("beta");
