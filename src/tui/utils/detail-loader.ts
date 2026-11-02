@@ -60,7 +60,16 @@ export function createDetailLoader<K, T>(
     state: DetailState<T>;
   }>({ id: null, state: { status: "idle" } });
   let inFlight: string | null = null;
+  /** An item `R` asked to re-read whose read has not started yet. It wins
+   *  over a cache hit until it does, however long the cursor is away. */
   let refreshId: string | null = null;
+  /** Bumped by `R`. A reply to a read started before the bump is from
+   *  before the refresh: it neither repopulates the cache nor paints. */
+  let epoch = 0;
+  /** The item the cursor has rested on for the debounce (or `R` asked for
+   *  now). An ordinary read starts only for it, so a reply that frees the
+   *  slot early cannot read a row the cursor has merely crossed. */
+  let settled: string | null = null;
   let disposed = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -70,34 +79,42 @@ export function createDetailLoader<K, T>(
   });
 
   const fresh = (id: string) => {
+    if (refreshId === id) return null;
     const hit = cache.get(id);
     return hit && Date.now() - hit.at < options.ttlMs ? hit : null;
   };
 
+  /** Start the read for the current item, if its debounce is done and the
+   *  slot is free; otherwise whichever of the two finishes last calls this
+   *  again. */
   function pump(): void {
     if (disposed || inFlight !== null) return;
     const key = untrack(options.target);
     if (key === null) return;
     const id = options.id(key);
+    if (settled !== id) return;
     const refresh = refreshId === id;
-    const hit = refresh ? null : fresh(id);
+    const hit = fresh(id);
     if (hit) {
       setTagged({ id, state: { status: "ready", detail: hit.detail } });
       return;
     }
     if (refresh) refreshId = null;
     inFlight = id;
+    const started = epoch;
     void options.fetch(key, refresh).then((result) => {
       inFlight = null;
       if (disposed) return;
-      if (result.ok) {
+      const current = started === epoch;
+      if (result.ok && current) {
         cache.delete(id);
         cache.set(id, { at: Date.now(), detail: result.detail });
         while (cache.size > max) cache.delete(cache.keys().next().value!);
       }
       // The cursor is still here and no refresh was asked for meanwhile:
-      // this is the answer to show. Otherwise read where it is now.
-      if (untrack(targetId) === id && refreshId !== id)
+      // this is the answer to show. Otherwise read where it is now, once
+      // the cursor has rested there.
+      if (untrack(targetId) === id && current)
         setTagged({
           id,
           state: result.ok
@@ -111,6 +128,7 @@ export function createDetailLoader<K, T>(
   createEffect(() => {
     const id = targetId();
     clearTimeout(timer);
+    settled = null;
     if (id === null) {
       setTagged({ id, state: { status: "idle" } });
       return;
@@ -121,7 +139,10 @@ export function createDetailLoader<K, T>(
       return;
     }
     setTagged({ id, state: { status: "loading" } });
-    timer = setTimeout(pump, options.debounceMs);
+    timer = setTimeout(() => {
+      settled = id;
+      pump();
+    }, options.debounceMs);
   });
 
   if (options.refreshKey)
@@ -131,8 +152,12 @@ export function createDetailLoader<K, T>(
         () => {
           const id = untrack(targetId);
           cache.clear();
+          epoch += 1;
           if (id === null) return;
           refreshId = id;
+          // Immediate: an explicit refresh does not wait out the debounce,
+          // only for the slot.
+          settled = id;
           clearTimeout(timer);
           setTagged({ id, state: { status: "loading" } });
           pump();

@@ -110,6 +110,44 @@ describe("createDetailLoader", () => {
     loader.dispose();
   });
 
+  it("keeps a refresh asked for while loading, past a reply from before it", async () => {
+    const gh = controlledFetch();
+    const loader = mount(gh.fetch);
+    await sleep(20);
+    // `a` is out; R is pressed before it lands, then the cursor moves on.
+    loader.refresh();
+    loader.setTarget("b");
+    await sleep(20);
+    gh.answer("A-old");
+    await sleep(0);
+    expect(gh.asked.at(-1)).toEqual({ key: "b", refresh: false });
+    gh.answer("B");
+    await sleep(0);
+    // Back on `a`: the reply that started before R is not the answer.
+    loader.setTarget("a");
+    expect(loader.state()).toEqual({ status: "loading" });
+    await sleep(20);
+    expect(gh.asked.at(-1)).toEqual({ key: "a", refresh: true });
+    gh.answer("A-new");
+    await sleep(0);
+    expect(loader.state()).toEqual({ status: "ready", detail: "A-new" });
+    loader.dispose();
+  });
+
+  it("waits out the new row's debounce when an old reply frees the slot", async () => {
+    const gh = controlledFetch();
+    const loader = mount(gh.fetch);
+    await sleep(20);
+    loader.setTarget("b");
+    // `a` lands before the cursor has rested on `b`.
+    gh.answer("A");
+    await sleep(0);
+    expect(gh.asked.map((a) => a.key)).toEqual(["a"]);
+    await sleep(20);
+    expect(gh.asked.map((a) => a.key)).toEqual(["a", "b"]);
+    loader.dispose();
+  });
+
   it("shows a failure, and asks again when the cursor comes back", async () => {
     let calls = 0;
     const loader = mount(async () => {
