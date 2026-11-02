@@ -10145,6 +10145,155 @@ describe("repo scope across views", () => {
   });
 });
 
+describe("previews in every view", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+  const row = {
+    path: "/repo/wt/parking",
+    name: "parking",
+    repoRoot: "/repo",
+    repoName: "repo",
+    branch: "feat/parking",
+    tip: "sha-parking",
+    detached: false,
+    isMain: false,
+    locked: false,
+    dirty: { dirty: true, modified: 1, untracked: 0 },
+    upstream: null,
+    sessions: [],
+  };
+  const pr = {
+    number: 206,
+    title: "park the renderer",
+    url: "https://github.com/o/r/pull/206",
+    author: "epilande",
+    isDraft: false,
+    reviewDecision: null,
+    ciStatus: "none",
+    headRefName: "feat/other",
+    headRefOid: "sha-other",
+    labels: [],
+  };
+  let original: typeof fetch;
+  const asked: string[] = [];
+
+  beforeEach(() => {
+    asked.length = 0;
+    original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      asked.push(url.pathname);
+      if (url.pathname === "/worktrees/detail")
+        return Response.json({
+          ok: true,
+          detail: {
+            path: row.path,
+            changes: [{ code: " M", path: "src/park.ts" }],
+            total: 1,
+            truncated: false,
+            commits: [],
+          },
+        });
+      if (url.pathname === "/worktrees/prune-candidates")
+        return Response.json({ candidates: [], skipped: [] });
+      if (url.pathname === "/worktrees")
+        return Response.json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [row] }],
+        });
+      if (url.pathname === "/prs/detail")
+        return Response.json({
+          ok: true,
+          detail: {
+            number: 206,
+            body: "Parks the renderer while hidden.",
+            truncated: false,
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            checks: [],
+          },
+        });
+      if (url.pathname === "/prs")
+        return Response.json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: [pr] }],
+          errors: [],
+        });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const frame = async (ms = 0) => {
+    await settle(ms);
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  };
+  const footer = (text: string) => text.split("\n").at(-2) ?? "";
+
+  it("previews the worktree under the cursor and scrolls it on Tab", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    let text = await frame(250);
+    expect(text).toContain("Changes (1)");
+    expect(text).toContain("src/park.ts");
+    // The Sessions preview is not left running under the panel.
+    expect(text).not.toContain("Select a session to preview");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+    // Focused, `x` reaches neither the panel nor a pane.
+    setup.mockInput.pressKey("x");
+    text = await frame();
+    expect(text).not.toContain("Remove");
+    expect(footer(text)).toContain("j/k scroll");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("x remove");
+  });
+
+  it("previews the PR under the cursor in Start", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    await frame(50);
+    setup.mockInput.pressKey("l");
+    let text = await frame(400);
+    expect(text).toContain("#206 park the renderer");
+    expect(text).toContain("Parks the renderer while hidden.");
+    expect(asked).toContain("/prs/detail");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+  });
+
+  it("toggles the preview with P from a panel", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    expect(await frame(250)).toContain("Changes (1)");
+    setup.mockInput.pressKey("P");
+    expect(await frame()).not.toContain("Changes (1)");
+  });
+
+  it("leaves focus behind when a view-strip click changes views", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    await frame(250);
+    setup.mockInput.pressKey("\t");
+    let text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+    const strip = text.split("\n")[0]!;
+    await setup.mockMouse.click(strip.indexOf("Start") + 1, 0);
+    text = await frame(50);
+    expect(footer(text)).not.toContain("j/k scroll");
+    expect(footer(text)).toContain("q back");
+  });
+});
+
 describe("one footer across views", () => {
   it("draws the same registry-built line, pinned four included, on every view", async () => {
     const original = globalThis.fetch;

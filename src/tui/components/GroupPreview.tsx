@@ -21,6 +21,7 @@ import {
 } from "../utils/format";
 import { theme } from "../theme";
 import { Text } from "./Text";
+import { PreviewFrame, previewContentWidth } from "./PreviewFrame";
 
 interface GroupPreviewProps {
   header: { label: string; count: number; members: FilteredSession[] };
@@ -28,6 +29,7 @@ interface GroupPreviewProps {
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
   iconStyle?: IconStyle;
   width: number;
+  focused?: boolean;
 }
 
 /** Static summary parts (waiting + idle). Working is handled separately for animation. */
@@ -239,7 +241,7 @@ const WorktreeRow: Component<{
 export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
-    Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
+    previewContentWidth(dims().width, props.width),
   );
   // Inside the border and padding, less the scrollbar the list may grow.
   const rowWidth = () => Math.max(1, separatorWidth() - 1);
@@ -259,16 +261,7 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   const worktrees = createMemo(() => worktreeEntries(props.sessions));
 
   return (
-    <box
-      flexDirection="column"
-      width={`${props.width}%`}
-      height="100%"
-      border={["left"]}
-      borderStyle="single"
-      borderColor={theme.border}
-      paddingLeft={1}
-      paddingRight={1}
-    >
+    <PreviewFrame width={props.width} focused={props.focused}>
       <box height={3} flexDirection="column">
         <box flexDirection="row" gap={1}>
           <Text fg={theme.text}>
@@ -324,6 +317,6 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
           </For>
         </box>
       </scrollbox>
-    </box>
+    </PreviewFrame>
   );
 };

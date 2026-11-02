@@ -1488,7 +1488,66 @@ export function App(props: AppProps) {
     sseClient?.disconnect();
     sseClient?.connect();
   }
+  /**
+   * The preview keys, for the Worktrees and Start views (Sessions has its
+   * own cases in the main switch): `P` toggles, `Alt+H/L` resizes, `Ctrl+D/U`
+   * pages and `Tab` focuses, the same keys meaning the same things in every
+   * view. The panels hand them here through `onNavigate` before their own
+   * handling.
+   */
+  function previewKey(event: KeyEvent): boolean {
+    if (props.sidebar) return false;
+    const key = event.name;
+    if (event.ctrl && (key === "d" || key === "u")) {
+      if (!previewBox()) return false;
+      pagePreview(key === "d" ? 1 : -1);
+      return true;
+    }
+    if (event.meta && (key === "h" || key === "l")) {
+      if (!store.state.showPreview) return false;
+      store.actions.resizePreview(key === "h" ? 5 : -5);
+      return true;
+    }
+    if (event.ctrl || event.meta) return false;
+    if (key === "P" || (key === "p" && event.shift)) {
+      store.actions.togglePreview();
+      return true;
+    }
+    // Only with something to scroll: a repo header in Worktrees draws a
+    // summary with no body.
+    if (key === "tab" && previewBox()) {
+      store.actions.enterPreviewFocus();
+      return true;
+    }
+    return false;
+  }
+  /**
+   * A focused Worktrees or Start preview: it has nothing to type into, so
+   * focus is a scroll mode. Every key stops here, since the panel under it
+   * is disabled while focused (`panelOwnsKeys`).
+   */
+  function handleFocusedPanelPreviewKey(event: KeyEvent): void {
+    const key = event.name;
+    const box = previewBox();
+    if (key === "tab" || key === "escape") store.actions.exitPreviewFocus();
+    else if (event.ctrl && (key === "d" || key === "u"))
+      pagePreview(key === "d" ? 1 : -1);
+    else if (event.meta && (key === "h" || key === "l"))
+      store.actions.resizePreview(key === "h" ? 5 : -5);
+    else if (event.ctrl || event.meta) return;
+    else if (key === "j" || key === "down") box?.scrollBy(1);
+    else if (key === "k" || key === "up") box?.scrollBy(-1);
+    else if (key === "G" || (key === "g" && event.shift))
+      box?.scrollTo(box.scrollHeight);
+    else if (key === "g") box?.scrollTo(0);
+    else if (key === "P" || (key === "p" && event.shift))
+      store.actions.togglePreview();
+  }
   function navigateView(event: KeyEvent, repo: string | null): boolean {
+    if (previewKey(event)) {
+      event.preventDefault();
+      return true;
+    }
     const key = event.name;
     const action = actionForKey(event);
     if (
@@ -1514,6 +1573,12 @@ export function App(props: AppProps) {
     event.preventDefault();
     return true;
   }
+
+  /** A session by id, for the Worktrees preview's session lines. */
+  const sessionsById = createMemo(
+    () => new Map(store.state.sessions.map((s) => [s.id, s])),
+  );
+  const sessionById = (id: string) => sessionsById().get(id);
 
   /** What the open palette lists: the current view's commands, filtered. */
   const paletteMatches = createMemo(() => {
@@ -3557,7 +3622,24 @@ export function App(props: AppProps) {
   const isVisible = (): boolean => visibility?.visible() ?? true;
 
   let sseClient: SSEClient | null = null;
-  let previewScrollbox: ScrollBoxRenderable | undefined;
+  /**
+   * Each view's preview scrollbox. One shared ref would outlive the box it
+   * named: the Sessions preview unmounts off its view, and a panel's with
+   * its panel (or when its cursor leaves a row for a header), so the scroll
+   * keys read the live box of the view on screen, or none.
+   */
+  const previewBoxes: Partial<Record<View, ScrollBoxRenderable>> = {};
+  function previewBox(): ScrollBoxRenderable | undefined {
+    const box = previewBoxes[view()];
+    return store.state.showPreview && box && !box.isDestroyed ? box : undefined;
+  }
+  /** Ctrl+D/U: half a page of the current view's preview. */
+  function pagePreview(direction: 1 | -1): void {
+    const box = previewBox();
+    if (!box) return;
+    const half = Math.floor((box.viewport?.height ?? 10) / 2);
+    box.scrollTo(box.scrollTop + direction * half);
+  }
   let helpScrollbox: ScrollBoxRenderable | undefined;
   const [previewRefreshKey, setPreviewRefreshKey] = createSignal(0);
   const [initialDataReceived, setInitialDataReceived] = createSignal(false);
@@ -3937,6 +4019,14 @@ export function App(props: AppProps) {
       return;
     }
 
+    // Ahead of the panels, which are disabled while their preview has
+    // focus: the keys scroll the preview instead.
+    if (store.state.previewFocused && view() !== "sessions") {
+      handleFocusedPanelPreviewKey(event);
+      event.preventDefault();
+      return;
+    }
+
     // The Worktrees panel owns every key while it is up (it registers its own
     // handler), so nothing here may also act on them.
     if (store.state.worktrees) {
@@ -4018,16 +4108,8 @@ export function App(props: AppProps) {
         store.actions.moveSelection(key === "n" ? 1 : -1);
       } else if (event.meta && (key === "h" || key === "l")) {
         store.actions.resizePreview(key === "h" ? 5 : -5);
-      } else if (
-        event.ctrl &&
-        (key === "d" || key === "u") &&
-        previewScrollbox
-      ) {
-        const halfPage = Math.floor(
-          (previewScrollbox.viewport?.height ?? 10) / 2,
-        );
-        const delta = key === "d" ? halfPage : -halfPage;
-        previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
+      } else if (event.ctrl && (key === "d" || key === "u")) {
+        pagePreview(key === "d" ? 1 : -1);
       } else {
         const session = store.selectedSession();
         if (session?.tmuxPane && ensureSameServer()) {
@@ -4320,12 +4402,8 @@ export function App(props: AppProps) {
         // matched because terminals deliver it as name `"d"` with `shift`
         // set as readily as `"D"`; without the lowercase case the branch
         // review would be unreachable on half of them.
-        if (event.ctrl && previewScrollbox && store.state.showPreview) {
-          const halfPage = Math.floor(
-            (previewScrollbox.viewport?.height ?? 10) / 2,
-          );
-          const delta = key === "u" ? -halfPage : halfPage;
-          previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
+        if (event.ctrl && previewBox()) {
+          pagePreview(key === "u" ? -1 : 1);
           event.preventDefault();
         } else if (key !== "u" && !event.ctrl && !props.sidebar) {
           const session = store.selectedSession();
@@ -4531,13 +4609,21 @@ export function App(props: AppProps) {
             onContextMenu={handleRowContextMenu}
             onRowAnchor={(resolve) => (rowAnchor = resolve)}
           />
-          <Show when={!props.sidebar && store.state.showPreview}>
+          {/* Only in Sessions: under a panel it would keep capturing the
+              selected pane, and its scrollbox would take the panel's keys. */}
+          <Show
+            when={
+              !props.sidebar &&
+              store.state.showPreview &&
+              view() === "sessions"
+            }
+          >
             <Show
               when={store.selectedGroupHeader()}
               fallback={
                 <Preview
                   session={store.selectedSession()}
-                  onScrollboxRef={(ref) => (previewScrollbox = ref)}
+                  onScrollboxRef={(ref) => (previewBoxes.sessions = ref)}
                   iconStyle={store.state.iconStyle}
                   width={store.state.previewWidth}
                   focused={store.state.previewFocused}
@@ -4552,7 +4638,7 @@ export function App(props: AppProps) {
                 <GroupPreview
                   header={header()}
                   sessions={store.selectedGroupSessions()}
-                  onScrollboxRef={(ref) => (previewScrollbox = ref)}
+                  onScrollboxRef={(ref) => (previewBoxes.sessions = ref)}
                   iconStyle={store.state.iconStyle}
                   width={store.state.previewWidth}
                 />
@@ -4585,6 +4671,11 @@ export function App(props: AppProps) {
               scope={store.state.scope}
               activeSessionId={store.state.activeSessionId}
               facts={repoFacts.data()}
+              showPreview={!props.sidebar && store.state.showPreview}
+              previewWidth={store.state.previewWidth}
+              previewFocused={store.state.previewFocused}
+              onPreviewScrollbox={(ref) => (previewBoxes.worktrees = ref)}
+              sessionById={sessionById}
               memory={
                 worktreeMemory?.scope === store.state.scope
                   ? worktreeMemory
@@ -4645,6 +4736,10 @@ export function App(props: AppProps) {
               activeSessionId={store.state.activeSessionId}
               effects={liveEffects}
               facts={repoFacts.data()}
+              showPreview={!props.sidebar && store.state.showPreview}
+              previewWidth={store.state.previewWidth}
+              previewFocused={store.state.previewFocused}
+              onPreviewScrollbox={(ref) => (previewBoxes.start = ref)}
               memory={
                 sourceMemory?.scope === store.state.scope
                   ? sourceMemory

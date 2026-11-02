@@ -40,6 +40,7 @@ import {
   truncateText,
 } from "../utils/format";
 import { Text } from "./Text";
+import { PreviewFrame, previewContentWidth } from "./PreviewFrame";
 
 /**
  * One row of the preview's Agents section: activity spinner, the agent's
@@ -244,7 +245,7 @@ interface PreviewProps {
 export const Preview: Component<PreviewProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
-    Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
+    previewContentWidth(dims().width, props.width),
   );
   const [content, setContent] = createSignal<StyledText | null>(null);
   let textRef: TextRenderable | undefined;
@@ -465,16 +466,7 @@ export const Preview: Component<PreviewProps> = (props) => {
   };
 
   return (
-    <box
-      flexDirection="column"
-      width={`${props.width}%`}
-      height="100%"
-      border={["left"]}
-      borderStyle="single"
-      borderColor={props.focused ? theme.mauve : theme.border}
-      paddingLeft={1}
-      paddingRight={1}
-    >
+    <PreviewFrame width={props.width} focused={props.focused}>
       <Show
         when={props.session}
         fallback={<Text fg={theme.overlay}>Select a session to preview</Text>}
@@ -576,6 +568,6 @@ export const Preview: Component<PreviewProps> = (props) => {
           </Show>
         </Show>
       </Show>
-    </box>
+    </PreviewFrame>
   );
 };
