@@ -25,7 +25,7 @@ import {
   toVisualLine,
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
-import { GroupHeader } from "./GroupHeader";
+import { GroupHeader, type HeaderNotice } from "./GroupHeader";
 import { getStatusColor } from "./StatusBadge";
 import type { HeaderCells, ResolvedColumns } from "./session-columns";
 import {
@@ -47,6 +47,7 @@ import {
 } from "./session-columns";
 import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import { Text } from "./Text";
 import { socketErrorMessage } from "../../lib/tmux-socket";
 import { displayWidth, padStartWidth } from "../utils/format";
@@ -143,18 +144,20 @@ export function hiddenWaitingNotice(
  * and a picker with the preview closed have nothing else that does. It is
  * the header's `notice`, so it never drops: `from px-api` or `3 sources`
  * (the group preview's vocabulary) where the label still fits beside it,
- * else a single `*`. Dimmed, since the preview carries the detail.
+ * else a single `*`. Dimmed where the theme allows (`TEXT_ROLES`), with its
+ * own color on a selected row's raised background.
  */
 export function aliasNotice(
   item: Extract<FlatItem, { type: "header" }>,
-): { text: string; short: string; color: string } | undefined {
+): HeaderNotice | undefined {
   const sources = groupSources(item.groupKey, item.rawKeys);
   if (!sources) return undefined;
   return {
     text:
       sources.length === 1 ? `from ${sources[0]}` : `${sources.length} sources`,
     short: "*",
-    color: theme.overlay,
+    color: TEXT_ROLES.groupMarker.fg(),
+    selectedColor: TEXT_ROLES.groupMarkerSelected.fg(),
   };
 }
 

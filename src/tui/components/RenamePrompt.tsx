@@ -1,6 +1,7 @@
 import type { Component } from "solid-js";
 import { createMemo, Show } from "solid-js";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { displayWidth, truncateText } from "../utils/format";
 import { GROUP_NAME_MAX_WIDTH } from "../utils/grouping";
@@ -72,8 +73,8 @@ export const RenamePrompt: Component<RenamePromptProps> = (props) => {
     if (used < COUNT_FROM) return null;
     const count = `${used}/${GROUP_NAME_MAX_WIDTH}`;
     return used > GROUP_NAME_MAX_WIDTH
-      ? { text: `${count} · cut`, color: theme.peach }
-      : { text: count, color: theme.subtext };
+      ? { text: `${count} · cut`, color: TEXT_ROLES.renameCut.fg() }
+      : { text: count, color: TEXT_ROLES.renameCount.fg() };
   });
   /** The note's columns, cut so the title keeps at least a short label. */
   const noteText = createMemo(() => {
@@ -105,14 +106,14 @@ export const RenamePrompt: Component<RenamePromptProps> = (props) => {
         text:
           steps.find((text) => displayWidth(text) <= inner()) ??
           truncateText(`merges into ${target}`, inner()),
-        color: theme.blue,
+        color: TEXT_ROLES.renameMerge.fg(),
       };
     }
     return {
       text:
         HINTS.find((text) => displayWidth(text) <= inner()) ??
         truncateText(HINTS.at(-1)!, inner()),
-      color: theme.overlay,
+      color: TEXT_ROLES.renameHint.fg(),
     };
   });
 
@@ -137,13 +138,13 @@ export const RenamePrompt: Component<RenamePromptProps> = (props) => {
         paddingRight={1}
       >
         <box height={1} flexDirection="row" flexShrink={0}>
-          <Text fg={theme.subtext} wrapMode="none">
+          <Text fg={TEXT_ROLES.renameTitle.fg()} wrapMode="none">
             Rename{" "}
           </Text>
           <Text fg={theme.text} wrapMode="none">
             <b>{label()}</b>
           </Text>
-          <Text fg={theme.subtext} wrapMode="none">
+          <Text fg={TEXT_ROLES.renameTitle.fg()} wrapMode="none">
             {" "}
             to:
           </Text>
@@ -166,7 +167,7 @@ export const RenamePrompt: Component<RenamePromptProps> = (props) => {
             onSubmit={props.onSubmit}
             focused
             placeholder="New name"
-            placeholderColor={theme.overlay}
+            placeholderColor={TEXT_ROLES.renameTitle.fg()}
             textColor={theme.text}
             focusedTextColor={theme.text}
             cursorColor={theme.blue}

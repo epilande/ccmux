@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
 import { RGBA } from "@opentui/core";
-import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import {
   GroupPreview,
   inventoryEntries,
@@ -477,7 +477,10 @@ describe("GroupPreview renamed and merged groups", () => {
       .captureSpans()
       .lines.flatMap((l) => l.spans)
       .find((s) => s.text.includes("3 sources"));
-    expect(span?.fg.toInts()).toEqual(RGBA.fromHex(theme.overlay).toInts());
+    // Dimmed as far as the theme allows while still reading at 4.5:1.
+    expect(span?.fg.toInts()).toEqual(
+      RGBA.fromHex(TEXT_ROLES.groupSources.fg()).toInts(),
+    );
   });
 
   it("names the key a renamed group came from", async () => {

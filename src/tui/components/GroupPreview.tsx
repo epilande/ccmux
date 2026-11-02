@@ -25,6 +25,7 @@ import {
   truncateText,
 } from "../utils/format";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import { Text } from "./Text";
 import type { WireRepoFacts } from "../../daemon/repo-facts";
 import type { BranchPR } from "../../types/session";
@@ -449,7 +450,7 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
         </box>
         <Show when={sources()}>
           {(line: () => string) => (
-            <Text fg={theme.overlay} wrapMode="none">
+            <Text fg={TEXT_ROLES.groupSources.fg()} wrapMode="none">
               {line()}
             </Text>
           )}

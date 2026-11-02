@@ -1,6 +1,7 @@
 import type { Component } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import { Text } from "./Text";
 
 interface ToastProps {
@@ -38,7 +39,7 @@ export const Toast: Component<ToastProps> = (props) => {
       paddingRight={1}
     >
       {/* width 100% wraps a long message; the box still shrinks to a short one. */}
-      <Text fg={theme.subtext} width="100%">
+      <Text fg={TEXT_ROLES.toast.fg()} width="100%">
         {props.fit ? props.fit(Math.max(1, width() - 4)) : props.message}
       </Text>
     </box>
