@@ -3219,7 +3219,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // raw key it holds records the layout to get back on a reset. A key
       // that already has one keeps it: it was merged in from elsewhere, and
       // its own layout is older than this group's.
-      const own = { ...(groupLayouts()[mode] ?? {}) };
+      const recorded = groupLayouts()[mode] ?? {};
+      const added: [string, GroupLayout][] = [];
       if (merging) {
         const at = pinnedGroups().indexOf(key);
         const layout: GroupLayout =
@@ -3227,8 +3228,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             ? { pin: at, collapsed: wasCollapsed, order: [...pinnedGroups()] }
             : { pin: null, collapsed: wasCollapsed };
         for (const raw of members)
-          if (raw !== name && !Object.hasOwn(own, raw)) own[raw] = layout;
+          if (raw !== name && !Object.hasOwn(recorded, raw))
+            added.push([raw, layout]);
       }
+      // Built with `Object.fromEntries`, never by assignment: a raw key
+      // spelled `__proto__` would otherwise set the map's prototype instead
+      // of recording a layout, and the snapshot would vanish.
+      const own = Object.fromEntries([...Object.entries(recorded), ...added]);
       const nextAliases = withModeAliases(aliases, mode, entries);
       commitGroupNames(
         nextAliases,

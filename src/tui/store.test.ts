@@ -5775,6 +5775,26 @@ describe("group rename and merge (#42)", () => {
       },
     );
 
+    it("keeps the snapshot of a group whose key is __proto__", () => {
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["__proto__", "alpha"],
+        collapsedGroups: ["__proto__"],
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "p", project: "__proto__" }),
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "z", project: "zeta" }),
+      ]);
+      store.actions.renameGroup("__proto__", "alpha");
+      const layouts = store.groupLayouts().project!;
+      expect(Object.hasOwn(layouts, "__proto__")).toBe(true);
+      expect(Object.getPrototypeOf(layouts)).toBe(Object.prototype);
+      store.actions.resetGroupName("alpha");
+      expect(store.pinnedGroups()).toEqual(["__proto__", "alpha"]);
+      expect(store.collapsedGroups().has("__proto__")).toBe(true);
+    });
+
     it("drops a snapshot once its key is no longer merged away", () => {
       const { store } = pinnedSetup();
       store.actions.renameGroup("dotfiles", "ccmux");
