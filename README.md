@@ -39,7 +39,7 @@ It works with your existing tmux workflow. You don't change how you launch or ru
 - 🔔 **Actionable Notifications**: Approve, deny, or reply to a waiting agent straight from the desktop notification
 - 🪟 **Sidebar Mode**: Compact always-visible session rail docked beside your working panes
 - 🔍 **Fuzzy Search**: Fuzzy-match sessions by project, branch, or path; substring-match any recent prompt, captured pane content, and on-demand live transcripts
-- 📂 **Session Grouping**: Collapsible project groups with reordering and pinning
+- 📂 **Session Grouping**: Collapsible project groups with reordering, pinning, renaming, and merging
 - 🌿 **Git & PR Aware**: Branch and worktree detection, open PRs with live CI and review status
 - 🌱 **Worktree Workflow**: Spawn or fork sessions into fresh git worktrees, move uncommitted changes out of a dirty checkout, and prune leftovers from the Worktrees panel
 - 📝 **Diff Review**: Press <kbd>d</kbd> to review a session's working-tree diff with [hunk](https://github.com/modem-dev/hunk), right in the pane, or <kbd>D</kbd> for everything the branch changed since it forked
@@ -190,7 +190,7 @@ When the session has agents running, an **Agents** section lists each one with i
 
 Press <kbd>:</kbd> for a fuzzy list of everything the current view can do. Type to filter, <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>Ctrl+N</kbd>/<kbd>Ctrl+P</kbd>) to move, <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close. Each row shows the key it stands for, and running a keyed row presses that key, so the palette is also a way to learn them.
 
-A few actions have no key and live only here: **Group by** a specific mode (project, directory, tmux session, tmux window, or none), **Copy session id** (the agent's own id, what `claude --resume` takes), and **Open transcript**, which shows the selected session's last turns in `$PAGER` (or `less`). The transcript is piped to the pager, never written to a file.
+A few actions have no key and live only here: **Group by** a specific mode (project, directory, tmux session, tmux window, or none), **Reset group name** (see [Renaming and merging groups](#renaming-and-merging-groups)), **Copy session id** (the agent's own id, what `claude --resume` takes), and **Open transcript**, which shows the selected session's last turns in `$PAGER` (or `less`). The transcript is piped to the pager, never written to a file.
 
 The footer keeps to the everyday keys and ends in `: more`; <kbd>N</kbd>, <kbd>W</kbd>, <kbd>R</kbd>, <kbd>d</kbd>/<kbd>D</kbd> and <kbd>P</kbd> still work, and are in <kbd>?</kbd> and <kbd>:</kbd>. The sidebar has no palette.
 
@@ -688,6 +688,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Mark all / clear      | <kbd>a</kbd> / <kbd>A</kbd>                                                        | All visible rows / clear marks                                                                                         |
 | Move group            | <kbd>J</kbd> / <kbd>K</kbd>                                                        | Reorder group down / up (persisted)                                                                                    |
 | Move group top/bottom | <kbd><</kbd> / <kbd>></kbd>                                                        | Pin group to top / bottom                                                                                              |
+| Rename group          | <kbd>e</kbd>                                                                       | Rename the header's (or the row's) group; a name another group has merges them                                        |
 | Collapse/expand all   | <kbd>z</kbd><kbd>m</kbd> / <kbd>z</kbd><kbd>r</kbd> or <kbd>-</kbd> / <kbd>=</kbd> | Collapse or expand all groups                                                                                          |
 | Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions (the strip shows `n/total` and `active`); the `needs attention` band stays visible               |
 | Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display for the `summary`/`prompt` cell: inline → own row → off                                                 |
@@ -893,6 +894,16 @@ Status badges keep completion, invoke success/failure/cancellation, background a
 Waiting sessions move into a pinned `needs attention` band above the groups, oldest wait first. They appear once, retain repo and tmux session identity, and return to their group when the wait ends. The band disappears when empty and stays expanded through collapse-all. With grouping off, a `sessions` header ends the band so the rows below it do not read as waiting. Search still filters sessions; `f` never removes a waiting row. Each header counts its own remaining rows. To keep waiting sessions in their own groups instead, run `ccmux config set attentionBand false`. It applies the next time the picker or sidebar opens; ones already open keep the setting they started with.
 
 Project headers that unambiguously identify one repo show `main + N worktrees`, based only on the local worktree list; a repo with only its main checkout shows nothing. Facts are omitted when the complete phrase cannot fit. Cwd/tmux groups, mixed-repo headers, and the attention band have no repo facts. Collapsed activity counts take priority over optional facts when space is tight. These read-only counts come from the same daemon cache as the strip counts, refreshed on a timer and with <kbd>R</kbd>; a refresh that fails keeps the previous count, marked `~`.
+
+#### Renaming and merging groups
+
+Press <kbd>e</kbd> on a group header (or on a row, for its group) to rename it. The prompt opens with the current name; <kbd>Enter</kbd> saves, and <kbd>Esc</kbd> or an empty name cancels. The same prompt is behind **Rename group…** in the <kbd>:</kbd> palette and **Rename Group** in the group's row menu, and it works in the sidebar too.
+
+A rename maps the group's derived key (its project, directory, or tmux session or window) to the new name. It is not a label painted over the header. So the group sorts by its new name, and every future session from that place lands in it. Giving a group a name another group already has merges the two. For a product spread across `px-web`, `px-api`, and `px-infra`, rename all three to `ProjectX` and they show as one group from then on. A merged group pins and collapses as one, and the group whose name you typed keeps its pin and collapse. Renaming a merged group renames every part of it. The group preview lists the keys behind a renamed group, dimmed under its name (`renamed from px-api`, `3 sources: px-api · px-infra · px-web`).
+
+**Reset Name** (row menu) and **Reset group name** (palette) undo a rename, splitting a merged group back into its original groups, each keeping the pin and collapse. Typing a group's original key back in does the same for one part. Names are trimmed, stripped of control characters, and capped at 64 columns. The synthetic `needs attention` and `sessions` headers can't be renamed. Paneless buckets like `(no tmux)`, `(invoke)`, and `(background)` can.
+
+Names are kept per group-by mode in `~/.config/ccmux/state.json` (`groupAliases`), since a `dev` project and a `dev` tmux session are different groups. They survive <kbd>b</kbd> and restarts, and a name whose sessions have all ended is kept, so the next session in that place lands back in its renamed group. Every open picker and sidebar re-reads `state.json` when another one changes it, so a rename, pin, collapse, or group-by change in one shows up in the rest.
 
 #### Column header
 
