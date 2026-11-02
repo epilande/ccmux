@@ -5,6 +5,9 @@ import { Text } from "./Text";
 
 interface ToastProps {
   message: string;
+  /** Fits the message to the columns the card has inside its border, for a
+   *  message that shortens in a chosen order rather than wrapping. */
+  fit?: ((width: number) => string) | null;
 }
 
 const MAX_WIDTH = 40;
@@ -36,7 +39,7 @@ export const Toast: Component<ToastProps> = (props) => {
     >
       {/* width 100% wraps a long message; the box still shrinks to a short one. */}
       <Text fg={theme.subtext} width="100%">
-        {props.message}
+        {props.fit ? props.fit(Math.max(1, width() - 4)) : props.message}
       </Text>
     </box>
   );

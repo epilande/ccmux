@@ -5031,7 +5031,10 @@ export function App(props: AppProps) {
         {/* Transient feedback, rendered in every mode: the one-shot and persistent
             pickers need the switch-failure toast too, not just the sidebar. */}
         <Show when={store.state.toastMessage}>
-          <Toast message={store.state.toastMessage!} />
+          <Toast
+            message={store.state.toastMessage!}
+            fit={store.toastFit()}
+          />
         </Show>
       </box>
     </TickContext.Provider>

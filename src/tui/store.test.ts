@@ -16,6 +16,7 @@ import {
 } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
 import { MAX_TURNS } from "../daemon/transcript-read";
+import { mergedToast, resetToast } from "./utils/group-copy";
 
 // capturePane is mocked (process-wide, per Bun's mock.module) so the
 // searchPaneLines tests can assert what the store passes it, without
@@ -5479,8 +5480,11 @@ describe("group rename and merge (#42)", () => {
       // The target's layout wins, as in any merge.
       expect(store.collapsedGroups().has(beta)).toBe(true);
       expect(store.groupAliases()).toEqual({ cwd: { [alpha]: beta } });
-      // The toast names the group the way its header does.
-      expect(store.state.toastMessage).toBe(`Merged into ${target.label}`);
+      // The toast names the group the way its header does, and the undo,
+      // fitted to whatever columns the toast has.
+      expect(store.toastFit()?.(36)).toBe(mergedToast(target.label, 36));
+      expect(store.toastFit()?.(28)).toBe(mergedToast(target.label, 28));
+      expect(store.state.toastMessage).toBe(mergedToast(target.label, 36));
     });
 
     it("keeps the toast to one line for a long name", () => {
@@ -5491,6 +5495,7 @@ describe("group rename and merge (#42)", () => {
       store.actions.renameGroup(alpha, "x".repeat(60));
       // The toast's box is 40 columns, 36 inside its border and padding.
       expect(store.state.toastMessage!.length).toBeLessThanOrEqual(36);
+      expect(store.toastFit()?.(30)?.length).toBeLessThanOrEqual(30);
     });
 
     it("merges from the prompt into a group named by its full path past the name cap", () => {
@@ -5579,6 +5584,8 @@ describe("group rename and merge (#42)", () => {
     expect(store.pinnedGroups()).toEqual(["gamma", "alpha", "beta"]);
     expect(store.collapsedGroups()).toEqual(new Set(["alpha", "beta"]));
     expect(store.selectedHeaderKey()).toBe("alpha");
+    expect(store.state.toastMessage).toBe("Reset: alpha, beta");
+    expect(store.toastFit()?.(36)).toBe(resetToast(["alpha", "beta"], 36));
     expect(writes.at(-1)).toEqual({
       groupAliases: {},
       pinnedGroups: ["gamma", "alpha", "beta"],

@@ -49,7 +49,12 @@ import { normalizePrompt } from "./components/session-columns";
 import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
-import { truncateText } from "./utils/format";
+import {
+  mergedToast,
+  renamedToast,
+  resetToast,
+  TOAST_TEXT_WIDTH,
+} from "./utils/group-copy";
 import {
   buildFlatItems,
   isSyntheticGroupKey,
@@ -1007,6 +1012,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return Promise.resolve(persistStateFn(merged));
   }
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  /** How the current toast fits itself to the toast's columns, when it
+   *  shortens in a chosen order (`group-copy.ts`) rather than wrapping. */
+  const [toastFit, setToastFit] = createSignal<
+    ((width: number) => string) | null
+  >(null);
 
   /** Invocation ids currently in flight (every invoke, Claude included).
    *  Driven by invocation_started/finished SSE events; mirrors the daemon's
@@ -1773,6 +1783,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }).catch(() => {
       actions.showToast("Could not save group names", 3_000);
     });
+  }
+
+  /** What group `key`'s header says, or the key where no header draws it. */
+  function headerLabel(key: string): string {
+    const header = flatItems().find(
+      (item) => item.type === "header" && item.groupKey === key,
+    );
+    return header?.type === "header" ? header.label : key;
   }
 
   /** A waiting-only group is still active even while its header is absent. */
@@ -2988,13 +3006,29 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("notice", null);
     },
 
-    showToast(message: string, durationMs = 1500) {
+    /**
+     * Show `message` for `durationMs`. With `fit`, the toast draws
+     * `fit(columns)` for the columns its card has instead, and `message` is
+     * its full-width form.
+     */
+    showToast(
+      message: string,
+      durationMs = 1500,
+      fit?: (width: number) => string,
+    ) {
       setState("toastMessage", message);
+      setToastFit(() => fit ?? null);
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         setState("toastMessage", null);
+        setToastFit(null);
         toastTimer = null;
       }, durationMs);
+    },
+
+    /** A toast fitted by `fit`, shown at its full toast width. */
+    showFittedToast(fit: (width: number) => string, durationMs = 1500) {
+      actions.showToast(fit(TOAST_TEXT_WIDTH), durationMs, fit);
     },
 
     /**
@@ -3105,17 +3139,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         collapsed,
       );
       // Named the way its header now reads (a merged cwd group's label, not
-      // its raw path), cut so the message fits the toast's 36 columns.
-      const header = flatItems().find(
-        (item) => item.type === "header" && item.groupKey === name,
-      );
-      const shown = truncateText(
-        header?.type === "header" ? header.label : name,
-        24,
-      );
-      actions.showToast(
-        merging ? `Merged into ${shown}` : `Renamed to ${shown}`,
-      );
+      // its raw path). A merge says how to undo it, and stays up longer to
+      // be read.
+      const shown = headerLabel(name);
+      if (merging)
+        actions.showFittedToast((width) => mergedToast(shown, width), 4_000);
+      else actions.showFittedToast((width) => renamedToast(shown, width));
     },
 
     /**
@@ -3145,7 +3174,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const collapsed = new Set(collapsedGroups());
       if (collapsed.delete(key)) for (const k of split) collapsed.add(k);
       commitGroupNames(next, spliceKey(pinnedGroups(), key, split), collapsed);
-      actions.showToast("Group name reset");
+      // The groups that came back, by what their headers now say.
+      const back = (split.length ? split : members).map(headerLabel);
+      actions.showFittedToast((width) => resetToast(back, width), 3_000);
     },
 
     /**
@@ -3392,6 +3423,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     collapsedGroups,
     pinnedGroups,
     groupAliases,
+    toastFit,
     /** Whether group `key` carries a name the user gave it (so Reset Name
      *  has something to undo). */
     groupHasAlias: (key: string) =>
