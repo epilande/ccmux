@@ -318,6 +318,8 @@ export function App(props: AppProps) {
   const reviewEnabled = !props.sidebar && hunkAtLaunch;
   const store = createTUIStore({
     initialPreview: props.initialPreview,
+    // Read once: the preview's width-based default is a launch decision.
+    initialWidth: appDims().width,
     iconStyle: props.iconStyle,
     previewWidth: props.previewWidth,
     columns: props.columns,

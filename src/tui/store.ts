@@ -662,8 +662,20 @@ interface TUIState {
   hideIdle: boolean;
 }
 
+/**
+ * The narrowest terminal the preview opens on by default: a popup at 80% of
+ * a terminal about 175 columns wide. Below it the list needs the columns
+ * more. Only a default: `--preview`, a saved `P` toggle and the
+ * `showPreview` preference all win, and it is decided once, at launch.
+ */
+const PREVIEW_AUTO_MIN_WIDTH = 140;
+
 interface TUIStoreOptions {
+  /** Undefined means nobody chose: the preview opens when `initialWidth` is
+   *  at least {@link PREVIEW_AUTO_MIN_WIDTH}. */
   initialPreview?: boolean;
+  /** The terminal's width at launch, for the preview's default. */
+  initialWidth?: number;
   promptDisplay?: PromptDisplay;
   iconStyle?: IconStyle;
   previewWidth?: number;
@@ -988,7 +1000,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     daemonHealth: { degraded: false },
     tmuxSocketError: null,
     error: null,
-    showPreview: options.sidebar ? false : (options.initialPreview ?? false),
+    showPreview: options.sidebar
+      ? false
+      : (options.initialPreview ??
+        (options.initialWidth ?? 0) >= PREVIEW_AUTO_MIN_WIDTH),
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,

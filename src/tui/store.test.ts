@@ -639,6 +639,32 @@ describe("store", () => {
       expect(store.state.showPreview).toBe(true);
     });
 
+    it("opens by default on a terminal at least 140 columns wide", () => {
+      expect(createTUIStore({ initialWidth: 139 }).state.showPreview).toBe(
+        false,
+      );
+      expect(createTUIStore({ initialWidth: 140 }).state.showPreview).toBe(
+        true,
+      );
+    });
+
+    it("lets an explicit choice beat the width default either way", () => {
+      expect(
+        createTUIStore({ initialWidth: 200, initialPreview: false }).state
+          .showPreview,
+      ).toBe(false);
+      expect(
+        createTUIStore({ initialWidth: 80, initialPreview: true }).state
+          .showPreview,
+      ).toBe(true);
+    });
+
+    it("never opens in the sidebar, however wide", () => {
+      expect(
+        createTUIStore({ sidebar: true, initialWidth: 300 }).state.showPreview,
+      ).toBe(false);
+    });
+
     it("should toggle showPreview state", () => {
       const store = createTUIStore();
       store.actions.togglePreview();
