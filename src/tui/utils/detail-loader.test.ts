@@ -167,6 +167,29 @@ describe("createDetailLoader", () => {
     loader.dispose();
   });
 
+  it("carries an R pressed with nothing under the cursor to the next item", async () => {
+    const gh = controlledFetch();
+    const loader = mount(gh.fetch);
+    await sleep(20);
+    gh.answer("A");
+    await sleep(0);
+    // A list reload empties the rows (the cursor is held) as R lands.
+    loader.setTarget(null);
+    loader.refresh();
+    loader.setTarget("a");
+    // Read at once, past the daemon's cache, not served from this one.
+    expect(loader.state()).toEqual({ status: "loading" });
+    expect(gh.asked.at(-1)).toEqual({ key: "a", refresh: true });
+    gh.answer("A2");
+    await sleep(0);
+    expect(loader.state()).toEqual({ status: "ready", detail: "A2" });
+    // Only once: the next ordinary move reads normally.
+    loader.setTarget("b");
+    await sleep(20);
+    expect(gh.asked.at(-1)).toEqual({ key: "b", refresh: false });
+    loader.dispose();
+  });
+
   it("is idle with nothing under the cursor", async () => {
     const gh = controlledFetch();
     const loader = mount(gh.fetch);

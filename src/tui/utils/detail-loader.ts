@@ -63,6 +63,10 @@ export function createDetailLoader<K, T>(
   /** An item `R` asked to re-read whose read has not started yet. It wins
    *  over a cache hit until it does, however long the cursor is away. */
   let refreshId: string | null = null;
+  /** `R` landed with nothing under the cursor, as when a list reload has
+   *  emptied the rows and the cursor is held until they return: the next
+   *  item the cursor lands on is the one to refresh. */
+  let refreshNext = false;
   /** Bumped by `R`. A reply to a read started before the bump is from
    *  before the refresh: it neither repopulates the cache nor paints. */
   let epoch = 0;
@@ -87,6 +91,16 @@ export function createDetailLoader<K, T>(
   /** Start the read for the current item, if its debounce is done and the
    *  slot is free; otherwise whichever of the two finishes last calls this
    *  again. */
+  /** Re-read `id` past both caches, at once: an explicit refresh does not
+   *  wait out the debounce, only for the slot. */
+  function refresh(id: string): void {
+    refreshId = id;
+    settled = id;
+    clearTimeout(timer);
+    setTagged({ id, state: { status: "loading" } });
+    pump();
+  }
+
   function pump(): void {
     if (disposed || inFlight !== null) return;
     const key = untrack(options.target);
@@ -133,6 +147,11 @@ export function createDetailLoader<K, T>(
       setTagged({ id, state: { status: "idle" } });
       return;
     }
+    if (refreshNext) {
+      refreshNext = false;
+      refresh(id);
+      return;
+    }
     const hit = fresh(id);
     if (hit) {
       setTagged({ id, state: { status: "ready", detail: hit.detail } });
@@ -153,14 +172,8 @@ export function createDetailLoader<K, T>(
           const id = untrack(targetId);
           cache.clear();
           epoch += 1;
-          if (id === null) return;
-          refreshId = id;
-          // Immediate: an explicit refresh does not wait out the debounce,
-          // only for the slot.
-          settled = id;
-          clearTimeout(timer);
-          setTagged({ id, state: { status: "loading" } });
-          pump();
+          if (id === null) refreshNext = true;
+          else refresh(id);
         },
         { defer: true },
       ),

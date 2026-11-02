@@ -1109,79 +1109,84 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
           </Show>
 
           <Show when={phase() !== "error"}>
-            <Show
-              when={hasRows(visible())}
-              fallback={
-                <box paddingTop={1}>
-                  <Text fg={emptyState().fg}>
-                    {truncateText(emptyState().text, listArea())}
-                  </Text>
-                </box>
-              }
-            >
-              <box flexDirection="row" flexGrow={1}>
-                <scrollbox
-                  flexGrow={1}
-                  paddingRight={previewShown() ? PREVIEW_GAP : 0}
-                  ref={(r: ScrollBoxRenderable) => {
-                    listBox = r;
-                    syncScrollbarThumb(r);
-                    const bump = () => setScrollboxLayout((v) => v + 1);
-                    r.viewport.on("resize", bump);
-                    r.content.on("resize", bump);
-                  }}
+            {/* The preview sits OUTSIDE the rows' gate: `R` empties the lists
+                while they reload, and a preview inside it would unmount,
+                taking its loader, cache and pending refresh with it. */}
+            <box flexDirection="row" flexGrow={1}>
+              <box flexDirection="column" flexGrow={1}>
+                <Show
+                  when={hasRows(visible())}
+                  fallback={
+                    <box paddingTop={1}>
+                      <Text fg={emptyState().fg}>
+                        {truncateText(emptyState().text, listArea())}
+                      </Text>
+                    </box>
+                  }
                 >
-                  <For
-                    each={visible().filter(
-                      (r) => r.prs.length + r.issues.length > 0,
-                    )}
+                  <scrollbox
+                    flexGrow={1}
+                    paddingRight={previewShown() ? PREVIEW_GAP : 0}
+                    ref={(r: ScrollBoxRenderable) => {
+                      listBox = r;
+                      syncScrollbarThumb(r);
+                      const bump = () => setScrollboxLayout((v) => v + 1);
+                      r.viewport.on("resize", bump);
+                      r.content.on("resize", bump);
+                    }}
                   >
-                    {(repo) => (
-                      <box flexDirection="column">
-                        <GroupHeader
-                          label={repo.repoName}
-                          count={repo.prs.length + repo.issues.length}
-                          width={listWidth()}
-                          // Rows here have no right padding, so neither does
-                          // the header: its rule ends where they do.
-                          flushRight
-                          collapsed={collapsed().has(repo.repoRoot)}
-                          selected={headerRepo()?.repoRoot === repo.repoRoot}
-                          members={[]}
-                          onActivate={() => {
-                            if (props.enabled === false) return;
-                            setCursorKey(`repo:${repo.repoRoot}`);
-                            toggleGroup(repo.repoRoot);
-                          }}
-                        />
-                        <Show when={!collapsed().has(repo.repoRoot)}>
-                          <For each={[...repo.prs, ...repo.issues]}>
-                            {renderRow}
-                          </For>
-                        </Show>
-                      </box>
-                    )}
-                  </For>
-                </scrollbox>
-                <Show when={previewShown()}>
-                  <SourcePreview
-                    row={cursorRow()}
-                    age={(() => {
-                      const row = cursorRow();
-                      return row
-                        ? sourceAge(
-                            (row.kind === "pr" ? row.pr : row.issue).createdAt,
-                          )
-                        : "";
-                    })()}
-                    width={previewWidth()}
-                    focused={props.previewFocused}
-                    onScrollboxRef={(ref) => props.onPreviewScrollbox?.(ref)}
-                    refreshKey={detailRefresh()}
-                  />
+                    <For
+                      each={visible().filter(
+                        (r) => r.prs.length + r.issues.length > 0,
+                      )}
+                    >
+                      {(repo) => (
+                        <box flexDirection="column">
+                          <GroupHeader
+                            label={repo.repoName}
+                            count={repo.prs.length + repo.issues.length}
+                            width={listWidth()}
+                            // Rows here have no right padding, so neither does
+                            // the header: its rule ends where they do.
+                            flushRight
+                            collapsed={collapsed().has(repo.repoRoot)}
+                            selected={headerRepo()?.repoRoot === repo.repoRoot}
+                            members={[]}
+                            onActivate={() => {
+                              if (props.enabled === false) return;
+                              setCursorKey(`repo:${repo.repoRoot}`);
+                              toggleGroup(repo.repoRoot);
+                            }}
+                          />
+                          <Show when={!collapsed().has(repo.repoRoot)}>
+                            <For each={[...repo.prs, ...repo.issues]}>
+                              {renderRow}
+                            </For>
+                          </Show>
+                        </box>
+                      )}
+                    </For>
+                  </scrollbox>
                 </Show>
               </box>
-            </Show>
+              <Show when={previewShown()}>
+                <SourcePreview
+                  row={cursorRow()}
+                  age={(() => {
+                    const row = cursorRow();
+                    return row
+                      ? sourceAge(
+                          (row.kind === "pr" ? row.pr : row.issue).createdAt,
+                        )
+                      : "";
+                  })()}
+                  width={previewWidth()}
+                  focused={props.previewFocused}
+                  onScrollboxRef={(ref) => props.onPreviewScrollbox?.(ref)}
+                  refreshKey={detailRefresh()}
+                />
+              </Show>
+            </box>
           </Show>
         </box>
 
