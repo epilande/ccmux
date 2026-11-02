@@ -112,6 +112,7 @@ export function createPickerCommand(): Command {
           groupBy: uiState.groupBy ?? prefs.groupBy,
           collapsedGroups: uiState.collapsedGroups,
           pinnedGroups: uiState.pinnedGroups,
+          groupAliases: uiState.groupAliases,
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           persistent,

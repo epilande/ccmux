@@ -32,6 +32,10 @@ interface GroupPreviewProps {
     label: string;
     count: number;
     members: FilteredSession[];
+    /** The group's final (possibly renamed) key. */
+    groupKey?: string;
+    /** The raw keys folded into it; a rename or merge shows them. */
+    rawKeys?: string[];
     /** Set on a project header whose members all share one repo. */
     repoRoot?: string;
   };
@@ -374,6 +378,26 @@ const InventoryRow: Component<{
   );
 };
 
+/**
+ * The dimmed line under a renamed or merged group's name: where its sessions
+ * come from, so a merged group stays inspectable. Null for a group under its
+ * own derived name. Path-shaped keys are home-shortened like a cwd label.
+ */
+function groupSourcesLine(
+  header: { groupKey?: string; rawKeys?: string[] },
+  width: number,
+): string | null {
+  const raw = header.rawKeys;
+  if (!raw?.length || (raw.length === 1 && raw[0] === header.groupKey))
+    return null;
+  const names = raw.map(shortenCwd);
+  const text =
+    names.length === 1
+      ? `renamed from ${names[0]}`
+      : `${names.length} sources: ${names.join(" · ")}`;
+  return truncateText(text, Math.max(1, width));
+}
+
 export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
@@ -408,15 +432,26 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
       : [];
   });
 
+  const sources = createMemo(() =>
+    groupSourcesLine(props.header, separatorWidth()),
+  );
+
   return (
     <PreviewFrame width={props.width} focused={props.focused}>
-      <box height={3} flexDirection="column">
+      <box height={sources() ? 4 : 3} flexDirection="column">
         <box flexDirection="row" gap={1}>
           <Text fg={theme.text}>
             <b>{props.header.label}</b>
           </Text>
           <Text fg={theme.subtext}>({props.header.count} sessions)</Text>
         </box>
+        <Show when={sources()}>
+          {(line: () => string) => (
+            <Text fg={theme.overlay} wrapMode="none">
+              {line()}
+            </Text>
+          )}
+        </Show>
         <box flexDirection="row" gap={2}>
           <Show when={summary().working > 0}>
             <Text fg={theme.peach}>

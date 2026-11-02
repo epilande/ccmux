@@ -1,9 +1,11 @@
 import type { AttentionType, EnrichedSession } from "../../types";
 import { getEffectiveStatus } from "../../daemon/status-machine";
-import { shortenCwd } from "./format";
+import { shortenCwd, sliceToWidth } from "./format";
 export type { GroupBy } from "../../lib/preferences";
 export { VALID_GROUP_BY, DEFAULT_GROUP_BY } from "../../lib/preferences";
+import { VALID_GROUP_BY } from "../../lib/preferences";
 import type { GroupBy } from "../../lib/preferences";
+import type { UIState } from "../../lib/state";
 
 /** Waiting subtype keys in StatusSummary */
 type WaitingKey =
@@ -82,6 +84,12 @@ export type FlatItem =
        */
       hiddenWaiting?: number;
       collapsed: boolean;
+      /**
+       * The raw keys (see {@link groupKeyOf}) whose sessions this header
+       * holds, sorted. Absent on a synthetic header. More than one, or one
+       * that differs from `groupKey`, means the group is renamed or merged.
+       */
+      rawKeys?: string[];
       /** Raw member references, not a precomputed summary. The status summary
        * is derived downstream in the header's own reactive scope so this memo
        * never reads `session.subagents`: subagent churn (one write per fold
@@ -100,6 +108,64 @@ export type FlatItem =
 export interface GroupEntry {
   key: string;
   members: FilteredSession[];
+}
+
+/** A group as {@link groupSessions} builds it: also the raw keys folded into
+ *  it, sorted. */
+export interface AliasedGroupEntry extends GroupEntry {
+  rawKeys: string[];
+}
+
+/**
+ * The user's group names, per groupBy mode: raw group key to displayed name.
+ * Per mode because one string means different things in different modes (a
+ * project named `dev` is not a tmux session named `dev`). Persisted whole in
+ * `state.json`; never pruned for liveness, so a directory closed for a week
+ * still lands in its renamed group when a session reopens there.
+ */
+export type GroupAliases = NonNullable<UIState["groupAliases"]>;
+
+/** The widest a group name may be, in terminal columns. */
+export const GROUP_NAME_MAX_WIDTH = 64;
+
+/** C0 controls, DEL and C1 controls: none belongs in a one-line label, and
+ *  `\0` is how ccmux spells its synthetic header keys. */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
+
+/**
+ * A typed group name made safe to key and draw: control characters stripped,
+ * trimmed, and capped at {@link GROUP_NAME_MAX_WIDTH} columns. Empty means
+ * there is no name (the prompt treats that as a cancel). Stripping `\0`
+ * means a name can never collide with a synthetic header key.
+ */
+export function sanitizeGroupName(name: string): string {
+  return sliceToWidth(
+    name.replace(CONTROL_CHARS, "").trim(),
+    GROUP_NAME_MAX_WIDTH,
+  ).trimEnd();
+}
+
+/**
+ * `groupAliases` as read from disk, reduced to what the fold can trust: known
+ * modes, string-to-string entries, names that are already sanitized and are
+ * not a no-op (a name equal to its raw key is no alias). Entries are copied
+ * with `Object.fromEntries`, so a raw key spelled `__proto__` stays data.
+ */
+export function normalizeGroupAliases(input: unknown): GroupAliases {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const out: GroupAliases = {};
+  for (const mode of VALID_GROUP_BY) {
+    if (mode === "none" || !Object.hasOwn(input, mode)) continue;
+    const map = (input as Record<string, unknown>)[mode];
+    if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+    const entries = Object.entries(map).flatMap(([raw, value]) => {
+      if (typeof value !== "string") return [];
+      const name = sanitizeGroupName(value);
+      return name && name !== raw ? [[raw, name] as const] : [];
+    });
+    if (entries.length) out[mode] = Object.fromEntries(entries);
+  }
+  return out;
 }
 
 /** Deliberate group for paneless invoke worker rows under tmux-derived
@@ -124,11 +190,14 @@ function panelessGroupKey(session: EnrichedSession): string | null {
   return null;
 }
 
-/** Derive the group key for a session based on the groupBy mode */
-export function getGroupKey(
-  session: EnrichedSession,
-  groupBy: GroupBy,
-): string {
+/**
+ * The key a session derives for `groupBy` before any rename: its project,
+ * directory, tmux session or window. Deliberately not exported: every
+ * consumer goes through {@link groupKeyOf}, so a call site that forgets the
+ * alias fold is a compile error rather than a group that silently splits or
+ * un-collapses after a rename.
+ */
+function rawGroupKey(session: EnrichedSession, groupBy: GroupBy): string {
   // Paneless rows co-locate by cwd under project/cwd grouping (matching real
   // sessions in the same directory); under session/window grouping they have
   // no target, so `panelessGroupKey` gives them a deliberate group.
@@ -154,6 +223,46 @@ export function getGroupKey(
     case "none":
       return "";
   }
+}
+
+/**
+ * The group a session belongs to: its raw key, renamed by `aliases` for this
+ * mode. One hop and never chained, so an alias's value is a name, never
+ * looked up again. Bucketing, sorting, pinning and collapsing all run on
+ * this final name, which is what makes a rename to an existing name a merge.
+ */
+export function groupKeyOf(
+  session: EnrichedSession,
+  groupBy: GroupBy,
+  aliases: GroupAliases,
+): string {
+  const raw = rawGroupKey(session, groupBy);
+  if (groupBy === "none") return raw;
+  return resolveAlias(raw, aliases[groupBy]);
+}
+
+/**
+ * The key a rename replaced for `session`, or null when its group carries
+ * the derived key unchanged. For search, which still finds a renamed group
+ * by its old name; never a group key itself (that is {@link groupKeyOf}).
+ */
+export function aliasedRawKey(
+  session: EnrichedSession,
+  groupBy: GroupBy,
+  aliases: GroupAliases,
+): string | null {
+  if (groupBy === "none") return null;
+  const raw = rawGroupKey(session, groupBy);
+  return resolveAlias(raw, aliases[groupBy]) === raw ? null : raw;
+}
+
+/** `raw` through one mode's alias map. Own properties only: a raw key that
+ *  happens to be `constructor` must not read `Object.prototype`. */
+function resolveAlias(
+  raw: string,
+  map: Readonly<Record<string, string>> | undefined,
+): string {
+  return map && Object.hasOwn(map, raw) ? map[raw]! : raw;
 }
 
 /** Format a group key into a display label */
@@ -196,18 +305,31 @@ export function computeStatusSummary(
   return summary;
 }
 
-/** Collect filtered sessions into GroupEntry[] keyed by groupBy mode */
+/** Collect filtered sessions into groups keyed by their final (aliased)
+ *  names, each carrying the raw keys folded into it. */
 export function groupSessions(
   filtered: FilteredSession[],
   groupBy: GroupBy,
-): GroupEntry[] {
-  const groups = new Map<string, FilteredSession[]>();
+  aliases: GroupAliases,
+): AliasedGroupEntry[] {
+  const map = groupBy === "none" ? undefined : aliases[groupBy];
+  const groups = new Map<
+    string,
+    { members: FilteredSession[]; raw: Set<string> }
+  >();
   for (const fs of filtered) {
-    const key = getGroupKey(fs.session, groupBy);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(fs);
+    const raw = rawGroupKey(fs.session, groupBy);
+    const key = resolveAlias(raw, map);
+    let group = groups.get(key);
+    if (!group) groups.set(key, (group = { members: [], raw: new Set() }));
+    group.members.push(fs);
+    group.raw.add(raw);
   }
-  return [...groups.entries()].map(([key, members]) => ({ key, members }));
+  return [...groups.entries()].map(([key, { members, raw }]) => ({
+    key,
+    members,
+    rawKeys: [...raw].sort((a, b) => a.localeCompare(b)),
+  }));
 }
 
 export const NEEDS_YOU_GROUP_KEY = "\0needs-you";
@@ -239,14 +361,14 @@ export function isSyntheticGroupKey(key: string): boolean {
  * search force-expanding collapsed groups). The stable sort keeps the
  * pinned-then-alphabetical order as the tiebreak between equal scores.
  */
-export function sortGroups(
-  groups: GroupEntry[],
+export function sortGroups<T extends GroupEntry>(
+  groups: T[],
   pinnedGroups: string[],
   byScore = false,
-): GroupEntry[] {
+): T[] {
   const pinnedSet = new Set(pinnedGroups);
-  const pinned: GroupEntry[] = [];
-  const unpinned: GroupEntry[] = [];
+  const pinned: T[] = [];
+  const unpinned: T[] = [];
 
   for (const group of groups) {
     if (pinnedSet.has(group.key)) {
@@ -290,6 +412,7 @@ export function buildFlatItems(
   pinnedGroups: string[] = [],
   attentionBand = true,
   hiddenWaiting = 0,
+  aliases: GroupAliases = {},
 ): FlatItem[] {
   const waitingStartedAt = (fs: FilteredSession): number => {
     const parsed = Date.parse(
@@ -345,11 +468,11 @@ export function buildFlatItems(
     ];
   }
   const sorted = sortGroups(
-    groupSessions(rest, groupBy),
+    groupSessions(rest, groupBy, aliases),
     pinnedGroups,
     isSearching,
   );
-  for (const { key, members } of sorted) {
+  for (const { key, members, rawKeys } of sorted) {
     const isCollapsed = !isSearching && collapsed.has(key);
     const root =
       members[0]?.session.mainRepoRoot ?? members[0]?.session.worktreeRoot;
@@ -374,10 +497,13 @@ export function buildFlatItems(
     items.push({
       type: "header",
       groupKey: key,
-      label: getGroupLabel(key, groupBy),
+      // A name the user typed is its own label; only a derived key gets the
+      // mode's formatting (a cwd key's home-shortening).
+      label: rawKeys.includes(key) ? getGroupLabel(key, groupBy) : key,
       count: members.length,
       collapsed: isCollapsed,
       members,
+      rawKeys,
       repoRoot,
     });
     if (!isCollapsed) {

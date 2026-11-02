@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import {
-  getGroupKey,
+  groupKeyOf,
   getGroupLabel,
   computeStatusSummary,
   buildFlatItems,
@@ -10,6 +10,10 @@ import {
   scrollTarget,
   sortGroups,
   groupSessions,
+  normalizeGroupAliases,
+  sanitizeGroupName,
+  GROUP_NAME_MAX_WIDTH,
+  NEEDS_YOU_GROUP_KEY,
   type FilteredSession,
   type GroupEntry,
 } from "./grouping";
@@ -33,15 +37,15 @@ function toFiltered(session: EnrichedSession): FilteredSession {
   return { session, highlights: null, paneMatch: false };
 }
 
-describe("getGroupKey", () => {
+describe("groupKeyOf", () => {
   it("groups by project name", () => {
     const session = mockSession({ project: "my-app" });
-    expect(getGroupKey(session, "project")).toBe("my-app");
+    expect(groupKeyOf(session, "project", {})).toBe("my-app");
   });
 
   it("falls back to cwd for project grouping when project is empty", () => {
     const session = mockSession({ project: "", cwd: "/some/path" });
-    expect(getGroupKey(session, "project")).toBe("/some/path");
+    expect(groupKeyOf(session, "project", {})).toBe("/some/path");
   });
 
   it("groups by cwd using paneCwd", () => {
@@ -49,37 +53,37 @@ describe("getGroupKey", () => {
       cwd: "/original",
       paneCwd: "/current/path",
     });
-    expect(getGroupKey(session, "cwd")).toBe("/current/path");
+    expect(groupKeyOf(session, "cwd", {})).toBe("/current/path");
   });
 
   it("falls back to cwd when paneCwd is null", () => {
     const session = mockSession({ cwd: "/original", paneCwd: null });
-    expect(getGroupKey(session, "cwd")).toBe("/original");
+    expect(groupKeyOf(session, "cwd", {})).toBe("/original");
   });
 
   it("groups by tmux session name", () => {
     const session = mockSession({ tmuxTarget: "my-session:2.0" });
-    expect(getGroupKey(session, "session")).toBe("my-session");
+    expect(groupKeyOf(session, "session", {})).toBe("my-session");
   });
 
   it("groups by tmux window", () => {
     const session = mockSession({ tmuxTarget: "my-session:2.0" });
-    expect(getGroupKey(session, "window")).toBe("my-session:2");
+    expect(groupKeyOf(session, "window", {})).toBe("my-session:2");
   });
 
   it("handles missing tmuxTarget for session", () => {
     const session = mockSession({ tmuxTarget: null });
-    expect(getGroupKey(session, "session")).toBe("(no tmux)");
+    expect(groupKeyOf(session, "session", {})).toBe("(no tmux)");
   });
 
   it("handles missing tmuxTarget for window", () => {
     const session = mockSession({ tmuxTarget: null });
-    expect(getGroupKey(session, "window")).toBe("(no tmux)");
+    expect(groupKeyOf(session, "window", {})).toBe("(no tmux)");
   });
 
   it("returns empty string for none", () => {
     const session = mockSession();
-    expect(getGroupKey(session, "none")).toBe("");
+    expect(groupKeyOf(session, "none", {})).toBe("");
   });
 
   it("groups background (paneless) sessions under (background) for session/window", () => {
@@ -88,8 +92,8 @@ describe("getGroupKey", () => {
       tmuxPane: null,
       tmuxTarget: null,
     });
-    expect(getGroupKey(session, "session")).toBe("(background)");
-    expect(getGroupKey(session, "window")).toBe("(background)");
+    expect(groupKeyOf(session, "session", {})).toBe("(background)");
+    expect(groupKeyOf(session, "window", {})).toBe("(background)");
   });
 
   it("co-locates background sessions by project/cwd under those modes", () => {
@@ -101,8 +105,8 @@ describe("getGroupKey", () => {
       cwd: "/home/user/repos",
       paneCwd: null,
     });
-    expect(getGroupKey(session, "project")).toBe("repos");
-    expect(getGroupKey(session, "cwd")).toBe("/home/user/repos");
+    expect(groupKeyOf(session, "project", {})).toBe("repos");
+    expect(groupKeyOf(session, "cwd", {})).toBe("/home/user/repos");
   });
 });
 
@@ -149,7 +153,7 @@ describe("groupSessions", () => {
       toFiltered(mockSession({ id: "b", project: "beta" })),
       toFiltered(mockSession({ id: "c", project: "alpha" })),
     ];
-    const groups = groupSessions(filtered, "project");
+    const groups = groupSessions(filtered, "project", {});
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === "alpha")?.members).toHaveLength(2);
     expect(groups.find((g) => g.key === "beta")?.members).toHaveLength(1);
@@ -161,14 +165,14 @@ describe("groupSessions", () => {
       toFiltered(mockSession({ id: "b1", project: "beta" })),
       toFiltered(mockSession({ id: "a2", project: "alpha" })),
     ];
-    const groups = groupSessions(filtered, "project");
+    const groups = groupSessions(filtered, "project", {});
     const alpha = groups.find((g) => g.key === "alpha")!;
     expect(alpha.members[0].session.id).toBe("a1");
     expect(alpha.members[1].session.id).toBe("a2");
   });
 
   it("returns empty array for empty input", () => {
-    expect(groupSessions([], "project")).toEqual([]);
+    expect(groupSessions([], "project", {})).toEqual([]);
   });
 
   it("groups by session", () => {
@@ -177,7 +181,7 @@ describe("groupSessions", () => {
       toFiltered(mockSession({ id: "b", tmuxTarget: "dev:1.0" })),
       toFiltered(mockSession({ id: "c", tmuxTarget: "work:0.0" })),
     ];
-    const groups = groupSessions(filtered, "session");
+    const groups = groupSessions(filtered, "session", {});
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === "dev")?.members).toHaveLength(2);
     expect(groups.find((g) => g.key === "work")?.members).toHaveLength(1);
@@ -1045,5 +1049,248 @@ describe("buildFlatItems with waiting sessions the scope hides", () => {
       2,
     );
     expect(items.map(label)).toEqual(["a"]);
+  });
+});
+
+describe("group aliases", () => {
+  const headers = (items: ReturnType<typeof buildFlatItems>) =>
+    items.filter(
+      (i): i is Extract<(typeof items)[number], { type: "header" }> =>
+        i.type === "header",
+    );
+
+  it("folds an aliased raw key into its alias", () => {
+    const session = mockSession({ project: "px-api" });
+    expect(
+      groupKeyOf(session, "project", { project: { "px-api": "ProjectX" } }),
+    ).toBe("ProjectX");
+  });
+
+  it("namespaces aliases by groupBy mode", () => {
+    // The same string means a project in one mode and a tmux session in
+    // another; an alias for one never reaches the other.
+    const session = mockSession({ project: "dev", tmuxTarget: "dev:0.0" });
+    const aliases = { project: { dev: "Development" } };
+    expect(groupKeyOf(session, "project", aliases)).toBe("Development");
+    expect(groupKeyOf(session, "session", aliases)).toBe("dev");
+  });
+
+  it("is one hop: an alias's value is never itself looked up", () => {
+    const session = mockSession({ project: "a" });
+    expect(
+      groupKeyOf(session, "project", { project: { a: "b", b: "c" } }),
+    ).toBe("b");
+  });
+
+  it("never reads an inherited property as an alias", () => {
+    const session = mockSession({ project: "constructor" });
+    expect(groupKeyOf(session, "project", { project: {} })).toBe("constructor");
+  });
+
+  it("renames paneless buckets like any other raw key", () => {
+    const session = mockSession({ tmuxTarget: undefined, tmuxPane: undefined });
+    expect(
+      groupKeyOf(session, "session", { session: { "(no tmux)": "Loose" } }),
+    ).toBe("Loose");
+  });
+
+  it("merges groups renamed to the same name, carrying every raw key", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "px-web" })),
+      toFiltered(mockSession({ id: "b", project: "px-api" })),
+      toFiltered(mockSession({ id: "c", project: "other" })),
+      toFiltered(mockSession({ id: "d", project: "px-infra" })),
+    ];
+    const aliases = {
+      project: {
+        "px-api": "ProjectX",
+        "px-infra": "ProjectX",
+        "px-web": "ProjectX",
+      },
+    };
+    const groups = groupSessions(filtered, "project", aliases);
+    const merged = groups.find((g) => g.key === "ProjectX")!;
+    expect(merged.members.map((m) => m.session.id)).toEqual(["a", "b", "d"]);
+    expect(merged.rawKeys).toEqual(["px-api", "px-infra", "px-web"]);
+    expect(groups.find((g) => g.key === "other")!.rawKeys).toEqual(["other"]);
+  });
+
+  it("merges into an existing raw group without an alias of its own", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "alpha" })),
+      toFiltered(mockSession({ id: "b", project: "beta" })),
+    ];
+    const groups = groupSessions(filtered, "project", {
+      project: { beta: "alpha" },
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.key).toBe("alpha");
+    expect(groups[0]!.rawKeys).toEqual(["alpha", "beta"]);
+  });
+
+  it("sorts groups by their displayed names", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "apple" })),
+      toFiltered(mockSession({ id: "z", project: "zebra" })),
+    ];
+    const items = buildFlatItems(
+      filtered,
+      "project",
+      new Set(),
+      false,
+      [],
+      true,
+      0,
+      { project: { zebra: "Aardvark" } },
+    );
+    expect(headers(items).map((h) => h.label)).toEqual(["Aardvark", "apple"]);
+  });
+
+  it("puts rawKeys on headers and labels an aliased cwd key verbatim", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", paneCwd: "/home/user/work/api" })),
+      toFiltered(mockSession({ id: "b", paneCwd: "/home/user/work/web" })),
+    ];
+    const items = buildFlatItems(
+      filtered,
+      "cwd",
+      new Set(),
+      false,
+      [],
+      true,
+      0,
+      { cwd: { "/home/user/work/api": "API" } },
+    );
+    const api = headers(items).find((h) => h.groupKey === "API");
+    const web = headers(items).find(
+      (h) => h.groupKey === "/home/user/work/web",
+    );
+    expect(api!.label).toBe("API");
+    expect(api!.rawKeys).toEqual(["/home/user/work/api"]);
+    // An unaliased cwd key keeps the mode's formatting.
+    expect(web!.rawKeys).toEqual(["/home/user/work/web"]);
+    expect(web!.label).toBe(getGroupLabel("/home/user/work/web", "cwd"));
+  });
+
+  it("never home-shortens a typed name that looks like a path", () => {
+    const typed = `${process.env.HOME}/named`;
+    const items = buildFlatItems(
+      [toFiltered(mockSession({ id: "a", paneCwd: "/srv/api" }))],
+      "cwd",
+      new Set(),
+      false,
+      [],
+      true,
+      0,
+      { cwd: { "/srv/api": typed } },
+    );
+    expect(headers(items)[0]!.label).toBe(typed);
+  });
+
+  it("collapses and pins by the displayed name", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "px-api" })),
+      toFiltered(mockSession({ id: "b", project: "px-web" })),
+      toFiltered(mockSession({ id: "c", project: "aaa" })),
+    ];
+    const aliases = { project: { "px-api": "ProjectX", "px-web": "ProjectX" } };
+    const items = buildFlatItems(
+      filtered,
+      "project",
+      new Set(["ProjectX"]),
+      false,
+      ["ProjectX"],
+      true,
+      0,
+      aliases,
+    );
+    expect(
+      items.map((i) =>
+        i.type === "header" ? i.label : i.filteredSession.session.id,
+      ),
+    ).toEqual(["ProjectX", "aaa", "c"]);
+    expect(headers(items)[0]!.collapsed).toBe(true);
+  });
+
+  it("gives synthetic headers no rawKeys", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "w", project: "a", status: "waiting" })),
+      toFiltered(mockSession({ id: "i", project: "a" })),
+    ];
+    const items = buildFlatItems(filtered, "project", new Set(), false);
+    const band = headers(items).find((h) => h.groupKey === NEEDS_YOU_GROUP_KEY);
+    expect(band?.rawKeys).toBeUndefined();
+  });
+});
+
+describe("sanitizeGroupName", () => {
+  it("trims the name", () => {
+    expect(sanitizeGroupName("  ProjectX  ")).toBe("ProjectX");
+  });
+
+  it("strips C0, DEL and C1 control characters", () => {
+    expect(sanitizeGroupName("Pro\0ject\x1b[31mX\x7f\x9b")).toBe(
+      "Project[31mX",
+    );
+  });
+
+  it("never yields a synthetic key", () => {
+    expect(sanitizeGroupName("\0needs-you")).toBe("needs-you");
+    expect(sanitizeGroupName("\0")).toBe("");
+  });
+
+  it("is empty for a blank or control-only name", () => {
+    expect(sanitizeGroupName("   ")).toBe("");
+    expect(sanitizeGroupName("\t\n")).toBe("");
+  });
+
+  it(`caps the name at ${GROUP_NAME_MAX_WIDTH} columns, not code units`, () => {
+    expect(sanitizeGroupName("x".repeat(100))).toBe(
+      "x".repeat(GROUP_NAME_MAX_WIDTH),
+    );
+    // A CJK glyph is two columns wide.
+    const wide = sanitizeGroupName("漢".repeat(40));
+    expect(wide).toBe("漢".repeat(GROUP_NAME_MAX_WIDTH / 2));
+  });
+
+  it("trims a space the cap leaves at the end", () => {
+    expect(sanitizeGroupName(`${"x".repeat(63)} y`)).toBe("x".repeat(63));
+  });
+});
+
+describe("normalizeGroupAliases", () => {
+  it("keeps string-to-string entries for known modes", () => {
+    expect(
+      normalizeGroupAliases({
+        project: { a: "A", b: 3, c: "" },
+        bogus: { x: "y" },
+        session: "nope",
+        cwd: { "/x": "X", "/y": "/y" },
+      }),
+    ).toEqual({ project: { a: "A" }, cwd: { "/x": "X" } });
+  });
+
+  it("drops names that sanitize to something else or to nothing", () => {
+    expect(
+      normalizeGroupAliases({ project: { a: "\0needs-you", b: " B " } }),
+    ).toEqual({
+      project: { a: "needs-you", b: "B" },
+    });
+  });
+
+  it("is empty for anything that is not an object", () => {
+    expect(normalizeGroupAliases(undefined)).toEqual({});
+    expect(normalizeGroupAliases(null)).toEqual({});
+    expect(normalizeGroupAliases([])).toEqual({});
+    expect(normalizeGroupAliases("x")).toEqual({});
+  });
+
+  it("keeps a raw key named __proto__ as data", () => {
+    const parsed = JSON.parse('{"project":{"__proto__":"Weird"}}');
+    const result = normalizeGroupAliases(parsed);
+    expect(Object.hasOwn(result.project!, "__proto__")).toBe(true);
+    expect(
+      groupKeyOf(mockSession({ project: "__proto__" }), "project", result),
+    ).toBe("Weird");
   });
 });

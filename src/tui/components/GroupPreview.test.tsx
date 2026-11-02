@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import {
   GroupPreview,
   inventoryEntries,
@@ -432,5 +434,78 @@ describe("GroupPreview repository facts", () => {
     // The idle checkout is listed too: the inventory, not just where
     // sessions happen to be.
     expect(frame).toContain("idle  chore/idle");
+  });
+});
+
+describe("GroupPreview renamed and merged groups", () => {
+  async function render(header: {
+    label: string;
+    groupKey: string;
+    rawKeys?: string[];
+  }) {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <GroupPreview
+            header={{
+              ...header,
+              count: 2,
+              members: membersFromSummary({ ...emptySummary(), idle: 2 }),
+            }}
+            sessions={[]}
+            width={40}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 20 },
+    );
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  it("lists the raw keys a merged group folds together, dimmed under its name", async () => {
+    const frame = await render({
+      label: "ProjectX",
+      groupKey: "ProjectX",
+      rawKeys: ["px-api", "px-infra", "px-web"],
+    });
+    const lines = frame.split("\n");
+    const name = lines.findIndex((l) => l.includes("ProjectX"));
+    expect(lines[name + 1]).toContain("3 sources: px-api · px-infra · px-web");
+    const span = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((s) => s.text.includes("3 sources"));
+    expect(span?.fg.toInts()).toEqual(RGBA.fromHex(theme.overlay).toInts());
+  });
+
+  it("names the key a renamed group came from", async () => {
+    const frame = await render({
+      label: "Backend",
+      groupKey: "Backend",
+      rawKeys: ["beta"],
+    });
+    expect(frame).toContain("renamed from beta");
+  });
+
+  it("adds nothing for a group under its own name", async () => {
+    const frame = await render({
+      label: "alpha",
+      groupKey: "alpha",
+      rawKeys: ["alpha"],
+    });
+    expect(frame).not.toContain("renamed from");
+    expect(frame).not.toContain("sources");
+  });
+
+  it("cuts a long sources line to the pane", async () => {
+    const frame = await render({
+      label: "Big",
+      groupKey: "Big",
+      rawKeys: Array.from({ length: 12 }, (_, i) => `repository-${i}`),
+    });
+    const line = frame.split("\n").find((l) => l.includes("12 sources"))!;
+    expect(line).toContain("…");
   });
 });

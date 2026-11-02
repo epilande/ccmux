@@ -170,6 +170,7 @@ export function createSidebarCommand(): Command {
           groupBy: uiState.groupBy ?? prefs.groupBy,
           collapsedGroups: uiState.collapsedGroups,
           pinnedGroups: uiState.pinnedGroups,
+          groupAliases: uiState.groupAliases,
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           sidebar: true,

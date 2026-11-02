@@ -21,6 +21,10 @@ export interface UIState {
   showPrompt?: boolean;
   hideIdle?: boolean;
   groupBy?: GroupBy;
+  /** Group names the user gave, per groupBy mode: raw group key to name
+   *  (`{ project: { "px-api": "ProjectX" } }`). Always written whole, since
+   *  `setUIState` merges only the top level, and never pruned for liveness. */
+  groupAliases?: Partial<Record<GroupBy, Record<string, string>>>;
   /** Agent last spawned from the picker's new-session dialog. Persisted
    *  because the one-shot picker exits as soon as it spawns, so the
    *  "last agent" default only survives on disk. */

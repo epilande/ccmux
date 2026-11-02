@@ -9,7 +9,7 @@ import {
 } from "bun:test";
 import { createRoot } from "solid-js";
 import {
-  getGroupKey,
+  groupKeyOf,
   NEEDS_YOU_GROUP_KEY,
   SESSIONS_GROUP_KEY,
   type FlatItem,
@@ -1095,7 +1095,7 @@ describe("store", () => {
               cwd: "/code/alpha",
               tmuxTarget: "dev:1.0",
             });
-            const groupKey = getGroupKey(waiting, groupBy);
+            const groupKey = groupKeyOf(waiting, groupBy, {});
             const store = createTUIStore({
               groupBy,
               collapsedGroups: [groupKey, "untouched"],
@@ -2603,8 +2603,8 @@ describe("store", () => {
         tmuxTarget: "beta:0.0",
         status: "waiting",
       });
-      const alphaKey = getGroupKey(alpha, groupBy);
-      const betaKey = getGroupKey(beta, groupBy);
+      const alphaKey = groupKeyOf(alpha, groupBy, {});
+      const betaKey = groupKeyOf(beta, groupBy, {});
 
       it(`preserves an all-waiting ${groupBy} group across persistence and reload`, async () => {
         let saved: string[] | undefined;
@@ -2796,7 +2796,7 @@ describe("store", () => {
         );
         store.actions.setSessions(sessions.map((s) => ({ ...s })));
         store.actions.setSelectedSessionId("beta");
-        const keys = sessions.map((s) => getGroupKey(s, groupBy));
+        const keys = sessions.map((s) => groupKeyOf(s, groupBy, {}));
         store.actions.moveGroupDown(keys[1]!, "beta");
         expect(store.pinnedGroups()).toEqual([keys[0], keys[2], keys[1]]);
         expect(store.selectedSession()?.id).toBe("beta");
@@ -5311,5 +5311,369 @@ describe("attention band off", () => {
     expect(store.collapsedGroups().has("alpha")).toBe(true);
     expect(store.state.selectedSessionId).toBe("w");
     expect(persisted.some((u) => "collapsedGroups" in u)).toBe(false);
+  });
+});
+
+describe("group rename and merge (#42)", () => {
+  type Header = Extract<FlatItem, { type: "header" }>;
+  const headersOf = (items: FlatItem[]) =>
+    items.filter((i): i is Header => i.type === "header");
+
+  /** A store over alpha, beta and gamma project groups, recording writes. */
+  function setup(options: Parameters<typeof createTUIStore>[0] = {}) {
+    const writes: Record<string, unknown>[] = [];
+    const store = createTUIStore({
+      groupBy: "project",
+      onPersistState: (updates) => {
+        writes.push(updates as Record<string, unknown>);
+      },
+      ...options,
+    });
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha" }),
+      createMockSession({ id: "b", project: "beta" }),
+      createMockSession({ id: "g", project: "gamma" }),
+    ]);
+    return { store, writes };
+  }
+
+  /** Put the cursor on a header (by key) or a session row (by id). */
+  function select(store: ReturnType<typeof createTUIStore>, target: string) {
+    const index = store
+      .flatItems()
+      .findIndex((i) =>
+        i.type === "header"
+          ? i.groupKey === target
+          : i.filteredSession.session.id === target,
+      );
+    expect(index).toBeGreaterThanOrEqual(0);
+    store.actions.setSelectedIndex(index);
+  }
+
+  it("renames a group, and the alias is what the header shows", () => {
+    const { store } = setup();
+    store.actions.renameGroup("beta", "Backend");
+    const backend = headersOf(store.flatItems()).find(
+      (h) => h.groupKey === "Backend",
+    )!;
+    expect(backend.label).toBe("Backend");
+    expect(backend.rawKeys).toEqual(["beta"]);
+    expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+  });
+
+  it("writes the whole groupAliases object, in one immediate write with the layout", () => {
+    const { store, writes } = setup({
+      groupAliases: { session: { dev: "Development" } },
+      pinnedGroups: ["beta"],
+    });
+    store.actions.renameGroup("beta", "Backend");
+    // Not debounced: a second instance reads the rename at once, and the
+    // aliases, pins and collapse land together so it never sees half.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toEqual({
+      groupAliases: {
+        session: { dev: "Development" },
+        project: { beta: "Backend" },
+      },
+      pinnedGroups: ["Backend"],
+      collapsedGroups: [],
+    });
+  });
+
+  it("merges into an existing name, and the target's layout wins", () => {
+    const { store, writes } = setup({
+      pinnedGroups: ["beta", "gamma"],
+      collapsedGroups: ["beta"],
+    });
+    store.actions.renameGroup("beta", "alpha");
+    const headers = headersOf(store.flatItems());
+    expect(headers.map((h) => h.groupKey)).toEqual(["gamma", "alpha"]);
+    const alpha = headers.find((h) => h.groupKey === "alpha")!;
+    expect(alpha.rawKeys).toEqual(["alpha", "beta"]);
+    expect(alpha.members.map((m) => m.session.id)).toEqual(["a", "b"]);
+    // alpha was neither pinned nor collapsed, so the merged group is neither.
+    expect(store.pinnedGroups()).toEqual(["gamma"]);
+    expect(store.collapsedGroups().has("alpha")).toBe(false);
+    expect(writes.at(-1)).toMatchObject({
+      pinnedGroups: ["gamma"],
+      collapsedGroups: [],
+    });
+  });
+
+  it("never duplicates a pin when both sides of a merge were pinned", () => {
+    const { store } = setup({ pinnedGroups: ["beta", "alpha"] });
+    store.actions.renameGroup("beta", "alpha");
+    expect(store.pinnedGroups()).toEqual(["alpha"]);
+  });
+
+  it("keeps the target's collapse on a merge", () => {
+    const { store } = setup({ collapsedGroups: ["alpha"] });
+    store.actions.renameGroup("beta", "alpha");
+    expect(store.collapsedGroups().has("alpha")).toBe(true);
+    expect(store.collapsedGroups().has("beta")).toBe(false);
+  });
+
+  it("carries pin position and collapse to a brand-new name", () => {
+    const { store } = setup({
+      pinnedGroups: ["gamma", "beta"],
+      collapsedGroups: ["beta"],
+    });
+    store.actions.renameGroup("beta", "Zed");
+    expect(store.pinnedGroups()).toEqual(["gamma", "Zed"]);
+    expect(store.collapsedGroups().has("Zed")).toBe(true);
+    expect(store.collapsedGroups().has("beta")).toBe(false);
+  });
+
+  it("moves the header selection with the rename", () => {
+    const { store } = setup();
+    select(store, "beta");
+    store.actions.renameGroup("beta", "Backend");
+    expect(store.selectedHeaderKey()).toBe("Backend");
+    expect(store.selectedGroupHeader()?.groupKey).toBe("Backend");
+  });
+
+  it("rewrites every member's entry when a merged group is renamed", () => {
+    const { store } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    store.actions.renameGroup("X", "Y");
+    expect(store.groupAliases()).toEqual({
+      project: { alpha: "Y", beta: "Y" },
+    });
+  });
+
+  it("deletes an alias renamed back to its raw key", () => {
+    const { store } = setup({ groupAliases: { project: { beta: "B" } } });
+    store.actions.renameGroup("B", "beta");
+    expect(store.groupAliases()).toEqual({});
+    expect(
+      headersOf(store.flatItems()).find((h) => h.groupKey === "beta")?.rawKeys,
+    ).toEqual(["beta"]);
+  });
+
+  it("renames a merged group to one member's raw key without aliasing that key to itself", () => {
+    const { store } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    store.actions.renameGroup("X", "alpha");
+    expect(store.groupAliases()).toEqual({ project: { beta: "alpha" } });
+  });
+
+  it("sanitizes the name before it becomes a key", () => {
+    const { store } = setup();
+    store.actions.renameGroup("beta", "  Back\x1b[31mend\0  ");
+    expect(store.groupAliases()).toEqual({ project: { beta: "Back[31mend" } });
+  });
+
+  it("does nothing for an empty name, a synthetic header, or no grouping", () => {
+    const { store, writes } = setup();
+    store.actions.renameGroup("beta", "   ");
+    store.actions.renameGroup(NEEDS_YOU_GROUP_KEY, "x");
+    store.actions.renameGroup(SESSIONS_GROUP_KEY, "x");
+    expect(store.groupAliases()).toEqual({});
+    store.actions.setGroupBy("none");
+    writes.length = 0;
+    store.actions.renameGroup("", "x");
+    expect(store.groupAliases()).toEqual({});
+    expect(writes).toEqual([]);
+  });
+
+  it("resets a merged group back into its raw groups, copying the layout to each", () => {
+    const { store, writes } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+      pinnedGroups: ["gamma", "X"],
+      collapsedGroups: ["X"],
+    });
+    select(store, "X");
+    store.actions.resetGroupName("X");
+    expect(store.groupAliases()).toEqual({});
+    expect(headersOf(store.flatItems()).map((h) => h.groupKey)).toEqual([
+      "gamma",
+      "alpha",
+      "beta",
+    ]);
+    expect(store.pinnedGroups()).toEqual(["gamma", "alpha", "beta"]);
+    expect(store.collapsedGroups()).toEqual(new Set(["alpha", "beta"]));
+    expect(store.selectedHeaderKey()).toBe("alpha");
+    expect(writes.at(-1)).toEqual({
+      groupAliases: {},
+      pinnedGroups: ["gamma", "alpha", "beta"],
+      collapsedGroups: ["alpha", "beta"],
+    });
+  });
+
+  it("resets only the current mode's aliases", () => {
+    const { store } = setup({
+      groupAliases: {
+        project: { beta: "B" },
+        session: { beta: "B" },
+      },
+    });
+    store.actions.resetGroupName("B");
+    expect(store.groupAliases()).toEqual({ session: { beta: "B" } });
+  });
+
+  it("knows which groups have a name to reset", () => {
+    const { store } = setup({ groupAliases: { project: { beta: "alpha" } } });
+    expect(store.groupHasAlias("alpha")).toBe(true);
+    expect(store.groupHasAlias("gamma")).toBe(false);
+  });
+
+  it("keeps aliases through group-by changes", () => {
+    const { store, writes } = setup({
+      groupAliases: { project: { beta: "Backend" } },
+    });
+    store.actions.cycleGroupBy();
+    store.actions.setGroupBy("project");
+    expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+    expect(writes.some((w) => "groupAliases" in w)).toBe(false);
+    expect(
+      headersOf(store.flatItems()).some((h) => h.groupKey === "Backend"),
+    ).toBe(true);
+  });
+
+  it("never prunes an alias whose group has no sessions left", () => {
+    const { store } = setup();
+    store.actions.renameGroup("beta", "Backend");
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha" }),
+    ]);
+    store.actions.renameGroup("alpha", "Front");
+    expect(store.groupAliases()).toEqual({
+      project: { beta: "Backend", alpha: "Front" },
+    });
+    // The first new session in beta lands back in its renamed group.
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha" }),
+      createMockSession({ id: "b2", project: "beta" }),
+    ]);
+    expect(
+      headersOf(store.flatItems()).find((h) => h.groupKey === "Backend")
+        ?.members[0]?.session.id,
+    ).toBe("b2");
+  });
+
+  it("keeps a merged group's collapse when another group's collapse is persisted", async () => {
+    const { store, writes } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    store.actions.toggleGroupCollapse("X");
+    store.actions.toggleGroupCollapse("gamma");
+    await waitForDebounce();
+    expect(writes.at(-1)?.collapsedGroups).toEqual(["X", "gamma"]);
+  });
+
+  it("collapses the merged group a session row belongs to", () => {
+    const { store } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    select(store, "b");
+    store.actions.collapseParent();
+    expect(store.collapsedGroups().has("X")).toBe(true);
+    expect(store.selectedHeaderKey()).toBe("X");
+  });
+
+  it("matches a search on the displayed name and on the raw key", () => {
+    const { store } = setup({
+      groupBy: "session",
+      groupAliases: { session: { work: "Office" } },
+    });
+    store.actions.setSessions([
+      createMockSession({ id: "w", project: "p1", tmuxTarget: "work:0.0" }),
+      createMockSession({ id: "h", project: "p2", tmuxTarget: "home:0.0" }),
+    ]);
+    store.actions.setSearchQuery("Office");
+    expect(store.filteredSessions().map((f) => f.session.id)).toEqual(["w"]);
+    store.actions.setSearchQuery("work");
+    expect(store.filteredSessions().map((f) => f.session.id)).toEqual(["w"]);
+  });
+
+  describe("reloadUIState", () => {
+    it("picks up another instance's aliases", () => {
+      const { store } = setup();
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+      expect(
+        headersOf(store.flatItems()).some((h) => h.groupKey === "Backend"),
+      ).toBe(true);
+    });
+
+    it("drops malformed aliases from disk", () => {
+      const { store } = setup();
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: 7 } } as never,
+      });
+      expect(store.groupAliases()).toEqual({});
+    });
+
+    it("moves a selected header whose group another instance renamed away", () => {
+      const { store } = setup();
+      select(store, "beta");
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      expect(store.selectedHeaderKey()).toBe("Backend");
+    });
+
+    it("does not revert a local change still waiting to be written", () => {
+      const { store } = setup();
+      store.actions.toggleGroupCollapse("alpha");
+      // An echo of an older file arrives before the debounced write lands.
+      store.actions.reloadUIState({ collapsedGroups: [] });
+      expect(store.collapsedGroups().has("alpha")).toBe(true);
+    });
+  });
+
+  describe("rename prompt", () => {
+    it("opens prefilled with the group's label, in the palette slot", () => {
+      const { store } = setup({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.openRenamePrompt("Backend");
+      expect(store.state.palette).toEqual({
+        query: "Backend",
+        highlight: null,
+        rename: { groupKey: "Backend", label: "Backend" },
+      });
+    });
+
+    it("opens in the sidebar, where the command palette does not", () => {
+      const { store } = setup({ sidebar: true });
+      store.actions.openPalette();
+      expect(store.state.palette).toBeNull();
+      store.actions.openRenamePrompt("beta");
+      expect(store.state.palette?.rename?.groupKey).toBe("beta");
+    });
+
+    it("commits the typed name and closes", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.setPaletteQuery("Backend");
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+    });
+
+    it("treats an empty name as a cancel", () => {
+      const { store, writes } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.setPaletteQuery("  ");
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({});
+      expect(writes).toEqual([]);
+    });
+
+    it("refuses a synthetic header and no grouping with a toast", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt(NEEDS_YOU_GROUP_KEY);
+      expect(store.state.palette).toBeNull();
+      expect(store.state.toastMessage).toBeTruthy();
+      store.actions.setGroupBy("none");
+      store.actions.openRenamePrompt("");
+      expect(store.state.palette).toBeNull();
+    });
   });
 });
