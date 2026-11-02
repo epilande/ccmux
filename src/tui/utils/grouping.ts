@@ -304,6 +304,20 @@ function resolveAlias(
   return map && Object.hasOwn(map, raw) ? map[raw]! : raw;
 }
 
+/**
+ * The keys behind a renamed or merged group, as a header names them (a cwd
+ * key home-shortened), sorted; null for a group under its own derived name.
+ * What the header's marker and the group preview's sources line say.
+ */
+export function groupSources(
+  groupKey: string,
+  rawKeys: readonly string[] | undefined,
+): string[] | null {
+  if (!rawKeys?.length) return null;
+  if (rawKeys.length === 1 && rawKeys[0] === groupKey) return null;
+  return rawKeys.map(shortenCwd);
+}
+
 /** Format a group key into a display label */
 export function getGroupLabel(groupKey: string, groupBy: GroupBy): string {
   if (groupBy === "cwd") {

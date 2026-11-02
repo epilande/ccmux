@@ -10466,6 +10466,54 @@ describe("App group rename and merge (#42)", () => {
     });
   });
 
+  it("marks a renamed or merged header on the row itself", async () => {
+    await twoGroups();
+    const headerLine = (name: string) =>
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => new RegExp(`[▾▸] ${name} \\(`).test(l)) ?? "";
+    // Under its own name, a header carries no marker.
+    expect(headerLine("beta")).not.toMatch(/from|sources/);
+    await press("e");
+    await clear();
+    await type("Backend");
+    await enter();
+    expect(headerLine("Backend")).toMatch(/Backend \(1\)\s+from beta/);
+    await press("e");
+    await clear();
+    await type("alpha");
+    await enter();
+    expect(headerLine("alpha")).toMatch(/alpha \(2\)\s+2 sources/);
+  });
+
+  it("keeps a renamed header's marker in a narrow sidebar as a glyph", async () => {
+    await renderApp(40, 24, { groupBy: "project", sidebar: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" }),
+        mockEnrichedSession({ id: "s2", project: "beta", tmuxPane: "%2" }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await press("j");
+    await press("j");
+    await press("e");
+    await clear();
+    await type("a-much-longer-backend-name");
+    await enter();
+    // The toast card sits over the top rows; read the header once it goes.
+    await settle(1_600);
+    await setup.renderOnce();
+    const line =
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => /[▾▸] a-much-longer/.test(l)) ?? "";
+    expect(line).toMatch(/a-much-longer-backend-name \(1\)\s+\*/);
+  });
+
   it("cancels on Esc without renaming anything", async () => {
     await twoGroups();
     await press("e");

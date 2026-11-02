@@ -20,6 +20,7 @@ import {
   type FlatItem,
   NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
+  groupSources,
   scrollTarget,
   toVisualLine,
 } from "../utils/grouping";
@@ -133,6 +134,27 @@ export function hiddenWaitingNotice(
     text: `+${hidden} waiting in other repos`,
     short: `+${hidden} elsewhere`,
     color: getStatusColor("waiting", null),
+  };
+}
+
+/**
+ * The marker a renamed or merged group's header carries after its count, so
+ * the list itself says a group is not under its derived name: the sidebar
+ * and a picker with the preview closed have nothing else that does. It is
+ * the header's `notice`, so it never drops: `from px-api` or `3 sources`
+ * (the group preview's vocabulary) where the label still fits beside it,
+ * else a single `*`. Dimmed, since the preview carries the detail.
+ */
+export function aliasNotice(
+  item: Extract<FlatItem, { type: "header" }>,
+): { text: string; short: string; color: string } | undefined {
+  const sources = groupSources(item.groupKey, item.rawKeys);
+  if (!sources) return undefined;
+  return {
+    text:
+      sources.length === 1 ? `from ${sources[0]}` : `${sources.length} sources`,
+    short: "*",
+    color: theme.overlay,
   };
 }
 
@@ -378,7 +400,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
             // The rule itself is sized by layout.
             width={effectiveWidth() - viewportInset()}
             facts={factsText(headerFacts(item))}
-            notice={hiddenWaitingNotice(item.hiddenWaiting)}
+            notice={
+              hiddenWaitingNotice(item.hiddenWaiting) ?? aliasNotice(item)
+            }
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}

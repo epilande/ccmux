@@ -5,7 +5,11 @@ import { fitSegments } from "./row-segments";
 import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../../types";
-import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
+import {
+  WAITING_SUBTYPES,
+  computeStatusSummary,
+  groupSources,
+} from "../utils/grouping";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
 import type { IconStyle } from "../../lib/icons";
 import { getStatusIcon } from "../../lib/icons";
@@ -387,10 +391,8 @@ function groupSourcesLine(
   header: { groupKey?: string; rawKeys?: string[] },
   width: number,
 ): string | null {
-  const raw = header.rawKeys;
-  if (!raw?.length || (raw.length === 1 && raw[0] === header.groupKey))
-    return null;
-  const names = raw.map(shortenCwd);
+  const names = groupSources(header.groupKey ?? "", header.rawKeys);
+  if (!names) return null;
   const text =
     names.length === 1
       ? `renamed from ${names[0]}`
