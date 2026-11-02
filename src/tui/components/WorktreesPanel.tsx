@@ -98,6 +98,10 @@ const SCAN_TIMEOUT_MS = 60_000;
 
 const RUN_TIMEOUT_MS = 10 * 60_000;
 
+/** The column between the list and the preview's border, so a row's
+ *  right-aligned agents cell does not touch it. */
+const PREVIEW_GAP = 1;
+
 export interface WorktreePanelRow {
   kind: "worktree";
   /**
@@ -666,7 +670,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
    */
   const listWidth = () =>
     previewShown()
-      ? Math.max(4, Math.floor((dims().width * (100 - previewWidth())) / 100))
+      ? Math.max(
+          4,
+          Math.floor((dims().width * (100 - previewWidth())) / 100) -
+            PREVIEW_GAP,
+        )
       : width();
   /** Bumped by `R`, so the preview re-reads past its caches too. */
   const [detailRefresh, setDetailRefresh] = createSignal(0);
@@ -1437,6 +1445,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             <box flexDirection="row" flexGrow={1}>
               <scrollbox
                 flexGrow={1}
+                paddingRight={previewShown() ? PREVIEW_GAP : 0}
                 ref={(r: ScrollBoxRenderable) => {
                   listBox = r;
                   syncScrollbarThumb(r);

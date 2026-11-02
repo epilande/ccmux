@@ -157,6 +157,9 @@ export interface SourcePickerProps {
 
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
+/** The column between the list and the preview's border, so a row's
+ *  right-aligned age cell does not touch it. */
+const PREVIEW_GAP = 1;
 
 /** One row in both overlays and the persistent Start view. */
 export function sourceRowHeight(_row: SourceRow, _compact = false): number {
@@ -273,7 +276,10 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    *  formula. The footer still spans the whole view (`contentWidth`). */
   const listArea = () =>
     previewShown()
-      ? Math.max(8, Math.floor((width() * (100 - previewWidth())) / 100))
+      ? Math.max(
+          8,
+          Math.floor((width() * (100 - previewWidth())) / 100) - PREVIEW_GAP,
+        )
       : contentWidth();
   /** Inside the scrollbox, which keeps a column for its bar. */
   const listWidth = () => Math.max(4, listArea() - SCROLLBAR_GUTTER);
@@ -1116,6 +1122,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
               <box flexDirection="row" flexGrow={1}>
                 <scrollbox
                   flexGrow={1}
+                  paddingRight={previewShown() ? PREVIEW_GAP : 0}
                   ref={(r: ScrollBoxRenderable) => {
                     listBox = r;
                     syncScrollbarThumb(r);
