@@ -38,6 +38,16 @@ describe("openInPager", () => {
     expect(events).toEqual(["suspend", "spawn less +G <hello>", "resume"]);
   });
 
+  it("reports a pager that exits nonzero, as sh does for a missing one", async () => {
+    const events: string[] = [];
+    const result = await openInPager(fakeRenderer(events), "x", {
+      env: { PAGER: "nope" },
+      spawn: async () => 127,
+    });
+    expect(result).toEqual({ ok: false, error: "nope exited 127" });
+    expect(events).toEqual(["suspend", "resume"]);
+  });
+
   it("resumes even when the pager cannot be run", async () => {
     const events: string[] = [];
     const result = await openInPager(fakeRenderer(events), "x", {

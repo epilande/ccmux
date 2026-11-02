@@ -799,6 +799,31 @@ describe("App", () => {
       }
     });
 
+    it("says so when the pager exits nonzero", async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL) =>
+        String(url).includes("/transcript")
+          ? Response.json({
+              source: "transcript",
+              turns: [{ role: "assistant", text: "fixed it" }],
+            })
+          : Response.json({})) as unknown as typeof fetch;
+      try {
+        await renderApp(120, 20, {
+          groupBy: "none",
+          pager: { env: { PAGER: "nope" }, spawn: async () => 127 },
+        });
+        oneSession();
+        await setup.renderOnce();
+        await run("open transcript");
+        await settle(20);
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("nope exited 127");
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+
     it("pipes the session's rendered turns to the pager", async () => {
       const original = globalThis.fetch;
       const asked: string[] = [];

@@ -47,6 +47,12 @@ const defaultSpawn: PagerSpawn = async (argv, text) => {
  * pasted into an agent (tokens, keys), and a temp file outlives a crash. As
  * with review's suspend, a `suspend()` that throws leaves nothing to undo,
  * and once suspended `resume()` is guaranteed even if the spawn throws.
+ *
+ * A nonzero exit is a failure too, with no exceptions: `sh -c` reports a
+ * `$PAGER` that does not exist as 127 rather than throwing, and its message
+ * went to a stderr the resumed picker paints over, so the toast is the only
+ * place the user can learn why nothing showed. `less` and `more` exit 0 when
+ * quit early, so an ordinary `q` is not caught by this.
  */
 export async function openInPager(
   renderer: Pick<CliRenderer, "suspend" | "resume">,
@@ -55,16 +61,21 @@ export async function openInPager(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const argv = pagerCommand(deps.env ?? process.env);
   const spawn = deps.spawn ?? defaultSpawn;
+  // The command the user would recognize: `$PAGER` itself, not the `sh`
+  // that runs it.
+  const name = argv[0] === "sh" ? argv[2]! : argv[0]!;
   try {
     renderer.suspend();
   } catch (err) {
     return { ok: false, error: `suspend failed: ${err}` };
   }
   try {
-    await spawn(argv, text);
-    return { ok: true };
+    const code = await spawn(argv, text);
+    return code === 0
+      ? { ok: true }
+      : { ok: false, error: `${name} exited ${code}` };
   } catch (err) {
-    return { ok: false, error: `${argv[0]} failed: ${err}` };
+    return { ok: false, error: `${name} failed: ${err}` };
   } finally {
     renderer.resume();
   }
