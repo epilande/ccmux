@@ -5977,8 +5977,67 @@ describe("group rename and merge (#42)", () => {
       expect(store.state.palette).toEqual({
         query: "Backend",
         highlight: null,
-        rename: { groupKey: "Backend", label: "Backend", groupBy: "project" },
+        rename: {
+          groupKey: "Backend",
+          label: "Backend",
+          groupBy: "project",
+          members: ["Backend", "beta"],
+        },
       });
+    });
+
+    it("cancels when another instance reset the group under it", () => {
+      const { store, writes } = setup({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.openRenamePrompt("Backend");
+      // Another picker resets Backend: there is no Backend group any more.
+      store.actions.reloadUIState({ groupAliases: {} });
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      // No phantom alias for a raw key nothing derives, and no "Renamed".
+      expect(store.groupAliases()).toEqual({});
+      expect(writes.some((w) => "groupAliases" in w)).toBe(false);
+      expect(store.state.toastMessage).toBe("Group changed; rename cancelled");
+    });
+
+    it("cancels when another instance renamed the group under it", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+      expect(store.state.toastMessage).toBe("Group changed; rename cancelled");
+    });
+
+    it("cancels when another instance merged a group into it", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.reloadUIState({
+        groupAliases: { project: { gamma: "beta" } },
+      });
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      expect(store.groupAliases()).toEqual({ project: { gamma: "beta" } });
+    });
+
+    it("still renames when only the group's sessions changed meanwhile", () => {
+      const { store } = setup({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.openRenamePrompt("Backend");
+      // A new session lands in the group; its names did not change.
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta" }),
+        createMockSession({ id: "b2", project: "beta" }),
+      ]);
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      expect(store.groupAliases()).toEqual({ project: { beta: "Zed" } });
     });
 
     it("cancels when another instance changed the grouping under it", () => {

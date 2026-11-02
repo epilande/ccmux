@@ -527,7 +527,15 @@ interface TUIState {
      *  then the name being typed, prefilled with `label`, and there is no
      *  command list. One modal slot for both, so the prompt is a modal
      *  everywhere the palette already is. */
-    rename?: { groupKey: string; label: string; groupBy: GroupBy };
+    rename?: {
+      groupKey: string;
+      label: string;
+      groupBy: GroupBy;
+      /** The raw keys the alias table put in the group when the prompt
+       *  opened (`aliasMembers`), to tell on Enter whether another instance
+       *  renamed, reset or merged it meanwhile. */
+      members: string[];
+    };
   } | null;
   /**
    * The repo the CURRENT view is narrowed to, or null for all repos. It is
@@ -817,6 +825,22 @@ function withModeLayouts(
   if (Object.keys(kept).length) next[mode] = kept;
   else delete next[mode];
   return next;
+}
+
+/**
+ * The raw keys the alias table folds into group `key`, sorted: every key
+ * renamed to it, plus `key` itself unless it is renamed away. Depends only
+ * on the aliases, never on which sessions exist, so it changes exactly when
+ * a rename, reset or merge changes what the group is.
+ */
+function aliasMembers(
+  key: string,
+  map: Readonly<Record<string, string>> | undefined,
+): string[] {
+  const aliased = map ?? {};
+  const members = Object.keys(aliased).filter((raw) => aliased[raw] === key);
+  if (!Object.hasOwn(aliased, key)) members.push(key);
+  return members.sort((a, b) => a.localeCompare(b));
 }
 
 /**
@@ -3333,7 +3357,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("palette", {
         query: label,
         highlight: null,
-        rename: { groupKey: key, label, groupBy: state.groupBy },
+        rename: {
+          groupKey: key,
+          label,
+          groupBy: state.groupBy,
+          members: aliasMembers(key, groupAliases()[state.groupBy]),
+        },
       });
     },
 
@@ -3354,6 +3383,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // namespace, so writing it now would name an unrelated group.
       if (groupBy !== state.groupBy) {
         actions.showToast("Grouping changed; rename cancelled", 3_000);
+        return;
+      }
+      // Another instance renamed, reset or merged this group while the
+      // prompt was up: the key no longer names what the user was looking
+      // at, and renaming it would write a phantom alias or rename some
+      // other set of groups while still reporting success. Sessions coming
+      // and going do not count; only the alias table does.
+      const now = aliasMembers(key, groupAliases()[groupBy]);
+      if (
+        now.length !== open.rename.members.length ||
+        now.some((raw, i) => raw !== open.rename!.members[i])
+      ) {
+        actions.showToast("Group changed; rename cancelled", 3_000);
         return;
       }
       // Uncapped: renameGroup matches it against existing keys and labels
