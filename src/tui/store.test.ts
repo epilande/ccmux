@@ -5770,6 +5770,32 @@ describe("group rename and merge (#42)", () => {
       expect(store.state.palette?.rename?.groupKey).toBe("beta");
     });
 
+    it("previews the group a typed name merges into", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      expect(store.renameMergeTarget()).toBeNull();
+      store.actions.setPaletteQuery("alpha");
+      expect(store.renameMergeTarget()).toBe("alpha");
+      store.actions.setPaletteQuery("Backend");
+      expect(store.renameMergeTarget()).toBeNull();
+      // Its own name is no merge.
+      store.actions.setPaletteQuery("beta");
+      expect(store.renameMergeTarget()).toBeNull();
+    });
+
+    it("previews a merge by a full path past the cap, by its label", () => {
+      const deep = (leaf: string) =>
+        `/srv/${"nested-directory/".repeat(5)}${leaf}`;
+      const store = createTUIStore({ groupBy: "cwd" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", paneCwd: deep("alpha") }),
+        createMockSession({ id: "b", paneCwd: deep("beta") }),
+      ]);
+      store.actions.openRenamePrompt(deep("alpha"));
+      store.actions.setPaletteQuery(deep("beta"));
+      expect(store.renameMergeTarget()).toBe(deep("beta"));
+    });
+
     it("commits the typed name and closes", () => {
       const { store } = setup();
       store.actions.openRenamePrompt("beta");

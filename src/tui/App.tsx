@@ -5012,6 +5012,7 @@ export function App(props: AppProps) {
               value={store.state.palette?.query ?? ""}
               onInput={(name) => store.actions.setPaletteQuery(name)}
               onSubmit={() => store.actions.commitRenamePrompt()}
+              mergesInto={store.renameMergeTarget()}
             />
           )}
         </Show>

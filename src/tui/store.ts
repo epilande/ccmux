@@ -2022,6 +2022,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }
   }
 
+  /**
+   * While the rename prompt is up: the label of the existing group the typed
+   * name would merge into, or null when it would not merge. Resolved the way
+   * Enter resolves it (`resolveGroupName`, before the width cap), so the
+   * prompt can say a long full path merges rather than that it gets cut.
+   */
+  const renameMergeTarget = createMemo((): string | null => {
+    const open = state.palette;
+    if (!open?.rename || open.rename.groupBy !== state.groupBy) return null;
+    const groups = boardGroups(groupAliases());
+    const target = resolveGroupName(open.query, groups, state.groupBy);
+    if (!target || target === open.rename.groupKey) return null;
+    return groups.some((group) => group.key === target)
+      ? headerLabel(target)
+      : null;
+  });
+
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
       // Preserve client-synthesized subprocess invoke rows. They live only
@@ -3424,6 +3441,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     pinnedGroups,
     groupAliases,
     toastFit,
+    renameMergeTarget,
     /** Whether group `key` carries a name the user gave it (so Reset Name
      *  has something to undo). */
     groupHasAlias: (key: string) =>
