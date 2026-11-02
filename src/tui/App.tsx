@@ -4623,6 +4623,8 @@ export function App(props: AppProps) {
               fallback={
                 <Preview
                   session={store.selectedSession()}
+                  facts={repoFacts.data().repos}
+                  headerPR={repoFacts.data().headerPR}
                   onScrollboxRef={(ref) => (previewBoxes.sessions = ref)}
                   iconStyle={store.state.iconStyle}
                   width={store.state.previewWidth}
@@ -4637,6 +4639,8 @@ export function App(props: AppProps) {
               {(header: () => Extract<FlatItem, { type: "header" }>) => (
                 <GroupPreview
                   header={header()}
+                  facts={repoFacts.data().repos}
+                  headerPR={repoFacts.data().headerPR}
                   sessions={store.selectedGroupSessions()}
                   onScrollboxRef={(ref) => (previewBoxes.sessions = ref)}
                   iconStyle={store.state.iconStyle}

@@ -1,7 +1,11 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal } from "solid-js";
-import { GroupPreview } from "./GroupPreview";
+import {
+  GroupPreview,
+  inventoryEntries,
+  repositoryLines,
+} from "./GroupPreview";
 import { TickContext } from "../store";
 import {
   mockEnrichedSession,
@@ -332,5 +336,101 @@ describe("GroupPreview long paths", () => {
     const line = frame.split("\n").find((l) => l.includes("/very/long"))!;
     expect(line).toContain("…");
     expect(line).not.toContain("feature/branch");
+  });
+});
+
+describe("GroupPreview repository facts", () => {
+  const facts = {
+    repoRoot: "/code/ccmux",
+    repoName: "ccmux",
+    worktrees: {
+      value: {
+        repoRoot: "/code/ccmux",
+        repoName: "ccmux",
+        worktrees: [
+          { path: "/code/ccmux", branch: "main", isMain: true },
+          { path: "/code/wt/previews", branch: "feat/previews", isMain: false },
+          { path: "/code/wt/idle", branch: "chore/idle", isMain: false },
+        ],
+      },
+      updatedAt: 0,
+      stale: false,
+    },
+    counts: { value: { prs: 4, issues: 1 }, updatedAt: 0, stale: true },
+    branchPRs: {
+      "feat/previews": {
+        value: [
+          {
+            id: "206",
+            href: "https://github.com/o/r/pull/206",
+            ciStatus: "failing" as const,
+            reviewDecision: null,
+          },
+        ],
+        updatedAt: 0,
+        stale: false,
+      },
+    },
+  };
+  const sessions = [
+    mockEnrichedSession({
+      id: "s1",
+      worktreeRoot: "/code/wt/previews",
+      mainRepoRoot: "/code/ccmux",
+      isWorktree: true,
+      status: "waiting",
+    }),
+  ];
+
+  it("words the repo's facts, marking a stale answer", () => {
+    expect(repositoryLines(facts)).toEqual([
+      "main + 2 worktrees",
+      "4 open PRs · 1 open issue ~",
+    ]);
+    expect(repositoryLines(undefined)).toEqual([]);
+  });
+
+  it("lists every checkout, idle ones included, with its PR and sessions", () => {
+    const entries = inventoryEntries(facts, sessions);
+    expect(entries.map((e) => [e.name, e.branch, e.count])).toEqual([
+      ["⌂ main", "main", 0],
+      ["previews", "feat/previews", 1],
+      ["idle", "chore/idle", 0],
+    ]);
+    expect(entries[1]!.prs.map((p) => p.id)).toEqual(["206"]);
+    expect(inventoryEntries(facts, sessions, false)[1]!.prs).toEqual([]);
+  });
+
+  it("draws the Repository block and the inventory for a repo header", async () => {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <GroupPreview
+            header={{
+              label: "ccmux",
+              count: 1,
+              members: membersFromSummary({
+                ...emptySummary(),
+                waitingGeneric: 1,
+              }),
+              repoRoot: "/code/ccmux",
+            }}
+            sessions={sessions}
+            facts={[facts]}
+            width={60}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 20 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Repository");
+    expect(frame).toContain("main + 2 worktrees");
+    expect(frame).toContain("previews  feat/previews  PR #206 ✗");
+    // The idle checkout is listed too: the inventory, not just where
+    // sessions happen to be.
+    expect(frame).toContain("idle  chore/idle");
   });
 });
