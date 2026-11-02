@@ -40,6 +40,10 @@ export interface UIState {
 export interface GroupLayout {
   pin: number | null;
   collapsed: boolean;
+  /** `pinnedGroups` when it was merged, so a reset can put it back between
+   *  its old neighbours: `order[pin]` is the group itself. An index alone
+   *  goes stale once a later merge removes an earlier pin. */
+  order?: string[];
 }
 
 /**

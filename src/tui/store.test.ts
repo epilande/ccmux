@@ -5727,6 +5727,54 @@ describe("group rename and merge (#42)", () => {
       expect(store.collapsedGroups().has("dotfiles")).toBe(false);
     });
 
+    it("restores successive merges into one group in their original pin order", () => {
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["alpha", "beta", "gamma"],
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta" }),
+        createMockSession({ id: "g", project: "gamma" }),
+        createMockSession({ id: "z", project: "zeta" }),
+      ]);
+      store.actions.renameGroup("alpha", "gamma");
+      store.actions.renameGroup("beta", "gamma");
+      expect(store.pinnedGroups()).toEqual(["gamma"]);
+      store.actions.resetGroupName("gamma");
+      expect(store.pinnedGroups()).toEqual(["alpha", "beta", "gamma"]);
+    });
+
+    it.each([
+      ["t1", "t2"],
+      ["t2", "t1"],
+    ])(
+      "restores pins merged into different groups in their original order (reset %s, then %s)",
+      (first, second) => {
+        const store = createTUIStore({
+          groupBy: "project",
+          pinnedGroups: ["a", "b", "t1", "t2"],
+        });
+        store.actions.setSessions(
+          ["a", "b", "t1", "t2", "z"].map((p) =>
+            createMockSession({ id: p, project: p }),
+          ),
+        );
+        store.actions.renameGroup("a", "t1");
+        store.actions.renameGroup("b", "t2");
+        expect(store.pinnedGroups()).toEqual(["t1", "t2"]);
+        // Whichever reset runs first, each pin lands where it was, not at
+        // an index the other merge's removal shifted.
+        store.actions.resetGroupName(first!);
+        store.actions.resetGroupName(second!);
+        expect(store.pinnedGroups()).toEqual(["a", "b", "t1", "t2"]);
+      },
+    );
+
     it("drops a snapshot once its key is no longer merged away", () => {
       const { store } = pinnedSetup();
       store.actions.renameGroup("dotfiles", "ccmux");
@@ -5746,7 +5794,13 @@ describe("group rename and merge (#42)", () => {
       store.actions.renameGroup("dotfiles", "ccmux");
       expect(writes.at(-1)?.groupLayouts).toEqual({
         session: { a: { pin: null, collapsed: true } },
-        project: { dotfiles: { pin: 0, collapsed: false } },
+        project: {
+          dotfiles: {
+            pin: 0,
+            collapsed: false,
+            order: ["dotfiles", "x", "ccmux"],
+          },
+        },
       });
     });
   });

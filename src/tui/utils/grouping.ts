@@ -142,12 +142,24 @@ export function normalizeGroupLayouts(input: unknown): GroupLayouts {
     if (!map || typeof map !== "object" || Array.isArray(map)) continue;
     const entries = Object.entries(map).flatMap(([raw, value]) => {
       if (!value || typeof value !== "object") return [];
-      const { pin, collapsed } = value as Record<string, unknown>;
+      const { pin, collapsed, order } = value as Record<string, unknown>;
       const pinOk =
         pin === null || (Number.isInteger(pin) && (pin as number) >= 0);
-      return pinOk && typeof collapsed === "boolean"
-        ? [[raw, { pin: pin as number | null, collapsed }] as const]
-        : [];
+      if (!pinOk || typeof collapsed !== "boolean") return [];
+      const layout = { pin: pin as number | null, collapsed };
+      // The neighbours are an aid to placement, never required: a malformed
+      // list is dropped and the index alone places the pin.
+      const orderOk =
+        Array.isArray(order) &&
+        order.every((key) => typeof key === "string") &&
+        pin !== null &&
+        (pin as number) < order.length;
+      return [
+        [
+          raw,
+          orderOk ? { ...layout, order: order as string[] } : layout,
+        ] as const,
+      ];
     });
     if (entries.length) out[mode] = Object.fromEntries(entries);
   }

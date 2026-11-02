@@ -30,7 +30,7 @@ import type {
   ColumnHeaderMode,
 } from "../lib/preferences";
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
-import { setUIState, type UIState } from "../lib/state";
+import { setUIState, type GroupLayout, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import {
   DESTINATION_OPTIONS,
@@ -817,6 +817,30 @@ function withModeLayouts(
   if (Object.keys(kept).length) next[mode] = kept;
   else delete next[mode];
   return next;
+}
+
+/**
+ * Where a merged-away group's pin goes back into `pinned`: before the
+ * nearest group that followed it when it was merged and is still pinned,
+ * else after the nearest that preceded it, else at its old index. Anchoring
+ * to neighbours rather than the index keeps the order when other pins were
+ * removed (or restored) since, and gives the same result in any restore
+ * order.
+ */
+function restorePinAt(pinned: readonly string[], layout: GroupLayout): number {
+  const { pin, order } = layout;
+  if (pin === null) return pinned.length;
+  if (order) {
+    for (const key of order.slice(pin + 1)) {
+      const at = pinned.indexOf(key);
+      if (at >= 0) return at;
+    }
+    for (const key of order.slice(0, pin).reverse()) {
+      const at = pinned.indexOf(key);
+      if (at >= 0) return at + 1;
+    }
+  }
+  return Math.min(pin, pinned.length);
 }
 
 /** `keys` with `key` replaced in place by `replacement`, each key kept once
@@ -3198,7 +3222,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const own = { ...(groupLayouts()[mode] ?? {}) };
       if (merging) {
         const at = pinnedGroups().indexOf(key);
-        const layout = { pin: at >= 0 ? at : null, collapsed: wasCollapsed };
+        const layout: GroupLayout =
+          at >= 0
+            ? { pin: at, collapsed: wasCollapsed, order: [...pinnedGroups()] }
+            : { pin: null, collapsed: wasCollapsed };
         for (const raw of members)
           if (raw !== name && !Object.hasOwn(own, raw)) own[raw] = layout;
       }
@@ -3256,15 +3283,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (collapsed.delete(key)) for (const k of carriers) collapsed.add(k);
       const pinned = spliceKey(pinnedGroups(), key, carriers);
       // A pin or collapse the key has now is newer than its snapshot and
-      // stands; the snapshot fills in only what is missing.
-      for (const k of [...restored].sort(
-        (a, b) => (own[a]!.pin ?? 0) - (own[b]!.pin ?? 0),
-      )) {
+      // stands; the snapshot fills in only what is missing. Each pin goes
+      // back between its old neighbours, so the order holds whichever
+      // groups were merged away or reset first.
+      for (const k of restored) {
         if (!active.has(k)) continue;
-        const { pin, collapsed: wasCollapsed } = own[k]!;
-        if (wasCollapsed) collapsed.add(k);
-        if (pin !== null && !pinned.includes(k))
-          pinned.splice(Math.min(pin, pinned.length), 0, k);
+        const layout = own[k]!;
+        if (layout.collapsed) collapsed.add(k);
+        if (layout.pin !== null && !pinned.includes(k))
+          pinned.splice(restorePinAt(pinned, layout), 0, k);
       }
       commitGroupNames(
         next,

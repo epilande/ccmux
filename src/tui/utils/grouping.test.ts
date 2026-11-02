@@ -1374,6 +1374,26 @@ describe("normalizeGroupLayouts", () => {
     });
   });
 
+  it("keeps a pin's neighbours when they are well formed, and drops them otherwise", () => {
+    expect(
+      normalizeGroupLayouts({
+        project: {
+          a: { pin: 1, collapsed: false, order: ["x", "a", "y"] },
+          b: { pin: 3, collapsed: false, order: ["x", "b"] },
+          c: { pin: 0, collapsed: false, order: ["c", 7] },
+          d: { pin: null, collapsed: true, order: ["d"] },
+        },
+      }),
+    ).toEqual({
+      project: {
+        a: { pin: 1, collapsed: false, order: ["x", "a", "y"] },
+        b: { pin: 3, collapsed: false },
+        c: { pin: 0, collapsed: false },
+        d: { pin: null, collapsed: true },
+      },
+    });
+  });
+
   it("is empty for anything that is not an object", () => {
     expect(normalizeGroupLayouts(undefined)).toEqual({});
     expect(normalizeGroupLayouts([])).toEqual({});
