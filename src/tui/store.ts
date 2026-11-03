@@ -851,20 +851,50 @@ function aliasMembers(
  * removed (or restored) since, and gives the same result in any restore
  * order.
  */
-function restorePinAt(pinned: readonly string[], layout: GroupLayout): number {
+function restorePinAt(
+  pinned: readonly string[],
+  layout: GroupLayout,
+  rawKeys: (pin: string) => readonly string[],
+): number {
   const { pin, order } = layout;
   if (pin === null) return pinned.length;
   if (order) {
-    for (const key of order.slice(pin + 1)) {
-      const at = pinned.indexOf(key);
+    // A recorded neighbour is the raw keys behind a pin then; it is still
+    // here if some pin now holds any of them, whatever either is named.
+    const find = (neighbour: readonly string[]) =>
+      pinned.findIndex((current) =>
+        rawKeys(current).some((raw) => neighbour.includes(raw)),
+      );
+    for (const neighbour of order.slice(pin + 1)) {
+      const at = find(neighbour);
       if (at >= 0) return at;
     }
-    for (const key of order.slice(0, pin).reverse()) {
-      const at = pinned.indexOf(key);
+    for (const neighbour of order.slice(0, pin).reverse()) {
+      const at = find(neighbour);
       if (at >= 0) return at + 1;
     }
   }
   return Math.min(pin, pinned.length);
+}
+
+/**
+ * What pin `pin` is, by raw keys rather than by name: the raw keys behind it
+ * among `groups` that carry its own layout. Keys merged into it from
+ * elsewhere (those with a recorded layout in `merged`) are left out: they
+ * have their own place to go back to, and counting them would make a merged
+ * group answer for a neighbour that is really somewhere else. Falls back to
+ * every raw key behind it, then to the pin's own name where no group derives
+ * it, so a stale pin still has an identity to match.
+ */
+function pinIdentity(
+  groups: readonly { key: string; rawKeys: string[] }[],
+  merged: Readonly<Record<string, GroupLayout>> | undefined,
+  pin: string,
+): string[] {
+  const raw = groups.find((group) => group.key === pin)?.rawKeys;
+  if (!raw) return [pin];
+  const own = raw.filter((key) => !merged || !Object.hasOwn(merged, key));
+  return own.length ? own : raw;
 }
 
 /** `keys` with `key` replaced in place by `replacement`, each key kept once
@@ -3249,7 +3279,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         const at = pinnedGroups().indexOf(key);
         const layout: GroupLayout =
           at >= 0
-            ? { pin: at, collapsed: wasCollapsed, order: [...pinnedGroups()] }
+            ? {
+                pin: at,
+                collapsed: wasCollapsed,
+                // Raw keys, not names: a reset compares them against the
+                // raw groups it puts back (see GroupLayout.order).
+                order: pinnedGroups().map((pin) =>
+                  pinIdentity(groups, recorded, pin),
+                ),
+              }
             : { pin: null, collapsed: wasCollapsed };
         for (const raw of members)
           if (raw !== name && !Object.hasOwn(recorded, raw))
@@ -3312,6 +3350,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const collapsed = new Set(collapsedGroups());
       if (collapsed.delete(key)) for (const k of carriers) collapsed.add(k);
       const pinned = spliceKey(pinnedGroups(), key, carriers);
+      const after = boardGroups(next);
+      const stillMerged = withModeLayouts(groupLayouts(), mode, own, next)[
+        mode
+      ];
       // A pin or collapse the key has now is newer than its snapshot and
       // stands; the snapshot fills in only what is missing. Each pin goes
       // back between its old neighbours, so the order holds whichever
@@ -3321,7 +3363,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         const layout = own[k]!;
         if (layout.collapsed) collapsed.add(k);
         if (layout.pin !== null && !pinned.includes(k))
-          pinned.splice(restorePinAt(pinned, layout), 0, k);
+          pinned.splice(
+            restorePinAt(pinned, layout, (pin) =>
+              pinIdentity(after, stillMerged, pin),
+            ),
+            0,
+            k,
+          );
       }
       commitGroupNames(
         next,

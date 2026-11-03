@@ -40,10 +40,15 @@ export interface UIState {
 export interface GroupLayout {
   pin: number | null;
   collapsed: boolean;
-  /** `pinnedGroups` when it was merged, so a reset can put it back between
-   *  its old neighbours: `order[pin]` is the group itself. An index alone
-   *  goes stale once a later merge removes an earlier pin. */
-  order?: string[];
+  /**
+   * `pinnedGroups` when it was merged, so a reset can put it back between its
+   * old neighbours: `order[pin]` is the group itself. An index alone goes
+   * stale once a later merge removes an earlier pin. Each entry is the RAW
+   * keys behind that pin, sorted, not its name: a name is whatever the group
+   * was called then (`Beta`), while a reset puts back raw keys (`beta`), so
+   * names would never match. A pin no group derives records its own key.
+   */
+  order?: string[][];
 }
 
 /**

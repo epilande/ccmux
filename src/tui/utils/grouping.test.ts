@@ -1378,17 +1378,22 @@ describe("normalizeGroupLayouts", () => {
     expect(
       normalizeGroupLayouts({
         project: {
-          a: { pin: 1, collapsed: false, order: ["x", "a", "y"] },
-          b: { pin: 3, collapsed: false, order: ["x", "b"] },
-          c: { pin: 0, collapsed: false, order: ["c", 7] },
-          d: { pin: null, collapsed: true, order: ["d"] },
+          a: { pin: 1, collapsed: false, order: [["x"], ["a"], ["y", "z"]] },
+          // A bare string is read as one raw key.
+          e: { pin: 0, collapsed: false, order: ["e", ["f"]] },
+          b: { pin: 3, collapsed: false, order: [["x"], ["b"]] },
+          c: { pin: 0, collapsed: false, order: [["c"], [7]] },
+          g: { pin: 0, collapsed: false, order: [["g"], []] },
+          d: { pin: null, collapsed: true, order: [["d"]] },
         },
       }),
     ).toEqual({
       project: {
-        a: { pin: 1, collapsed: false, order: ["x", "a", "y"] },
+        a: { pin: 1, collapsed: false, order: [["x"], ["a"], ["y", "z"]] },
+        e: { pin: 0, collapsed: false, order: [["e"], ["f"]] },
         b: { pin: 3, collapsed: false },
         c: { pin: 0, collapsed: false },
+        g: { pin: 0, collapsed: false },
         d: { pin: null, collapsed: true },
       },
     });

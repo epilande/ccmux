@@ -5749,6 +5749,39 @@ describe("group rename and merge (#42)", () => {
       expect(store.pinnedGroups()).toEqual(["alpha", "beta", "gamma"]);
     });
 
+    it("restores the pin order of groups renamed before they were merged", () => {
+      // TUI Test's live case: the neighbours were recorded under the
+      // groups' names (Beta, Alpha) while the reset puts back raw keys.
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["beta", "alpha", "gamma"],
+      });
+      store.actions.setSessions(
+        ["alpha", "beta", "gamma", "zeta"].map((p) =>
+          createMockSession({ id: p, project: p }),
+        ),
+      );
+      store.actions.renameGroup("beta", "Beta");
+      store.actions.renameGroup("alpha", "Alpha");
+      expect(store.pinnedGroups()).toEqual(["Beta", "Alpha", "gamma"]);
+      store.actions.renameGroup("Beta", "gamma");
+      store.actions.renameGroup("Alpha", "gamma");
+      expect(store.pinnedGroups()).toEqual(["gamma"]);
+      // Neighbours are recorded by raw key, not by the names they had then;
+      // gamma counts only its own key, not beta merged into it.
+      expect(store.groupLayouts().project?.beta?.order).toEqual([
+        ["beta"],
+        ["alpha"],
+        ["gamma"],
+      ]);
+      expect(store.groupLayouts().project?.alpha?.order).toEqual([
+        ["alpha"],
+        ["gamma"],
+      ]);
+      store.actions.resetGroupName("gamma");
+      expect(store.pinnedGroups()).toEqual(["beta", "alpha", "gamma"]);
+    });
+
     it.each([
       ["t1", "t2"],
       ["t2", "t1"],
@@ -5818,7 +5851,8 @@ describe("group rename and merge (#42)", () => {
           dotfiles: {
             pin: 0,
             collapsed: false,
-            order: ["dotfiles", "x", "ccmux"],
+            // Each neighbour by the raw keys behind it, not its name.
+            order: [["dotfiles"], ["x"], ["ccmux"]],
           },
         },
       });

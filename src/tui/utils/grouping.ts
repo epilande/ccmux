@@ -148,16 +148,28 @@ export function normalizeGroupLayouts(input: unknown): GroupLayouts {
       if (!pinOk || typeof collapsed !== "boolean") return [];
       const layout = { pin: pin as number | null, collapsed };
       // The neighbours are an aid to placement, never required: a malformed
-      // list is dropped and the index alone places the pin.
+      // list is dropped and the index alone places the pin. An entry is the
+      // raw keys behind a pin; a bare string is read as a single key.
+      const entries = Array.isArray(order)
+        ? order.map((entry) =>
+            typeof entry === "string"
+              ? [entry]
+              : Array.isArray(entry) &&
+                  entry.length > 0 &&
+                  entry.every((key) => typeof key === "string")
+                ? (entry as string[])
+                : null,
+          )
+        : null;
       const orderOk =
-        Array.isArray(order) &&
-        order.every((key) => typeof key === "string") &&
+        entries !== null &&
+        entries.every((entry) => entry !== null) &&
         pin !== null &&
-        (pin as number) < order.length;
+        (pin as number) < entries.length;
       return [
         [
           raw,
-          orderOk ? { ...layout, order: order as string[] } : layout,
+          orderOk ? { ...layout, order: entries as string[][] } : layout,
         ] as const,
       ];
     });
