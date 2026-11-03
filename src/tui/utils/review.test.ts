@@ -23,10 +23,10 @@ function fakeRenderer() {
   return {
     calls,
     renderer: {
-      suspend: mock(() => {
+      suspend: mock(async () => {
         calls.push("suspend");
       }),
-      resume: mock(() => {
+      resume: mock(async () => {
         calls.push("resume");
       }),
     },
@@ -171,10 +171,10 @@ describe("runHunkReview", () => {
 
   it("does not call resume when suspend itself throws", async () => {
     const { spawn } = fakeSpawn(0);
-    const suspend = mock(() => {
+    const suspend = mock(async () => {
       throw new Error("suspend exploded");
     });
-    const resume = mock(() => {});
+    const resume = mock(async () => {});
     const result = await runHunkReview({ suspend, resume }, "/repo", {
       which: () => "/opt/homebrew/bin/hunk",
       resolveRoot: async () => "/repo",
@@ -370,10 +370,10 @@ describe("runHunkReview", () => {
     let resolveExit!: (code: number) => void;
     const result = await runHunkReview(
       {
-        suspend: () => {
+        suspend: async () => {
           events.push("suspend");
         },
-        resume: () => {
+        resume: async () => {
           events.push("resume");
         },
       },

@@ -58,7 +58,6 @@ import { fetchOpenPRs, type SourceSectionStatus } from "../utils/source-lists";
 import { fitHints } from "./Footer";
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import type { IconStyle } from "../../lib/icons";
 import { theme } from "../theme";
 import { Text } from "./Text";
@@ -3439,7 +3438,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               flexGrow={1}
               ref={(r: ScrollBoxRenderable) => {
                 listBox = r;
-                syncScrollbarThumb(r);
                 // The root's resize fires before its children are measured,
                 // so listen on the node the scroll effect actually reads.
                 const bump = () => setScrollboxLayout((v) => v + 1);
@@ -3703,7 +3701,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             flexGrow={1}
             ref={(r: ScrollBoxRenderable) => {
               resultBox = r;
-              syncScrollbarThumb(r);
             }}
           >
             <For each={result()?.outcomes ?? []}>
