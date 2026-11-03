@@ -632,11 +632,13 @@ export async function runHunkReview(
     return { ok: false, error: `suspend failed: ${err}` };
   }
 
+  // `resumed` flips only after `resume()` succeeds, so a failed resume
+  // after hunk exits gets one more try in the `finally` below.
   let resumed = false;
   const resumeOnce = async () => {
     if (resumed) return;
-    resumed = true;
     await renderer.resume();
+    resumed = true;
   };
 
   try {
@@ -712,6 +714,7 @@ export async function runHunkReview(
   } catch (err) {
     return { ok: false, error: `${err}` };
   } finally {
-    await resumeOnce();
+    // A failed retry must not replace the result returned above.
+    await resumeOnce().catch((err) => debugLog(`resume failed: ${err}`));
   }
 }

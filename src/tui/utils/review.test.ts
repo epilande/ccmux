@@ -169,6 +169,44 @@ describe("runHunkReview", () => {
     expect(calls).toEqual(["suspend", "resume"]);
   });
 
+  it("retries a failed resume once and still returns the review result", async () => {
+    const { spawn } = fakeSpawn(0);
+    const suspend = mock(async () => {});
+    let resumeCalls = 0;
+    const resume = mock(async () => {
+      resumeCalls++;
+      if (resumeCalls === 1) throw new Error("resume exploded");
+    });
+    const result = await runHunkReview({ suspend, resume }, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "",
+      spawn,
+    });
+    expect(result.ok).toBe(false);
+    expect((result as { error: string }).error).toContain("resume exploded");
+    expect(resume).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the review result when every resume fails", async () => {
+    const { spawn } = fakeSpawn(0);
+    const suspend = mock(async () => {});
+    const resume = mock(async () => {
+      throw new Error("resume exploded");
+    });
+    const result = await runHunkReview({ suspend, resume }, "/repo", {
+      which: () => "/opt/homebrew/bin/hunk",
+      resolveRoot: async () => "/repo",
+      gitStatus: dirtyGitStatus,
+      paneId: "",
+      spawn,
+    });
+    expect(result.ok).toBe(false);
+    expect((result as { error: string }).error).toContain("resume exploded");
+    expect(resume).toHaveBeenCalledTimes(2);
+  });
+
   it("does not call resume when suspend itself throws", async () => {
     const { spawn } = fakeSpawn(0);
     const suspend = mock(async () => {

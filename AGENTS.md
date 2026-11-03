@@ -8,7 +8,7 @@ ccmux is a CLI tool for tracking AI coding agent sessions running in tmux panes 
 
 ## Tech Stack
 
-- **Runtime:** Bun 1.x
+- **Runtime:** Bun 1.3.14 or later (required by @opentui/core 0.8.1)
 - **Language:** TypeScript 5.x
 - **TUI Framework:** @opentui/solid 0.8.1 (Solid.js-based terminal UI)
 - **Reactivity:** Solid.js 1.9
