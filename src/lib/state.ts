@@ -25,30 +25,32 @@ export interface UIState {
    *  (`{ project: { "px-api": "ProjectX" } }`). Always written whole, since
    *  `setUIState` merges only the top level, and never pruned for liveness. */
   groupAliases?: Partial<Record<GroupBy, Record<string, string>>>;
-  /** Per mode, the layout each raw key had of its own when it was merged into
-   *  another group, so a reset can give it back. Cleared with the alias, and
-   *  written whole beside `groupAliases`. */
-  groupLayouts?: Partial<Record<GroupBy, Record<string, GroupLayout>>>;
+  /** Per mode, what a reset needs to give merged-away groups their own pin
+   *  and collapse back. Cleared with the mode's last merge, and written whole
+   *  beside `groupAliases`. */
+  groupLayouts?: Partial<Record<GroupBy, MergeRecord>>;
   /** Agent last spawned from the picker's new-session dialog. Persisted
    *  because the one-shot picker exits as soon as it spawns, so the
    *  "last agent" default only survives on disk. */
   lastSpawnAgent?: string;
 }
 
-/** A merged-away group's own layout: its index in `pinnedGroups` (null when
- *  unpinned) and whether it was collapsed. */
-export interface GroupLayout {
-  pin: number | null;
-  collapsed: boolean;
+/** One groupBy mode's record of its merges, for a reset to undo them. */
+export interface MergeRecord {
   /**
-   * `pinnedGroups` when it was merged, so a reset can put it back between its
-   * old neighbours: `order[pin]` is the group itself. An index alone goes
-   * stale once a later merge removes an earlier pin. Each entry is the RAW
-   * keys behind that pin, sorted, not its name: a name is whatever the group
-   * was called then (`Beta`), while a reset puts back raw keys (`beta`), so
-   * names would never match. A pin no group derives records its own key.
+   * Each merged-away raw key's own collapse. An entry is also what marks a
+   * key as merged in: a key renamed without merging has none.
    */
-  order?: string[][];
+  merged: Record<string, { collapsed: boolean }>;
+  /**
+   * `pinnedGroups` in raw keys, as of the last merge: each pin as the keys
+   * renamed to it without merging, or its own key where nothing was, with
+   * every merged-away key that was pinned still where it stood. A
+   * merged-away key goes back pinned exactly when it is here. Raw keys, not
+   * names: a name is whatever a group was called then (`Beta`), while a
+   * reset puts back raw keys (`beta`).
+   */
+  pins: string[];
 }
 
 /**

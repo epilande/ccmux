@@ -30,7 +30,7 @@ import type {
   ColumnHeaderMode,
 } from "../lib/preferences";
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
-import { setUIState, type GroupLayout, type UIState } from "../lib/state";
+import { setUIState, type MergeRecord, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import {
   DESTINATION_OPTIONS,
@@ -807,22 +807,28 @@ function withModeAliases(
 }
 
 /**
- * `layouts` with mode `mode`'s map replaced by `own`, keeping only keys
- * `aliases` still renames in that mode (a key that is no longer merged away
- * has no layout to get back). Dropped when empty; a new object every time.
+ * `layouts` with mode `mode`'s record replaced by `record`, its `merged`
+ * keeping only keys `aliases` still renames in that mode (a key that is no
+ * longer merged away has no layout to get back). Dropped with the mode's
+ * last merge, so the next merge records the pins as they are then. A new
+ * object every time; `merged` is built with `Object.fromEntries`, so a raw
+ * key spelled `__proto__` stays data.
  */
 function withModeLayouts(
   layouts: GroupLayouts,
   mode: GroupBy,
-  own: Readonly<Record<string, { pin: number | null; collapsed: boolean }>>,
+  record: MergeRecord | undefined,
   aliases: GroupAliases,
 ): GroupLayouts {
   const map = aliases[mode] ?? {};
-  const kept = Object.fromEntries(
-    Object.entries(own).filter(([raw]) => Object.hasOwn(map, raw)),
+  const merged = Object.fromEntries(
+    Object.entries(record?.merged ?? {}).filter(([raw]) =>
+      Object.hasOwn(map, raw),
+    ),
   );
   const next: GroupLayouts = { ...layouts };
-  if (Object.keys(kept).length) next[mode] = kept;
+  if (record && Object.keys(merged).length)
+    next[mode] = { pins: record.pins, merged };
   else delete next[mode];
   return next;
 }
@@ -844,57 +850,61 @@ function aliasMembers(
 }
 
 /**
- * Where a merged-away group's pin goes back into `pinned`: before the
- * nearest group that followed it when it was merged and is still pinned,
- * else after the nearest that preceded it, else at its old index. Anchoring
- * to neighbours rather than the index keeps the order when other pins were
- * removed (or restored) since, and gives the same result in any restore
- * order.
+ * The raw keys that stand for pin `pin` in a `MergeRecord.pins`: the keys
+ * renamed to it without merging, or its own key where nothing was (and it
+ * is not itself renamed away). A key merged in from elsewhere has its own
+ * place in the record, and a name is not a raw key: a group renamed to
+ * `Beta` is `beta` here, so a different group named `Beta` later never
+ * takes its place. From the aliases and the merge record alone, never from
+ * which sessions are live, so a group is the same pin while its own key
+ * has no session.
  */
-function restorePinAt(
-  pinned: readonly string[],
-  layout: GroupLayout,
-  rawKeys: (pin: string) => readonly string[],
-): number {
-  const { pin, order } = layout;
-  if (pin === null) return pinned.length;
-  if (order) {
-    // A recorded neighbour is the raw keys behind a pin then; it is still
-    // here if some pin now holds any of them, whatever either is named.
-    const find = (neighbour: readonly string[]) =>
-      pinned.findIndex((current) =>
-        rawKeys(current).some((raw) => neighbour.includes(raw)),
-      );
-    for (const neighbour of order.slice(pin + 1)) {
-      const at = find(neighbour);
-      if (at >= 0) return at;
-    }
-    for (const neighbour of order.slice(0, pin).reverse()) {
-      const at = find(neighbour);
-      if (at >= 0) return at + 1;
-    }
-  }
-  return Math.min(pin, pinned.length);
+function ownKeys(
+  pin: string,
+  map: Readonly<Record<string, string>> | undefined,
+  merged: Readonly<Record<string, unknown>>,
+): string[] {
+  const aliased = map ?? {};
+  const renamed = Object.keys(aliased).filter(
+    (raw) => aliased[raw] === pin && !Object.hasOwn(merged, raw),
+  );
+  if (renamed.length) return renamed.sort((a, b) => a.localeCompare(b));
+  return Object.hasOwn(aliased, pin) ? [] : [pin];
 }
 
 /**
- * What pin `pin` is, by raw keys rather than by name: the raw keys behind it
- * among `groups` that carry its own layout. Keys merged into it from
- * elsewhere (those with a recorded layout in `merged`) are left out: they
- * have their own place to go back to, and counting them would make a merged
- * group answer for a neighbour that is really somewhere else. Falls back to
- * every raw key behind it, then to the pin's own name where no group derives
- * it, so a stale pin still has an identity to match.
+ * `pinned`, each pin spelled by `spell`, with the raw keys `keys` laid in
+ * among them in one pass over `pins` (a `MergeRecord.pins`): each key right
+ * after the pin holding (`holds`) the nearest key before it in `pins`, or
+ * ahead of every pin where none does, in `pins` order. A key `pins` does
+ * not have is left out, and so is one a pin already holds (a pin it has now
+ * is newer than the record). The pins themselves keep their order, so one
+ * moved or added since `pins` was recorded stays where it is now.
  */
-function pinIdentity(
-  groups: readonly { key: string; rawKeys: string[] }[],
-  merged: Readonly<Record<string, GroupLayout>> | undefined,
-  pin: string,
+function layIn(
+  pinned: readonly string[],
+  holds: (pin: string) => readonly string[],
+  pins: readonly string[],
+  keys: Iterable<string>,
+  spell: (pin: string) => readonly string[],
 ): string[] {
-  const raw = groups.find((group) => group.key === pin)?.rawKeys;
-  if (!raw) return [pin];
-  const own = raw.filter((key) => !merged || !Object.hasOwn(merged, key));
-  return own.length ? own : raw;
+  const holder = new Map<string, number>();
+  pinned.forEach((pin, i) => {
+    for (const raw of holds(pin)) holder.set(raw, i + 1);
+  });
+  // gaps[0] is ahead of every pin, gaps[i + 1] right after pinned[i].
+  const gaps: string[][] = pinned.map(() => []).concat([[]]);
+  const left = new Set(keys);
+  let gap = 0;
+  for (const raw of pins) {
+    const at = holder.get(raw);
+    if (at !== undefined) gap = at;
+    else if (left.delete(raw)) gaps[gap]!.push(raw);
+  }
+  return [
+    ...gaps[0]!,
+    ...pinned.flatMap((pin, i) => [...spell(pin), ...gaps[i + 1]!]),
+  ];
 }
 
 /** `keys` with `key` replaced in place by `replacement`, each key kept once
@@ -3269,38 +3279,47 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         if (wasCollapsed) collapsed.add(name);
         else collapsed.delete(name);
       }
-      // A merge takes this group's layout away (the target's wins), so each
-      // raw key it holds records the layout to get back on a reset. A key
-      // that already has one keeps it: it was merged in from elsewhere, and
-      // its own layout is older than this group's.
-      const recorded = groupLayouts()[mode] ?? {};
-      const added: [string, GroupLayout][] = [];
+      // A merge takes this group's layout away (the target's wins), so the
+      // record keeps what a reset gives back. The pins are recorded again,
+      // before this one goes: each by its own raw keys in the order they
+      // have now, with every key merged away earlier kept after the pin it
+      // followed. Each raw key this group holds records its collapse; a key
+      // that already has one keeps it, since it was merged in from
+      // elsewhere and its own layout is older than this group's.
+      const recorded = groupLayouts()[mode];
+      const merged = recorded?.merged ?? {};
+      let record = recorded;
       if (merging) {
-        const at = pinnedGroups().indexOf(key);
-        const layout: GroupLayout =
-          at >= 0
-            ? {
-                pin: at,
-                collapsed: wasCollapsed,
-                // Raw keys, not names: a reset compares them against the
-                // raw groups it puts back (see GroupLayout.order).
-                order: pinnedGroups().map((pin) =>
-                  pinIdentity(groups, recorded, pin),
-                ),
-              }
-            : { pin: null, collapsed: wasCollapsed };
-        for (const raw of members)
-          if (raw !== name && !Object.hasOwn(recorded, raw))
-            added.push([raw, layout]);
+        const added = [...members]
+          .filter((raw) => raw !== name && !Object.hasOwn(merged, raw))
+          .sort((a, b) => a.localeCompare(b));
+        const holds = (pin: string) => ownKeys(pin, map, merged);
+        // This group is spelled by every key it hands over, so each one it
+        // held (its own key beside the keys renamed to it, say) comes back
+        // pinned if it was.
+        const spell = (pin: string) =>
+          pin === key ? [...new Set([...holds(pin), ...added])] : holds(pin);
+        record = {
+          pins: layIn(
+            pinnedGroups(),
+            holds,
+            recorded?.pins ?? [],
+            Object.keys(merged),
+            spell,
+          ),
+          // Built with `Object.fromEntries`, never by assignment: a raw key
+          // spelled `__proto__` would otherwise set the map's prototype
+          // instead of recording a layout, and the record would vanish.
+          merged: Object.fromEntries([
+            ...Object.entries(merged),
+            ...added.map((raw) => [raw, { collapsed: wasCollapsed }] as const),
+          ]),
+        };
       }
-      // Built with `Object.fromEntries`, never by assignment: a raw key
-      // spelled `__proto__` would otherwise set the map's prototype instead
-      // of recording a layout, and the snapshot would vanish.
-      const own = Object.fromEntries([...Object.entries(recorded), ...added]);
       const nextAliases = withModeAliases(aliases, mode, entries);
       commitGroupNames(
         nextAliases,
-        withModeLayouts(groupLayouts(), mode, own, nextAliases),
+        withModeLayouts(groupLayouts(), mode, record, nextAliases),
         merging
           ? pinnedGroups().filter((k) => k !== key)
           : spliceKey(pinnedGroups(), key, [name]),
@@ -3338,45 +3357,35 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         Object.entries(map).filter(([, name]) => name !== key),
       );
       const active = activeGroupKeys(next);
-      const own = groupLayouts()[mode] ?? {};
-      // A key with a recorded layout was merged in and gets that layout
-      // back. One without carried this group's layout here (a plain rename,
-      // or a merge saved before layouts were recorded) and takes it with it,
-      // beside the group itself if that is still a group.
-      const restored = members.filter((k) => Object.hasOwn(own, k));
+      const record = groupLayouts()[mode];
+      const merged = record?.merged ?? {};
+      // A key with a record was merged in and gets its own layout back. One
+      // without carried this group's layout here (a plain rename, or a merge
+      // saved before records existed) and takes it with it, beside the
+      // group itself if that is still a group.
+      const restored = members.filter(
+        (k) => active.has(k) && Object.hasOwn(merged, k),
+      );
       const carriers = [key, ...members].filter(
-        (k) => active.has(k) && !Object.hasOwn(own, k),
+        (k) => active.has(k) && !Object.hasOwn(merged, k),
       );
       const collapsed = new Set(collapsedGroups());
       if (collapsed.delete(key)) for (const k of carriers) collapsed.add(k);
-      const pinned = spliceKey(pinnedGroups(), key, carriers);
-      const after = boardGroups(next);
-      const stillMerged = withModeLayouts(groupLayouts(), mode, own, next)[
-        mode
-      ];
-      // A pin or collapse the key has now is newer than its snapshot and
-      // stands; the snapshot fills in only what is missing. Each pin goes
-      // back between its old neighbours, so the order holds whichever
-      // groups were merged away or reset first.
-      for (const k of restored) {
-        if (!active.has(k)) continue;
-        const layout = own[k]!;
-        if (layout.collapsed) collapsed.add(k);
-        if (layout.pin !== null && !pinned.includes(k))
-          pinned.splice(
-            restorePinAt(pinned, layout, (pin) =>
-              pinIdentity(after, stillMerged, pin),
-            ),
-            0,
-            k,
-          );
-      }
-      commitGroupNames(
-        next,
-        withModeLayouts(groupLayouts(), mode, own, next),
-        pinned,
-        collapsed,
+      // A collapse the key has now is newer than its record and stands.
+      for (const k of restored) if (merged[k]!.collapsed) collapsed.add(k);
+      const layouts = withModeLayouts(groupLayouts(), mode, record, next);
+      // Every pin that came back goes in at once, after the pin it followed
+      // in the record, so the order holds whichever groups were merged away
+      // or reset first; the pins there now keep their order.
+      const stillMerged = layouts[mode]?.merged ?? {};
+      const pinned = layIn(
+        spliceKey(pinnedGroups(), key, carriers),
+        (pin) => ownKeys(pin, next[mode], stillMerged),
+        record?.pins ?? [],
+        restored,
+        (pin) => [pin],
       );
+      commitGroupNames(next, layouts, pinned, collapsed);
       // The groups that came back, by what their headers now say.
       const split = [key, ...members].filter((k) => active.has(k));
       const back = (split.length ? split : members).map(headerLabel);

@@ -129,53 +129,40 @@ export type GroupAliases = NonNullable<UIState["groupAliases"]>;
 export type GroupLayouts = NonNullable<UIState["groupLayouts"]>;
 
 /**
- * `groupLayouts` as read from disk: known modes, entries shaped like a
- * layout (a non-negative integer pin or null, a boolean collapse), copied
- * with `Object.fromEntries` so a `__proto__` key stays data.
+ * `groupLayouts` as read from disk: known modes, each a merge record with a
+ * list of raw keys for `pins` and a boolean collapse per `merged` key. A
+ * mode in any other shape is dropped whole, the per-key maps earlier builds
+ * of this branch wrote included: a merge without a record resets as one
+ * saved before records existed did. Copied with `Object.fromEntries`, so a
+ * `__proto__` key stays data.
  */
 export function normalizeGroupLayouts(input: unknown): GroupLayouts {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  if (!isPlainObject(input)) return {};
   const out: GroupLayouts = {};
   for (const mode of VALID_GROUP_BY) {
     if (mode === "none" || !Object.hasOwn(input, mode)) continue;
-    const map = (input as Record<string, unknown>)[mode];
-    if (!map || typeof map !== "object" || Array.isArray(map)) continue;
-    const entries = Object.entries(map).flatMap(([raw, value]) => {
-      if (!value || typeof value !== "object") return [];
-      const { pin, collapsed, order } = value as Record<string, unknown>;
-      const pinOk =
-        pin === null || (Number.isInteger(pin) && (pin as number) >= 0);
-      if (!pinOk || typeof collapsed !== "boolean") return [];
-      const layout = { pin: pin as number | null, collapsed };
-      // The neighbours are an aid to placement, never required: a malformed
-      // list is dropped and the index alone places the pin. An entry is the
-      // raw keys behind a pin; a bare string is read as a single key.
-      const entries = Array.isArray(order)
-        ? order.map((entry) =>
-            typeof entry === "string"
-              ? [entry]
-              : Array.isArray(entry) &&
-                  entry.length > 0 &&
-                  entry.every((key) => typeof key === "string")
-                ? (entry as string[])
-                : null,
-          )
-        : null;
-      const orderOk =
-        entries !== null &&
-        entries.every((entry) => entry !== null) &&
-        pin !== null &&
-        (pin as number) < entries.length;
-      return [
-        [
-          raw,
-          orderOk ? { ...layout, order: entries as string[][] } : layout,
-        ] as const,
-      ];
-    });
-    if (entries.length) out[mode] = Object.fromEntries(entries);
+    const record = input[mode];
+    if (!isPlainObject(record)) continue;
+    const { pins, merged } = record;
+    if (
+      !Array.isArray(pins) ||
+      !pins.every((key) => typeof key === "string") ||
+      !isPlainObject(merged)
+    )
+      continue;
+    const entries = Object.entries(merged).flatMap(([raw, layout]) =>
+      isPlainObject(layout) && typeof layout.collapsed === "boolean"
+        ? [[raw, { collapsed: layout.collapsed }] as const]
+        : [],
+    );
+    if (entries.length)
+      out[mode] = { pins: [...pins], merged: Object.fromEntries(entries) };
   }
   return out;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 /** The widest a group name may be, in terminal columns. */

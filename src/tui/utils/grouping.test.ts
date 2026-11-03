@@ -1352,51 +1352,65 @@ describe("normalizeGroupAliases width", () => {
 });
 
 describe("normalizeGroupLayouts", () => {
-  it("keeps layout-shaped entries for known modes", () => {
+  it("keeps merge records for known modes, and their well-formed entries", () => {
     expect(
       normalizeGroupLayouts({
         project: {
-          a: { pin: 0, collapsed: false },
-          b: { pin: null, collapsed: true },
-          c: { pin: -1, collapsed: true },
-          d: { pin: 1.5, collapsed: false },
-          e: { pin: 0, collapsed: "yes" },
-          f: "nope",
+          pins: ["a", "x", "b"],
+          merged: {
+            a: { collapsed: false },
+            b: { collapsed: true },
+            c: { collapsed: "yes" },
+            d: "nope",
+          },
         },
-        none: { x: { pin: 0, collapsed: false } },
-        bogus: { y: { pin: 0, collapsed: false } },
+        // Nothing merged is left to record.
+        cwd: { pins: ["a"], merged: { a: { pin: 0 } } },
+        none: { pins: [], merged: { x: { collapsed: false } } },
+        bogus: { pins: [], merged: { y: { collapsed: false } } },
       }),
     ).toEqual({
       project: {
-        a: { pin: 0, collapsed: false },
-        b: { pin: null, collapsed: true },
+        pins: ["a", "x", "b"],
+        merged: { a: { collapsed: false }, b: { collapsed: true } },
       },
     });
   });
 
-  it("keeps a pin's neighbours when they are well formed, and drops them otherwise", () => {
+  it("drops a mode whose pins are not a list of keys", () => {
+    const merged = { a: { collapsed: false } };
     expect(
       normalizeGroupLayouts({
-        project: {
-          a: { pin: 1, collapsed: false, order: [["x"], ["a"], ["y", "z"]] },
-          // A bare string is read as one raw key.
-          e: { pin: 0, collapsed: false, order: ["e", ["f"]] },
-          b: { pin: 3, collapsed: false, order: [["x"], ["b"]] },
-          c: { pin: 0, collapsed: false, order: [["c"], [7]] },
-          g: { pin: 0, collapsed: false, order: [["g"], []] },
-          d: { pin: null, collapsed: true, order: [["d"]] },
+        project: { pins: ["a", 7], merged },
+        session: { pins: "a", merged },
+        window: { merged },
+      }),
+    ).toEqual({});
+  });
+
+  it("drops the per-key maps earlier builds wrote", () => {
+    // An index alone, then neighbours by name, then by raw keys: none says
+    // where a pin goes, so the merge resets as an unrecorded one.
+    expect(
+      normalizeGroupLayouts({
+        project: { a: { pin: 0, collapsed: false } },
+        cwd: { s: { pin: 0, collapsed: false, order: ["s", "N", "t"] } },
+        session: {
+          b: { pin: 1, collapsed: true, order: [["x"], ["b"], ["y", "z"]] },
         },
       }),
-    ).toEqual({
-      project: {
-        a: { pin: 1, collapsed: false, order: [["x"], ["a"], ["y", "z"]] },
-        e: { pin: 0, collapsed: false, order: [["e"], ["f"]] },
-        b: { pin: 3, collapsed: false },
-        c: { pin: 0, collapsed: false },
-        g: { pin: 0, collapsed: false },
-        d: { pin: null, collapsed: true },
-      },
-    });
+    ).toEqual({});
+  });
+
+  it("keeps a key spelled __proto__ as data", () => {
+    const { project } = normalizeGroupLayouts(
+      JSON.parse(
+        '{"project":{"pins":["__proto__"],"merged":{"__proto__":{"collapsed":true}}}}',
+      ),
+    );
+    expect(Object.hasOwn(project!.merged, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(project!.merged)).toBe(Object.prototype);
+    expect(project!.pins).toEqual(["__proto__"]);
   });
 
   it("is empty for anything that is not an object", () => {
