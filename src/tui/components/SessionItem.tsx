@@ -555,9 +555,10 @@ const FieldCell: Component<{
       // captured const) so the cell re-renders when the store flips a
       // synthetic invoke row to its terminal outcome via a fine-grained
       // setState. `ctx.session` is a stable store proxy; pulling the read out
-      // into a local would freeze the badge on the running spinner.
+      // into a local would freeze the badge on the running spinner. The width
+      // is read here too, not from `width`, since it follows the icon style.
       return (
-        <box width={width}>
+        <box width={entryRightWidth(entry, ctx.iconStyle)}>
           <Show
             when={ctx.session.originInvocationStatus}
             fallback={
@@ -819,11 +820,17 @@ const FieldCell: Component<{
  * Sums fixed widths of row 1 left entries that come before "project", plus
  * inter-entry gaps. If row 1 has no project entry, return 0 (no auto-indent).
  */
-function row2LeadingIndent(row1Left: ResolvedEntry[]): number {
+function row2LeadingIndent(
+  row1Left: ResolvedEntry[],
+  iconStyle: IconStyle | undefined,
+): number {
   const projectIdx = row1Left.findIndex((e) => e.field === "project");
   if (projectIdx <= 0) return 0;
   const preProject = row1Left.slice(0, projectIdx);
-  const sumWidths = preProject.reduce((acc, e) => acc + entryRightWidth(e), 0);
+  const sumWidths = preProject.reduce(
+    (acc, e) => acc + entryRightWidth(e, iconStyle),
+    0,
+  );
   return sumWidths + (preProject.length - 1);
 }
 
@@ -1026,7 +1033,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       const w =
         e.field === "pr"
           ? prLabel(props.session, e.mode).length
-          : entryRightWidth(e);
+          : entryRightWidth(e, props.iconStyle);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
     const attn = attentionWidth();
@@ -1070,7 +1077,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
                 maxProjectLen(),
                 maxBranchLen(),
               )
-            : entryRightWidth(e);
+            : entryRightWidth(e, props.iconStyle);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
     // The reserved attention cell is drawn on row 1 only, so it eats into a
@@ -1078,7 +1085,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     const attn = isRow1 ? attentionWidth() : 0;
     const reserved =
       2 + // item paddingLeft/paddingRight
-      (isRow1 ? 0 : row2LeadingIndent(columns().row1.left)) +
+      (isRow1 ? 0 : row2LeadingIndent(columns().row1.left, props.iconStyle)) +
       cells +
       (attn > 0 ? attn + 1 : 0) +
       2; // small margin so the `…` lands inside the flexed box, not clipped
@@ -1275,7 +1282,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             row={row2()}
             rowIndex={2}
             ctx={ctx}
-            leadingIndent={row2LeadingIndent(row1().left)}
+            leadingIndent={row2LeadingIndent(row1().left, props.iconStyle)}
           />
         </Show>
         {/* LAST, below row 2 rather than between the two rows. Row 2 is the

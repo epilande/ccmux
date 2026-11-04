@@ -14,6 +14,7 @@ import {
   wheelTraps,
 } from "./test-helpers";
 import { buildFlatItems, type FlatItem, type GroupBy } from "../utils/grouping";
+import { displayWidth } from "../utils/format";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup;
@@ -907,6 +908,192 @@ describe("SessionList wheel", () => {
       expect(wheelTraps(setup.renderer)).toEqual([]);
     });
   }
+
+  // An emoji is two columns, so a status cell budgeted for a one-column glyph
+  // wraps its own label: `💤 idle` is 7 wide. `wrapMode="none"` alone would
+  // stop the wheel fight by clipping it to `💤 idl`, hence asserting the words.
+  describe("emoji status badges", () => {
+    const badges: {
+      name: string;
+      session: Parameters<typeof mockEnrichedSession>[0];
+      short: string;
+      full: string;
+    }[] = [
+      {
+        name: "idle",
+        session: { status: "idle" },
+        short: "idle",
+        full: "idle",
+      },
+      {
+        name: "working",
+        session: { status: "working" },
+        short: "work",
+        full: "working",
+      },
+      {
+        name: "finished",
+        session: { status: "idle", attentionState: "unread" },
+        short: "done",
+        full: "done",
+      },
+      {
+        name: "permission wait",
+        session: { status: "waiting", attentionType: "permission" },
+        short: "wait",
+        full: "waiting",
+      },
+      {
+        name: "plan approval",
+        session: { status: "waiting", attentionType: "plan_approval" },
+        short: "wait",
+        full: "waiting",
+      },
+      {
+        name: "generic wait",
+        session: { status: "waiting" },
+        short: "wait",
+        full: "waiting",
+      },
+      {
+        name: "background worker",
+        session: { status: "working", trackingMode: "background" },
+        short: "work",
+        full: "working",
+      },
+      {
+        name: "background idle",
+        session: { status: "idle", trackingMode: "background" },
+        short: "idle",
+        full: "idle",
+      },
+      {
+        name: "invoke running",
+        session: { originInvocationStatus: "running" },
+        short: "work",
+        full: "working",
+      },
+      {
+        name: "invoke success",
+        session: { originInvocationStatus: "succeeded" },
+        short: "done",
+        full: "done",
+      },
+      {
+        name: "invoke failure",
+        session: { originInvocationStatus: "failed" },
+        short: "fail",
+        full: "failed",
+      },
+      {
+        name: "invoke cancelled",
+        session: { originInvocationStatus: "cancelled" },
+        short: "canc",
+        full: "cancel",
+      },
+    ];
+
+    async function mountBadges(
+      mode: "icon" | "short" | "full",
+      session: Parameters<typeof mockEnrichedSession>[0],
+    ) {
+      const items = Array.from({ length: 30 }, (_, i) =>
+        makeSessionItem(`s${i}`, "g", session),
+      );
+      setup = await testRender(
+        () => (
+          <TickContext.Provider value={{ tick: () => 0 }}>
+            <SessionList
+              items={items}
+              selectedIndex={0}
+              previewWidth={0}
+              iconStyle="emoji"
+              columns={{
+                row1: {
+                  left: [{ field: "status", mode }, "project"],
+                  right: [],
+                },
+              }}
+            />
+          </TickContext.Provider>
+        ),
+        { width: 80, height: 12 },
+      );
+      await setup.renderOnce();
+      await setup.renderOnce();
+      return setup.captureCharFrame();
+    }
+
+    for (const badge of badges) {
+      for (const mode of ["short", "full"] as const) {
+        it(`keeps the ${mode} ${badge.name} badge whole`, async () => {
+          const frame = await mountBadges(mode, badge.session);
+          expect(wheelTraps(setup.renderer)).toEqual([]);
+          expect(frame).toContain(badge[mode]);
+        });
+      }
+    }
+
+    it("keeps row 2 under the project column past a wide badge", async () => {
+      const items = Array.from({ length: 3 }, (_, i) =>
+        makeSessionItem(`s${i}`, "g", {
+          status: "idle",
+          lastPrompt: "rowtwo",
+        }),
+      );
+      setup = await testRender(
+        () => (
+          <TickContext.Provider value={{ tick: () => 0 }}>
+            <SessionList
+              items={items}
+              selectedIndex={0}
+              previewWidth={0}
+              iconStyle="emoji"
+              promptDisplay="row2"
+              columns={{
+                row1: {
+                  left: [{ field: "status", mode: "short" }, "project"],
+                  right: [],
+                },
+              }}
+            />
+          </TickContext.Provider>
+        ),
+        { width: 40, height: 12 },
+      );
+      await setup.renderOnce();
+      await setup.renderOnce();
+      const lines = setup.captureCharFrame().split("\n");
+      const row1 = lines.findIndex((line) => line.includes("myapp"));
+      expect(row1).toBeGreaterThanOrEqual(0);
+      const row2 = lines[row1 + 1]!;
+      expect(row2).toContain("rowtwo");
+
+      expect(displayWidth(row2.slice(0, row2.indexOf("rowtwo")))).toBe(
+        displayWidth(lines[row1]!.slice(0, lines[row1]!.indexOf("myapp"))),
+      );
+    });
+
+    it("gives a two-column glyph a two-column icon cell", async () => {
+      const frame = await mountBadges("icon", { status: "idle" });
+      expect(wheelTraps(setup.renderer)).toEqual([]);
+      expect(frame).toContain("💤");
+    });
+
+    it("moves the list on the first notch over a short badge", async () => {
+      const frame = await mountBadges("short", { status: "idle" });
+      const lines = frame.split("\n");
+      const y = lines.findIndex((line) => line.includes("💤"));
+      expect(y).toBeGreaterThanOrEqual(0);
+      const [box] = findScrollBoxes(setup.renderer);
+      expect(box!.scrollTop).toBe(0);
+
+      await createMockMouse(setup.renderer).scroll(5, y, "down");
+      await setup.renderOnce();
+
+      expect(box!.scrollTop).toBe(1);
+    });
+  });
 
   it("moves the list on the first notch over a squeezed prompt", async () => {
     const frame = await mount(60);

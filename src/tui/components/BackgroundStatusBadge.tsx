@@ -34,5 +34,9 @@ export const BackgroundStatusBadge: Component<BackgroundStatusBadgeProps> = (
     const text = props.status;
     return `${icon()} ${mode === "short" ? text.slice(0, 4) : text.padEnd(7)}`;
   };
-  return <Text fg={props.dimmed ? theme.border : color()}>{label()}</Text>;
+  return (
+    <Text fg={props.dimmed ? theme.border : color()} wrapMode="none">
+      {label()}
+    </Text>
+  );
 };
