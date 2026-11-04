@@ -201,35 +201,33 @@ export function findScrollBoxes(renderer: CliRenderer): ScrollBoxRenderable[] {
 
 /**
  * The vertical thumb `box` drew into `frame`, next to the one its geometry
- * calls for, both in half-cells (the slider's unit: `█` is two, `▀`/`▄` one).
+ * calls for, both in half-cells (`█` is two, `▀`/`▄` one).
  *
- * `expected` is OpenTUI's own thumb formula fed the real viewport and content
- * heights, so a slider holding a stale or clamped `viewPortSize` (see
- * `utils/scrollbar-thumb.ts`) draws a different `drawn`. It is 0 while the
- * content fits and the bar hides.
+ * `expected` is the thumb formula fed the real viewport and content heights,
+ * so a bar sized from a stale or clamped viewport draws a different `drawn`.
+ * It is 0 while the content fits and the bar hides.
  */
 export function scrollbarThumb(
   frame: string,
   box: ScrollBoxRenderable,
 ): { drawn: number; expected: number } {
-  const slider = box.verticalScrollBar.slider;
+  const bar = box.verticalScrollBar;
   const drawn = frame
     .split("\n")
-    .slice(slider.y, slider.y + slider.height)
-    .map((line) => [...line][slider.x])
+    .slice(bar.y, bar.y + bar.height)
+    .map((line) => [...line][bar.x])
     .reduce((n, c) => n + (c === "█" ? 2 : c === "▀" || c === "▄" ? 1 : 0), 0);
   const viewport = box.viewport.height;
   const content = box.scrollHeight;
   const expected =
     content <= viewport
       ? 0
-      : Math.max(1, Math.floor((slider.height * 2 * viewport) / content));
+      : Math.max(1, Math.floor((bar.height * 2 * viewport) / content));
   return { drawn, expected };
 }
 
 /**
- * Assert `box` shows a thumb, sized to its content rather than to whatever
- * the slider last clamped to, and return it.
+ * Assert `box` shows a thumb sized to its content, and return it.
  */
 export function expectContentSizedThumb(
   frame: string,

@@ -6,12 +6,8 @@ import { highlightSearchMatches, parseAnsiToStyledText } from "./ansi-renderer";
 /** Read a chunk color back as [r, g, b] ints (0-255) for readable assertions. */
 function rgb(color: RGBA | undefined): [number, number, number] | undefined {
   if (!color) return undefined;
-  const to255 = (v: number) => Math.round(v * 255);
-  return [
-    to255(color.buffer[0]!),
-    to255(color.buffer[1]!),
-    to255(color.buffer[2]!),
-  ];
+  const [r, g, b] = color.toInts();
+  return [r, g, b];
 }
 
 function makeChunk(text: string, fg?: string): TextChunk {

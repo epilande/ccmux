@@ -16,6 +16,22 @@ rmSync(STAGING, { recursive: true, force: true });
 // as current.
 const buildStart = new Date();
 
+// @opentui/core loads its native library from one package per platform
+// (`@opentui/core-darwin-arm64` and so on), importing each by name. Keep
+// them all external, so the bundle imports the library from node_modules at
+// run time:
+// - Bundled, the library becomes a `./libopentui-<hash>.dylib` asset that
+//   dlopen resolves against the working directory, not dist/, and the
+//   launcher's `bun dist/index.js` fails to start.
+// - `bun install` installs only this machine's package, so bundling the
+//   others fails to resolve them.
+// The release's `bun build --compile` step resolves these imports again
+// after `bun install --os="*" --cpu="*"`, and embeds the library.
+const { default: opentuiCore } = (await import("@opentui/core/package.json", {
+  with: { type: "json" },
+})) as { default: { optionalDependencies?: Record<string, string> } };
+const nativePackages = Object.keys(opentuiCore.optionalDependencies ?? {});
+
 const result = await Bun.build({
   entrypoints: ["./src/index.ts"],
   target: "bun",
@@ -31,7 +47,7 @@ const result = await Bun.build({
   // regardless of whether the containing function ever runs, so the build
   // fails without this. Marking it external leaves a harmless unresolved
   // `require("x11")` in the bundle that's simply never executed.
-  external: ["x11"],
+  external: ["x11", ...nativePackages],
 });
 
 if (!result.success) {
