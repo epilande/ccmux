@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { MouseButtons } from "@opentui/core/testing";
+import { createMockMouse, MouseButtons } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
@@ -11,6 +11,7 @@ import {
   expectContentSizedThumb,
   findScrollBoxes,
   scrollbarThumb,
+  wheelTraps,
 } from "./test-helpers";
 import { buildFlatItems, type FlatItem, type GroupBy } from "../utils/grouping";
 
@@ -866,5 +867,62 @@ describe("isActivePaneRow", () => {
     expect(isActivePaneRow({ tmuxPane: "%1" }, "%1")).toBe(true);
     expect(isActivePaneRow({ tmuxPane: "%1" }, "%2")).toBe(false);
     expect(isActivePaneRow({ tmuxPane: "%1" }, null)).toBe(false);
+  });
+});
+
+// OpenTUI hands a wheel notch to the innermost scroller that can still move,
+// and a cell wrapped past its one-line row is one: at 60 columns the prompt
+// cell took a notch per row it hid a word on, before the list moved at all.
+describe("SessionList wheel", () => {
+  const PROMPT = "reconcile the worktree prune results wheel handling";
+  const rows = () =>
+    Array.from({ length: 30 }, (_, i) =>
+      makeSessionItem(`s${i}`, "g", {
+        lastPrompt: PROMPT,
+        project: "fix-prune-results-wheel",
+        cwd: `/home/erp/.t3/worktrees/ccmux/fix-prune-results-wheel-${i}`,
+        gitBranch: `fix/prune-results-wheel-${i}`,
+        tmuxTarget: `ccmux:${i}.1`,
+        isWorktree: true,
+      }),
+    );
+
+  async function mount(width: number) {
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList items={rows()} selectedIndex={0} previewWidth={0} />
+        </TickContext.Provider>
+      ),
+      { width, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  for (const width of [30, 36, 40, 60, 80]) {
+    it(`leaves no cell that can take the wheel at ${width} columns`, async () => {
+      await mount(width);
+      expect(wheelTraps(setup.renderer)).toEqual([]);
+    });
+  }
+
+  it("moves the list on the first notch over a squeezed prompt", async () => {
+    const frame = await mount(60);
+    const line = frame.split("\n").find((text) => text.includes("reconcile"));
+    expect(line).toBeDefined();
+    const y = frame.split("\n").indexOf(line!);
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+
+    await createMockMouse(setup.renderer).scroll(
+      line!.indexOf("reconcile"),
+      y,
+      "down",
+    );
+    await setup.renderOnce();
+
+    expect(box!.scrollTop).toBe(1);
   });
 });

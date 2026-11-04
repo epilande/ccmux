@@ -474,9 +474,13 @@ const PromptCell: Component<{
             fallback={
               <Show
                 when={transcriptLine()}
-                fallback={<Text fg={contentColor(ctx)}>{text()}</Text>}
+                fallback={
+                  <Text fg={contentColor(ctx)} wrapMode="none">
+                    {text()}
+                  </Text>
+                }
               >
-                <Text fg={dimColor(ctx, theme.overlay)}>
+                <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
                   {transcriptLine()}
                 </Text>
               </Show>
@@ -516,6 +520,12 @@ function promptCellShowsMatch(ctx: FieldRenderContext): boolean {
   return src === "pane" || src === "transcript" || src === "cwd";
 }
 
+/**
+ * One cell of a one-line row. A `<Text>` here that can outgrow its cell (flex
+ * squeezes the flexible ones, and the fixed ones hold values nothing fits)
+ * sets `wrapMode="none"`: a wrapped one hides the rest in lines its box cannot
+ * show, and OpenTUI scrolls those hidden lines before it scrolls the list.
+ */
 const FieldCell: Component<{
   entry: ResolvedEntry;
   ctx: FieldRenderContext;
@@ -636,9 +646,11 @@ const FieldCell: Component<{
             }
           >
             <Show when={fitted().prefix}>
-              <Text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</Text>
+              <Text fg={dimColor(ctx, theme.subtext)} wrapMode="none">
+                {fitted().prefix}
+              </Text>
             </Show>
-            <Text fg={dimColor(ctx, theme.text)}>
+            <Text fg={dimColor(ctx, theme.text)} wrapMode="none">
               <Bold when={ctx.selected || !!ctx.isActiveSession}>
                 {fitted().dirname}
               </Bold>
@@ -652,7 +664,7 @@ const FieldCell: Component<{
                   displayWidth(branch()) <= ctx.maxBranchLen
                 }
                 fallback={
-                  <Text fg={dimColor(ctx, theme.blue)}>
+                  <Text fg={dimColor(ctx, theme.blue)} wrapMode="none">
                     {fitted().branchLabel}
                   </Text>
                 }
@@ -676,7 +688,7 @@ const FieldCell: Component<{
       const raw = entry.mode === "short" ? ctx.agentShortLabel : ctx.agentLabel;
       return (
         <box width={width}>
-          <Text fg={dimColor(ctx, ctx.agentColor)}>
+          <Text fg={dimColor(ctx, ctx.agentColor)} wrapMode="none">
             {alignText(raw, width, side)}
           </Text>
         </box>
@@ -685,7 +697,7 @@ const FieldCell: Component<{
     case "version":
       return (
         <box width={width}>
-          <Text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
             {alignText(ctx.versionLabel, width, side)}
           </Text>
         </box>
@@ -698,6 +710,7 @@ const FieldCell: Component<{
               ctx,
               ctx.isActivePane ? theme.rosewater : theme.subtext,
             )}
+            wrapMode="none"
           >
             {alignText(ctx.paneInfo, width, side)}
           </Text>
@@ -706,7 +719,7 @@ const FieldCell: Component<{
     case "time":
       return (
         <box width={width}>
-          <Text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
             {alignText(ctx.timeLabel, width, side)}
           </Text>
         </box>
@@ -740,7 +753,7 @@ const FieldCell: Component<{
             <Show
               when={ctx.highlights?.summary}
               fallback={
-                <Text fg={contentColor(ctx)}>
+                <Text fg={contentColor(ctx)} wrapMode="none">
                   {truncateText(summary() ?? "", ctx.maxFlexLen(row))}
                 </Text>
               }
@@ -760,7 +773,7 @@ const FieldCell: Component<{
     }
     case "cwd":
       return (
-        <Text fg={dimColor(ctx, theme.overlay)}>
+        <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
           {shortenCwd(ctx.session.paneCwd ?? ctx.session.cwd)}
         </Text>
       );
@@ -779,7 +792,11 @@ const FieldCell: Component<{
         const marker = ctx.session.isWorktree ? "+" : "";
         return branch ? branch + marker : "";
       };
-      return <Text fg={dimColor(ctx, theme.blue)}>{label()}</Text>;
+      return (
+        <Text fg={dimColor(ctx, theme.blue)} wrapMode="none">
+          {label()}
+        </Text>
+      );
     }
     case "pr": {
       const label = () => prLabel(ctx.session, entry.mode);

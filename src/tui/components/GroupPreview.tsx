@@ -94,16 +94,20 @@ const SessionRow: Component<{
     <box flexDirection="column" paddingBottom={1}>
       <box flexDirection="row" height={1} gap={1}>
         <Text fg={color()}>{icon()}</Text>
-        <Text fg={theme.text}>
+        <Text fg={theme.text} wrapMode="none">
           <b>{label()}</b>
         </Text>
         <box flexGrow={1} />
-        <Text fg={theme.overlay}>{timeStr()}</Text>
+        <Text fg={theme.overlay} wrapMode="none">
+          {timeStr()}
+        </Text>
       </box>
       <Show when={meta()}>
         {(m: () => string) => (
           <box height={1} paddingLeft={3}>
-            <Text fg={theme.subtext}>{m()}</Text>
+            <Text fg={theme.subtext} wrapMode="none">
+              {m()}
+            </Text>
           </box>
         )}
       </Show>
@@ -192,9 +196,15 @@ const WorktreeRow: Component<{
       <Text fg={getStatusColor(effective().status, effective().attentionType)}>
         {icon()}
       </Text>
-      <Text fg={theme.text}>{props.entry.name}</Text>
+      <Text fg={theme.text} wrapMode="none">
+        {props.entry.name}
+      </Text>
       <Show when={props.entry.session.gitBranch}>
-        {(branch: () => string) => <Text fg={theme.blue}>{branch()}</Text>}
+        {(branch: () => string) => (
+          <Text fg={theme.blue} wrapMode="none">
+            {branch()}
+          </Text>
+        )}
       </Show>
       <Show when={props.entry.count > 1}>
         <Text fg={theme.overlay}>{`×${props.entry.count}`}</Text>
