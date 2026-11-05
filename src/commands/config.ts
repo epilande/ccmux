@@ -84,7 +84,7 @@ export const KNOWN_KEYS: Record<
   columnHeader: {
     validate: (v) => (VALID_COLUMN_HEADER_MODES as readonly string[]).includes(v),
     parse: (v) => v,
-    description: `Column-header line above the picker list (${VALID_COLUMN_HEADER_MODES.join(", ")}; default auto = flat grouping only)`,
+    description: `Column-header line above the picker list (${VALID_COLUMN_HEADER_MODES.join(", ")}; default auto = every grouping)`,
     choices: VALID_COLUMN_HEADER_MODES,
   },
   promptLines: {
