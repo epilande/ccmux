@@ -1,6 +1,6 @@
 {
   "name": "ccmux",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "private": true,
   "description": "Run your AI coding agents in tmux: jump to the one that needs you, spawn worktrees, hand work between sessions",
   "license": "MIT",
@@ -47,14 +47,15 @@
     "check:unused": "bun run knip"
   },
   "dependencies": {
-    "@opentui/core": "0.1.97",
-    "@opentui/solid": "0.1.97",
+    "@opentui/core": "0.8.1",
+    "@opentui/solid": "0.8.1",
     "anser": "^2.3.5",
     "chokidar": "^4.0.0",
     "commander": "^14.0.0",
     "dbus-next": "^0.10.2",
     "fuzzysort": "^3.0.0",
-    "solid-js": "^1.9.0"
+    "solid-js": "^1.9.12",
+    "web-tree-sitter": "0.25.10"
   },
   "devDependencies": {
     "@types/bun": "1.3.6",

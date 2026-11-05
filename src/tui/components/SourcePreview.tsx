@@ -8,7 +8,6 @@ import type {
 } from "../../daemon/source-detail";
 import { theme } from "../theme";
 import { truncateText, wrapToLines } from "../utils/format";
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import {
   fetchIssueDetail,
@@ -229,7 +228,6 @@ export const SourcePreview: Component<SourcePreviewProps> = (props) => {
         <scrollbox
           flexGrow={1}
           ref={(r: ScrollBoxRenderable) => {
-            syncScrollbarThumb(r);
             props.onScrollboxRef?.(r);
           }}
         >

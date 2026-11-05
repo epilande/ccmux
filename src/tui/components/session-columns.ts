@@ -19,6 +19,7 @@ import {
 import type { EnrichedSession, BranchPR } from "../../types";
 import type { ColumnHeaderMode } from "../../lib/preferences";
 import { DEFAULT_COLUMN_HEADER } from "../../lib/preferences";
+import { statusIconWidth, type IconStyle } from "../../lib/icons";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { stripTerminalNoise } from "../../lib/strip-ansi";
 import { HANDOFF_PREFIX } from "../../daemon/handoff";
@@ -1061,11 +1062,22 @@ function oneMark(
 }
 
 /** Width allocated to a resolved entry on a "right side" (right-aligned column). */
-export function entryRightWidth(entry: ResolvedEntry): number {
+export function entryRightWidth(
+  entry: ResolvedEntry,
+  iconStyle?: IconStyle,
+): number {
   if (entry.width !== undefined) return entry.width;
   switch (entry.field) {
-    case "status":
-      return entry.mode === "full" ? 9 : entry.mode === "short" ? 6 : 1;
+    case "status": {
+      // The badges draw `<glyph> <label>`, the label padded to 7 in full mode
+      // and cut to 4 in short mode.
+      const glyph = statusIconWidth(iconStyle);
+      return entry.mode === "full"
+        ? glyph + 8
+        : entry.mode === "short"
+          ? glyph + 5
+          : glyph;
+    }
     case "agent":
       return entry.mode === "short" ? 2 : 8;
     case "version":
@@ -1171,12 +1183,16 @@ function lendRight(cells: HeaderCell[]): HeaderCell[] {
  *   walk the entries backwards and stop at the first intrinsic-width one.
  *
  * Widths are the same {@link entryRightWidth} the cells render with, so a
- * label and its column cannot disagree.
+ * label and its column cannot disagree. That includes the icon style, which
+ * sets the status cell's width (an emoji glyph is two columns).
  */
-export function columnHeaderCells(row1: ResolvedRow): HeaderCells {
+export function columnHeaderCells(
+  row1: ResolvedRow,
+  iconStyle?: IconStyle,
+): HeaderCells {
   const left: HeaderCell[] = [];
   for (const entry of row1.left) {
-    const width = entryRightWidth(entry);
+    const width = entryRightWidth(entry, iconStyle);
     if (width > 0) {
       left.push({ field: entry.field, text: labelFor(entry, width), width });
       continue;
@@ -1187,7 +1203,7 @@ export function columnHeaderCells(row1: ResolvedRow): HeaderCells {
   const right: HeaderCell[] = [];
   for (let i = row1.right.length - 1; i >= 0; i--) {
     const entry = row1.right[i]!;
-    const width = entryRightWidth(entry);
+    const width = entryRightWidth(entry, iconStyle);
     if (width === 0) break;
     right.unshift({ field: entry.field, text: labelFor(entry, width), width });
   }

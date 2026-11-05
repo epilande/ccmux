@@ -16,7 +16,6 @@ import {
   truncateMiddle,
   truncateText,
 } from "../utils/format";
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { fetchWorktreeDetail } from "../utils/detail-fetch";
 import { createDetailLoader } from "../utils/detail-loader";
@@ -241,7 +240,6 @@ export const WorktreePreview: Component<WorktreePreviewProps> = (props) => {
             <scrollbox
               flexGrow={1}
               ref={(r: ScrollBoxRenderable) => {
-                syncScrollbarThumb(r);
                 props.onScrollboxRef?.(r);
               }}
             >

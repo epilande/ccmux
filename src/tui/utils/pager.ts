@@ -65,18 +65,29 @@ export async function openInPager(
   // that runs it.
   const name = argv[0] === "sh" ? argv[2]! : argv[0]!;
   try {
-    renderer.suspend();
+    await renderer.suspend();
   } catch (err) {
     return { ok: false, error: `suspend failed: ${err}` };
   }
+  let result: { ok: true } | { ok: false; error: string };
   try {
     const code = await spawn(argv, text);
-    return code === 0
-      ? { ok: true }
-      : { ok: false, error: `${name} exited ${code}` };
+    result =
+      code === 0 ? { ok: true } : { ok: false, error: `${name} exited ${code}` };
   } catch (err) {
-    return { ok: false, error: `${name} failed: ${err}` };
-  } finally {
-    renderer.resume();
+    result = { ok: false, error: `${name} failed: ${err}` };
   }
+  // OpenTUI 0.8's resume is async. A failed one gets a second try, as in
+  // `runHunkReview`; only when both fail does it replace the pager's result,
+  // since a picker that never came back is the thing the user must hear about.
+  try {
+    await renderer.resume();
+  } catch {
+    try {
+      await renderer.resume();
+    } catch (err) {
+      return { ok: false, error: `resume failed: ${err}` };
+    }
+  }
+  return result;
 }

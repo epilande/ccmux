@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { createMockMouse } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
 import {
   GroupPreview,
@@ -14,6 +15,7 @@ import {
   expectContentSizedThumb,
   findScrollBoxes,
   scrollbarThumb,
+  wheelTraps,
 } from "./test-helpers";
 import type { StatusSummary } from "../utils/grouping";
 import type { EnrichedSession } from "../../types";
@@ -432,5 +434,63 @@ describe("GroupPreview repository facts", () => {
     // The idle checkout is listed too: the inventory, not just where
     // sessions happen to be.
     expect(frame).toContain("idle  chore/idle");
+  });
+});
+
+// A one-line row whose text wraps hides the rest in lines its box cannot show,
+// and OpenTUI scrolls those lines before the list: at a preview this narrow the
+// list held still for the first notches over a row.
+describe("GroupPreview wheel", () => {
+  const sessions = () =>
+    Array.from({ length: 20 }, (_, i) =>
+      mockEnrichedSession({
+        id: `s${i}`,
+        tmuxTarget: `fix-prune-results-wheel:${i}.1`,
+        cwd: `/home/erp/.t3/worktrees/ccmux/fix-prune-results-wheel-${i}`,
+        gitBranch: `fix/prune-results-wheel-${i}`,
+        isWorktree: true,
+      }),
+    );
+
+  async function mount(width: number) {
+    const list = sessions();
+    const header = {
+      label: "ccmux",
+      count: list.length,
+      members: membersFromSummary({ ...emptySummary(), idle: list.length }),
+    };
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <GroupPreview header={header} sessions={list} width={width} />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 14 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  for (const width of [30, 40, 60, 100]) {
+    it(`leaves no row that can take the wheel at ${width}%`, async () => {
+      await mount(width);
+      expect(wheelTraps(setup.renderer)).toEqual([]);
+    });
+  }
+
+  it("moves the list on the first notch over a worktree row", async () => {
+    const frame = await mount(30);
+    const lines = frame.split("\n");
+    const y = lines.findIndex((line) => line.includes("fix-p"));
+    expect(y).toBeGreaterThanOrEqual(0);
+    const x = lines[y]!.indexOf("fix-p");
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+
+    await createMockMouse(setup.renderer).scroll(x, y, "down");
+    await setup.renderOnce();
+
+    expect(box!.scrollTop).toBe(1);
   });
 });
