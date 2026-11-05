@@ -66,7 +66,7 @@ describe("test isolation", () => {
       "./tui/utils/review" + "?isolation"
     )) as typeof import("./tui/utils/review");
     const result = await runHunkReview(
-      { suspend: () => {}, resume: () => {} },
+      { suspend: async () => {}, resume: async () => {} },
       "/repo",
       {
         which: () => "/opt/homebrew/bin/hunk",

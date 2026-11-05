@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import type { CliRenderer, Renderable } from "@opentui/core";
-import { ScrollBoxRenderable } from "@opentui/core";
+import { ScrollBoxRenderable, TextBufferRenderable } from "@opentui/core";
 import { createMockKeys } from "@opentui/core/testing";
 import type { EnrichedSession, Session } from "../../types";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
@@ -200,36 +200,61 @@ export function findScrollBoxes(renderer: CliRenderer): ScrollBoxRenderable[] {
 }
 
 /**
- * The vertical thumb `box` drew into `frame`, next to the one its geometry
- * calls for, both in half-cells (the slider's unit: `█` is two, `▀`/`▄` one).
+ * The text of every `<text>` under a scrollbox that a wheel notch would stop
+ * at instead of the list.
  *
- * `expected` is OpenTUI's own thumb formula fed the real viewport and content
- * heights, so a slider holding a stale or clamped `viewPortSize` (see
- * `utils/scrollbar-thumb.ts`) draws a different `drawn`. It is 0 while the
- * content fits and the bar hides.
+ * OpenTUI hands a notch to the innermost scroller that can still move, and a
+ * `<text>` wrapped past its own box is one: the list holds still while the
+ * text walks through its hidden lines. A clean surface returns `[]`. A
+ * zero-height text has no hit area, so nothing can wheel over it.
+ */
+export function wheelTraps(renderer: CliRenderer): string[] {
+  const found: string[] = [];
+  const walk = (node: Renderable, inScrollBox: boolean) => {
+    if (
+      inScrollBox &&
+      node instanceof TextBufferRenderable &&
+      node.height > 0 &&
+      node.maxScrollY > 0
+    ) {
+      found.push(node.plainText);
+    }
+    const scrolls = inScrollBox || node instanceof ScrollBoxRenderable;
+    for (const child of node.getChildren()) walk(child, scrolls);
+  };
+  walk(renderer.root, false);
+  return found;
+}
+
+/**
+ * The vertical thumb `box` drew into `frame`, next to the one its geometry
+ * calls for, both in half-cells (`█` is two, `▀`/`▄` one).
+ *
+ * `expected` is the thumb formula fed the real viewport and content heights,
+ * so a bar sized from a stale or clamped viewport draws a different `drawn`.
+ * It is 0 while the content fits and the bar hides.
  */
 export function scrollbarThumb(
   frame: string,
   box: ScrollBoxRenderable,
 ): { drawn: number; expected: number } {
-  const slider = box.verticalScrollBar.slider;
+  const bar = box.verticalScrollBar;
   const drawn = frame
     .split("\n")
-    .slice(slider.y, slider.y + slider.height)
-    .map((line) => [...line][slider.x])
+    .slice(bar.y, bar.y + bar.height)
+    .map((line) => [...line][bar.x])
     .reduce((n, c) => n + (c === "█" ? 2 : c === "▀" || c === "▄" ? 1 : 0), 0);
   const viewport = box.viewport.height;
   const content = box.scrollHeight;
   const expected =
     content <= viewport
       ? 0
-      : Math.max(1, Math.floor((slider.height * 2 * viewport) / content));
+      : Math.max(1, Math.floor((bar.height * 2 * viewport) / content));
   return { drawn, expected };
 }
 
 /**
- * Assert `box` shows a thumb, sized to its content rather than to whatever
- * the slider last clamped to, and return it.
+ * Assert `box` shows a thumb sized to its content, and return it.
  */
 export function expectContentSizedThumb(
   frame: string,
