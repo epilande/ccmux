@@ -1104,11 +1104,12 @@ describe("SessionItem prompt mode (off + inline truncation)", () => {
       }),
     });
     const lines = frame.split("\n");
-    // Inline default: pr sits next to the branch, then the prompt fills the
-    // rest of the row and truncates rather than shoving the pr off.
+    // Inline default: the prompt fills the middle and truncates rather than
+    // shoving the pr, which heads the right-side columns, off the row.
     expect(lines[0]).toContain("an extremely long");
+    expect(lines[0]).toContain("…");
     expect(lines[0]).toContain("#25");
-    expect(lines[0].indexOf("#25")).toBeLessThan(
+    expect(lines[0].indexOf("#25")).toBeGreaterThan(
       lines[0].indexOf("an extremely long"),
     );
     expect(lines[1].trim()).toBe("");

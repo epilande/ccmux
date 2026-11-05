@@ -67,7 +67,16 @@ export function createRepoFacts(options: {
   });
   return { data, refresh };
 }
-/** Branch badges describe association; checkout routing separately requires SHA proof. */
+/**
+ * Branch badges describe association; checkout routing separately requires
+ * SHA proof.
+ *
+ * A cached answer replaces the daemon's per-session one only when it NAMES a
+ * PR. An empty one means "unproven", not "none": `associatedBranchPRs` needs
+ * the local tip to equal the PR head or a tracking config naming its branch,
+ * and a branch pushed without `-u` that then gains a local commit has
+ * neither, while `gh pr list --head` still finds its PR by name.
+ */
 export function branchPRs(
   session: Pick<
     EnrichedSession,
@@ -84,9 +93,8 @@ export function branchPRs(
     Object.hasOwn(repo.branchPRs, session.gitBranch)
       ? repo.branchPRs[session.gitBranch]
       : undefined;
-  if (cached) return cached.value.map((pr) => ({ ...pr, stale: cached.stale }));
-  // A repo-wide list cannot prove which fork a namesake branch belongs to.
-  // Keep the daemon's existing associations until branch facts answer.
+  if (cached?.value.length)
+    return cached.value.map((pr) => ({ ...pr, stale: cached.stale }));
   return session.branchPRs ?? [];
 }
 export function branchPR(

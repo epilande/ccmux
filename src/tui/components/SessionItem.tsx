@@ -807,10 +807,20 @@ const FieldCell: Component<{
       // a state-less PR (background-agent PRs) keeps the neutral mauve.
       const color = () => prStateColor(prColorState(ctx.session) ?? "none");
       // Fixed-width cell so a flexible left side (the prompt) can never
-      // crush it out of the row.
+      // crush it out of the row. A list-sized column (`sizePrColumn`) keeps
+      // its width on every row, badge or not, and aligns like its neighbours.
+      const cellWidth = () => entry.width ?? label().length;
       return (
-        <box width={label().length} flexShrink={0}>
-          <Text fg={dimColor(ctx, color())}>{label()}</Text>
+        <box width={cellWidth()} flexShrink={0}>
+          <Text fg={dimColor(ctx, color())}>
+            {entry.width === undefined
+              ? label()
+              : alignText(
+                  truncateText(label(), entry.width),
+                  entry.width,
+                  side,
+                )}
+          </Text>
         </box>
       );
     }
@@ -1033,7 +1043,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     );
     const cells = siblings.reduce((acc, e) => {
       const w =
-        e.field === "pr"
+        e.field === "pr" && e.width === undefined
           ? prLabel(props.session, e.mode).length
           : entryRightWidth(e, props.iconStyle);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
@@ -1070,7 +1080,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     );
     const cells = siblings.reduce((acc, e) => {
       const w =
-        e.field === "pr"
+        e.field === "pr" && e.width === undefined
           ? prLabel(props.session, e.mode).length
           : e.field === "project"
             ? projectCellWidth(
