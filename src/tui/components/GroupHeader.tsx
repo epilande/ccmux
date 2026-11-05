@@ -18,6 +18,12 @@ interface GroupHeaderProps {
   /** Budget for the label and its segments; the rule is sized by layout. */
   width?: number;
   facts?: string;
+  /**
+   * Something the header must not drop, unlike `facts`: drawn right after
+   * the count, and the label truncates before it does. `short` is the form
+   * a narrow line falls back to.
+   */
+  notice?: { text: string; short: string; color: string };
   sharedBranch?: string;
   prBadge?: string;
   prBadgeColor?: string;
@@ -110,15 +116,22 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
           ]
         : [];
     const count = ` (${props.count})`;
-    // Keep the count and collapsed activity visible before spending space on
-    // a long group name or optional repository facts.
-    const labelWidth = Math.max(
-      1,
-      left -
-        2 -
-        displayWidth(count) -
-        activity.reduce((width, part) => width + displayWidth(part.text), 0),
-    );
+    // Keep the count, the notice and collapsed activity visible before
+    // spending space on a long group name or optional repository facts. The
+    // notice takes its full form only when the label still fits beside it.
+    const fixed =
+      2 +
+      displayWidth(count) +
+      activity.reduce((width, part) => width + displayWidth(part.text), 0);
+    const notice = props.notice
+      ? `  ${
+          left - fixed - displayWidth(`  ${props.notice.text}`) >=
+          displayWidth(props.label)
+            ? props.notice.text
+            : props.notice.short
+        }`
+      : "";
+    const labelWidth = Math.max(1, left - fixed - displayWidth(notice));
     const segments: Array<{ text: string; color: string; label?: boolean }> = [
       { text: `${indicator()} `, color: theme.overlay },
       {
@@ -127,6 +140,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         label: true,
       },
       { text: count, color: theme.overlay },
+      ...(notice ? [{ text: notice, color: props.notice!.color }] : []),
       ...activity,
       ...(props.sharedBranch && props.sharedBranch !== "main"
         ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]

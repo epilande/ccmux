@@ -20,11 +20,13 @@ async function renderHeader(props: {
   statusSummary?: StatusSummary;
   dimmed?: boolean;
   width?: number;
+  notice?: { text: string; short: string; color: string };
 }) {
   setup = await testRender(
     () => (
       <GroupHeader
         label={props.label ?? "testgroup"}
+        notice={props.notice}
         count={props.count ?? 3}
         collapsed={props.collapsed ?? false}
         selected={props.selected ?? false}
@@ -50,6 +52,35 @@ describe("GroupHeader", () => {
     const frame = await renderHeader({ collapsed: false });
     expect(frame).toContain("▾");
     expect(frame).not.toContain("▸");
+  });
+
+  it("keeps a notice after the count, shortening it before cutting the label", async () => {
+    const notice = {
+      text: "+2 waiting in other repos",
+      short: "+2 elsewhere",
+      color: "#ff0000",
+    };
+    const wide = await renderHeader({
+      label: "needs attention",
+      count: 0,
+      notice,
+    });
+    expect(wide).toContain("needs attention (0)  +2 waiting in other repos");
+    const narrow = await renderHeader({
+      label: "needs attention",
+      count: 0,
+      notice,
+      width: 40,
+    });
+    expect(narrow).toContain("needs attention (0)  +2 elsewhere");
+    const tiny = await renderHeader({
+      label: "needs attention",
+      count: 0,
+      notice,
+      width: 26,
+    });
+    expect(tiny).toContain("(0)  +2 elsewhere");
+    expect(tiny).toContain("…");
   });
 
   it("renders group label and count", async () => {
