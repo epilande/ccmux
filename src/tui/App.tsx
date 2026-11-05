@@ -125,6 +125,7 @@ import {
   CommandPalette,
   paletteActiveIndex,
 } from "./components/CommandPalette";
+import { RenamePrompt } from "./components/RenamePrompt";
 import { openInPager, type PagerDeps } from "./utils/pager";
 import { truncateMiddle } from "./utils/format";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
@@ -139,10 +140,12 @@ import type {
 } from "../lib/preferences";
 import type { PaletteOnlyId } from "./actions";
 import {
-  getGroupKey,
+  groupKeyOf,
   isSyntheticGroupKey,
   type FlatItem,
+  type GroupAliases,
   type GroupBy,
+  type GroupLayouts,
 } from "./utils/grouping";
 import {
   createSidebarWidthPersister,
@@ -176,6 +179,10 @@ interface AppProps {
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
+  /** Group names, per groupBy mode, from state.json. */
+  groupAliases?: GroupAliases;
+  /** Merged-away groups' own layouts, from state.json. */
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
@@ -353,6 +360,8 @@ export function App(props: AppProps) {
     groupBy: props.groupBy,
     collapsedGroups: props.collapsedGroups,
     pinnedGroups: props.pinnedGroups,
+    groupAliases: props.groupAliases,
+    groupLayouts: props.groupLayouts,
     hideIdle: props.hideIdle,
     promptDisplay: props.promptDisplay,
     sidebar: props.sidebar,
@@ -1420,6 +1429,20 @@ export function App(props: AppProps) {
     store.actions.moveGroupToEdge(cm.groupKey, edge);
   }
 
+  function groupContextMenuRename() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    store.actions.hideGroupContextMenu();
+    store.actions.openRenamePrompt(cm.groupKey);
+  }
+
+  function groupContextMenuResetName() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    store.actions.hideGroupContextMenu();
+    store.actions.resetGroupName(cm.groupKey);
+  }
+
   function groupContextMenuKill() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
@@ -1647,6 +1670,11 @@ export function App(props: AppProps) {
     "groupBy:session": () => store.actions.setGroupBy("session"),
     "groupBy:window": () => store.actions.setGroupBy("window"),
     "groupBy:none": () => store.actions.setGroupBy("none"),
+    resetGroupName: () => {
+      const ctx = getGroupMoveContext(store.selectedFlatItem());
+      if (ctx) store.actions.resetGroupName(ctx.groupKey);
+      else store.actions.showToast("No group on this row");
+    },
     copySessionId: () => void copySessionId(),
     openTranscript: () => void openTranscript(),
   };
@@ -2521,6 +2549,25 @@ export function App(props: AppProps) {
         color: theme.text,
         action: groupContextMenuNewSession,
       },
+      {
+        id: "rename",
+        label: "Rename group",
+        hint: "e",
+        color: theme.text,
+        action: groupContextMenuRename,
+      },
+      // Only where there is a name to undo; it splits a merged group back.
+      ...(cm && store.groupHasAlias(cm.groupKey)
+        ? [
+            {
+              id: "reset-name",
+              label: "Reset name",
+              hint: "",
+              color: theme.text,
+              action: groupContextMenuResetName,
+            },
+          ]
+        : []),
       {
         id: "pin-top",
         label: "Pin to top",
@@ -3824,24 +3871,27 @@ export function App(props: AppProps) {
     });
   }
 
-  // Sync state across TUI instances (sidebar reads state.json changes made by picker)
-  if (props.sidebar) {
-    onMount(() => {
-      let disposed = false;
-      try {
-        const stopWatching = watchStateFile(STATE_FILE, async () => {
-          const freshState = await getUIState();
-          if (!disposed) store.actions.reloadUIState(freshState);
-        });
-        onCleanup(() => {
-          disposed = true;
-          void stopWatching();
-        });
-      } catch {
-        // Keep local controls usable if the watcher cannot be created.
-      }
-    });
-  }
+  // Sync UI state across TUI instances: every picker and sidebar re-reads
+  // state.json when another one writes it, so a rename, a pin, a collapse or
+  // a group-by change in one surface reaches the rest. A picker used to skip
+  // this, keeping launch-time state and, on its next write, putting it back
+  // over whatever the others had saved since. `reloadUIState` skips keys
+  // this instance still has queued, so its own pending change survives.
+  onMount(() => {
+    let disposed = false;
+    try {
+      const stopWatching = watchStateFile(STATE_FILE, async () => {
+        const freshState = await getUIState();
+        if (!disposed) store.actions.reloadUIState(freshState);
+      });
+      onCleanup(() => {
+        disposed = true;
+        void stopWatching();
+      });
+    } catch {
+      // Keep local controls usable if the watcher cannot be created.
+    }
+  });
 
   // Adaptive tick: 1s when any session has a timestamp under 60s (seconds display),
   // 10s otherwise (minutes display only changes every 60s).
@@ -3920,7 +3970,11 @@ export function App(props: AppProps) {
     return {
       groupKey:
         item.type === "session"
-          ? getGroupKey(item.filteredSession.session, store.state.groupBy)
+          ? groupKeyOf(
+              item.filteredSession.session,
+              store.state.groupBy,
+              store.groupAliases(),
+            )
           : item.groupKey,
       sessionId:
         item.type === "session" ? item.filteredSession.session.id : undefined,
@@ -3956,6 +4010,16 @@ export function App(props: AppProps) {
     // run and close are taken here; text keys are left undefaulted for its
     // `<input>`, the way Start's filter is (and the panels, disabled while
     // it is up, ignore them).
+    if (store.state.palette?.rename) {
+      // The rename prompt: Enter commits, Esc cancels, and every other key
+      // (`j`/`k` and the arrows included) is the input's, as text.
+      if (key === "escape") store.actions.closePalette();
+      else if (key === "return" || key === "enter")
+        store.actions.commitRenamePrompt();
+      else return;
+      event.preventDefault();
+      return;
+    }
     if (store.state.palette) {
       if (key === "escape") store.actions.closePalette();
       else if (key === "up" || (key === "p" && event.ctrl))
@@ -4162,6 +4226,17 @@ export function App(props: AppProps) {
         }
         event.preventDefault();
         break;
+
+      case "e": {
+        // Rename the selected header's group, or the selected row's, the way
+        // J/K and </> move it. `openRenamePrompt` says why when there is
+        // nothing to rename (no grouping, a synthetic header).
+        const item = store.selectedFlatItem();
+        const ctx = getGroupMoveContext(item);
+        store.actions.openRenamePrompt(ctx?.groupKey ?? item?.groupKey ?? "");
+        event.preventDefault();
+        break;
+      }
 
       case "<": {
         const ctx = getGroupMoveContext(store.selectedFlatItem());
@@ -4664,6 +4739,7 @@ export function App(props: AppProps) {
             handoffDialogMode={store.state.handoffDialog !== null}
             copyDialogMode={store.state.copyDialog !== null}
             paletteMode={store.state.palette !== null}
+            renameMode={store.state.palette?.rename !== undefined}
             view={view()}
           />
         </Show>
@@ -4933,7 +5009,18 @@ export function App(props: AppProps) {
           )}
         </Show>
 
-        <Show when={store.state.palette}>
+        <Show when={store.state.palette?.rename}>
+          {(rename: () => { groupKey: string; label: string }) => (
+            <RenamePrompt
+              label={rename().label}
+              value={store.state.palette?.query ?? ""}
+              onInput={(name) => store.actions.setPaletteQuery(name)}
+              onSubmit={() => store.actions.commitRenamePrompt()}
+              mergesInto={store.renameMergeTarget()}
+            />
+          )}
+        </Show>
+        <Show when={store.state.palette?.rename ? null : store.state.palette}>
           {(open: () => NonNullable<typeof store.state.palette>) => (
             <CommandPalette
               query={open().query}
@@ -4949,7 +5036,10 @@ export function App(props: AppProps) {
         {/* Transient feedback, rendered in every mode: the one-shot and persistent
             pickers need the switch-failure toast too, not just the sidebar. */}
         <Show when={store.state.toastMessage}>
-          <Toast message={store.state.toastMessage!} />
+          <Toast
+            message={store.state.toastMessage!}
+            fit={store.toastFit()}
+          />
         </Show>
       </box>
     </TickContext.Provider>

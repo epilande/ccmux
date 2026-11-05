@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { createTUIStore as _createTUIStore } from "./store";
 import { mockEnrichedSession } from "./components/test-helpers";
-import { getGroupKey, INVOKE_GROUP_KEY } from "./utils/grouping";
+import { groupKeyOf, INVOKE_GROUP_KEY } from "./utils/grouping";
 import type { InvocationStartedEvent, InvocationFinishedEvent } from "../types";
 
 const noop = () => {};
@@ -82,8 +82,8 @@ describe("store invoke synthesis", () => {
     expect(row.project).toBe("myapp");
     expect(row.isWorktree).toBe(true);
     expect(row.mainRepoRoot).toBe("/Users/test/Code/myapp");
-    expect(getGroupKey(row, "project")).toBe(
-      getGroupKey(store.state.sessions[0], "project"),
+    expect(groupKeyOf(row, "project", {})).toBe(
+      groupKeyOf(store.state.sessions[0], "project", {}),
     );
   });
 
@@ -231,7 +231,7 @@ describe("store invoke finish edge cases", () => {
   });
 });
 
-describe("getGroupKey for invoke rows", () => {
+describe("groupKeyOf for invoke rows", () => {
   const syntheticRow = mockEnrichedSession({
     id: "inv_abcd",
     cwd: "/Users/test/Code/myapp",
@@ -243,15 +243,15 @@ describe("getGroupKey for invoke rows", () => {
   });
 
   it("co-locates by project (basename) under project grouping", () => {
-    expect(getGroupKey(syntheticRow, "project")).toBe("myapp");
+    expect(groupKeyOf(syntheticRow, "project", {})).toBe("myapp");
   });
 
   it("uses a deliberate invoke group under session grouping (not '(no tmux)')", () => {
-    expect(getGroupKey(syntheticRow, "session")).toBe(INVOKE_GROUP_KEY);
+    expect(groupKeyOf(syntheticRow, "session", {})).toBe(INVOKE_GROUP_KEY);
   });
 
   it("uses a deliberate invoke group under window grouping", () => {
-    expect(getGroupKey(syntheticRow, "window")).toBe(INVOKE_GROUP_KEY);
+    expect(groupKeyOf(syntheticRow, "window", {})).toBe(INVOKE_GROUP_KEY);
   });
 
   it("leaves a real paneless session in the '(no tmux)' bucket", () => {
@@ -260,7 +260,7 @@ describe("getGroupKey for invoke rows", () => {
       tmuxTarget: null,
       originInvocationId: null,
     });
-    expect(getGroupKey(realPaneless, "session")).toBe("(no tmux)");
+    expect(groupKeyOf(realPaneless, "session", {})).toBe("(no tmux)");
   });
 });
 

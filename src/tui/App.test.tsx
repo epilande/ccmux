@@ -10386,3 +10386,329 @@ describe("one footer across views", () => {
     }
   });
 });
+
+describe("App group rename and merge (#42)", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+  const press = async (key: string, modifiers?: { ctrl?: boolean }) => {
+    setup.mockInput.pressKey(key, modifiers);
+    await settle();
+    await setup.renderOnce();
+  };
+  const type = async (text: string) => {
+    for (const ch of text) setup.mockInput.pressKey(ch);
+    await settle();
+    await setup.renderOnce();
+  };
+  const enter = async () => {
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  };
+  /** Clear the prompt's prefilled name (Ctrl+U deletes to line start). */
+  const clear = () => press("u", { ctrl: true });
+
+  /** Two project groups, alpha and beta, with the cursor on beta's header. */
+  async function twoGroups(props: Record<string, unknown> = {}) {
+    await renderApp(120, 24, {
+      groupBy: "project",
+      persistent: true,
+      ...props,
+    });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%1",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%2",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    // Rows: alpha header, s1, beta header, s2. The cursor starts on the
+    // alpha header; two rows down is beta's.
+    await press("j");
+    await press("j");
+  }
+
+  const aliasWrites = () =>
+    uiStateWrites.filter(
+      (w): w is { groupAliases: unknown } =>
+        typeof w === "object" && w !== null && "groupAliases" in w,
+    );
+
+  it("opens the prompt on e, prefilled with the group's name", async () => {
+    await twoGroups();
+    await press("e");
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Rename beta");
+    expect(frame).toMatch(/›\s*beta/);
+    expect(frame).toContain("enter rename · empty or esc cancels");
+  });
+
+  it("renames a group with e, a name and Enter", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("Backend");
+    await enter();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Rename beta");
+    expect(frame).toContain("Backend");
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "Backend" } },
+    });
+  });
+
+  it("merges two groups when one is renamed to the other's name", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("alpha");
+    await enter();
+    const frame = setup.captureCharFrame();
+    // One header holding both sessions, and no beta group left.
+    expect(frame).toMatch(/[▾▸] alpha \(2\)/);
+    expect(frame).not.toMatch(/[▾▸] beta/);
+    expect(frame).toContain("Merged into alpha");
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "alpha" } },
+    });
+  });
+
+  it("marks a renamed or merged header on the row itself", async () => {
+    await twoGroups();
+    const headerLine = (name: string) =>
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => new RegExp(`[▾▸] ${name} \\(`).test(l)) ?? "";
+    // Under its own name, a header carries no marker.
+    expect(headerLine("beta")).not.toMatch(/from|sources/);
+    await press("e");
+    await clear();
+    await type("Backend");
+    await enter();
+    expect(headerLine("Backend")).toMatch(/Backend \(1\)\s+from beta/);
+    await press("e");
+    await clear();
+    await type("alpha");
+    await enter();
+    expect(headerLine("alpha")).toMatch(/alpha \(2\)\s+2 sources/);
+  });
+
+  it("keeps a renamed header's marker in a narrow sidebar as a glyph", async () => {
+    await renderApp(40, 24, { groupBy: "project", sidebar: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" }),
+        mockEnrichedSession({ id: "s2", project: "beta", tmuxPane: "%2" }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await press("j");
+    await press("j");
+    await press("e");
+    await clear();
+    await type("a-much-longer-backend-name");
+    await enter();
+    // The toast card sits over the top rows; read the header once it goes.
+    await settle(1_600);
+    await setup.renderOnce();
+    const line =
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => /[▾▸] a-much-longer/.test(l)) ?? "";
+    expect(line).toMatch(/a-much-longer-backend-name \(1\)\s+\*/);
+  });
+
+  it("cancels on Esc without renaming anything", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("Backend");
+    deliverEscape(setup.renderer);
+    await settle(30);
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Rename beta");
+    expect(frame).not.toContain("Backend");
+    expect(aliasWrites()).toEqual([]);
+  });
+
+  it("cancels on an empty name", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await enter();
+    expect(setup.captureCharFrame()).not.toContain("Rename beta");
+    expect(aliasWrites()).toEqual([]);
+  });
+
+  it("keeps j and k as text in the prompt", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("jk");
+    await enter();
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "jk" } },
+    });
+  });
+
+  it("renames the group of the selected session row", async () => {
+    await twoGroups();
+    await press("j"); // s2, in beta
+    await press("e");
+    expect(setup.captureCharFrame()).toContain("Rename beta");
+  });
+
+  it("renames from the sidebar, where the : palette is not offered", async () => {
+    await renderApp(34, 24, { groupBy: "project", sidebar: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" }),
+        mockEnrichedSession({ id: "s2", project: "beta", tmuxPane: "%2" }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await press("j");
+    await press("j");
+    await press("e");
+    expect(setup.captureCharFrame()).toContain("Rename beta");
+    await clear();
+    await type("Backend");
+    await enter();
+    expect(setup.captureCharFrame()).toContain("Backend");
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "Backend" } },
+    });
+  });
+
+  it("toasts instead of opening when there are no groups", async () => {
+    await renderApp(120, 24, { groupBy: "none", persistent: true });
+    sseCallbacks!.onInit(
+      [mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" })],
+      null,
+    );
+    await setup.renderOnce();
+    await press("e");
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Rename");
+    expect(frame).toContain("Grouping is off");
+  });
+
+  describe("from the : palette", () => {
+    it("opens the rename prompt from Rename group…", async () => {
+      await twoGroups();
+      await press(":");
+      await type("rename group");
+      await enter();
+      // The row replays `e`, on the next microtask.
+      await settle();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Type a command");
+      expect(frame).toContain("Rename beta");
+      await clear();
+      await type("Backend");
+      await enter();
+      expect(aliasWrites().at(-1)).toMatchObject({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+    });
+
+    it("closes the prompt on Esc without running a command", async () => {
+      await twoGroups();
+      await press(":");
+      await type("rename group");
+      await enter();
+      await settle();
+      await setup.renderOnce();
+      deliverEscape(setup.renderer);
+      await settle(30);
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Rename beta");
+      expect(frame).not.toContain("Type a command");
+      expect(aliasWrites()).toEqual([]);
+    });
+
+    it("resets a group's name from Reset group name", async () => {
+      await twoGroups();
+      await press("e");
+      await clear();
+      await type("alpha");
+      await enter();
+      // The cursor followed beta onto the merged alpha header.
+      expect(setup.captureCharFrame()).not.toMatch(/[▾▸] beta/);
+      await press(":");
+      await type("reset group name");
+      await enter();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/[▾▸] alpha \(1\)/);
+      expect(frame).toMatch(/[▾▸] beta \(1\)/);
+      expect(aliasWrites().at(-1)).toMatchObject({ groupAliases: {} });
+    });
+  });
+
+  describe("from the group menu", () => {
+    it("offers Rename group, and Reset name only on a renamed group", async () => {
+      await twoGroups();
+      await press("m");
+      let frame = setup.captureCharFrame();
+      expect(frame).toContain("Rename group");
+      expect(frame).not.toContain("Reset name");
+      await press("m");
+
+      await press("e");
+      await clear();
+      await type("Backend");
+      await enter();
+      await press("m");
+      frame = setup.captureCharFrame();
+      expect(frame).toContain("Rename group");
+      expect(frame).toContain("Reset name");
+    });
+
+    it("opens the prompt from Rename group", async () => {
+      await twoGroups();
+      await press("m");
+      // Collapse, New session, then Rename group.
+      await press("j");
+      await press("j");
+      await enter();
+      expect(setup.captureCharFrame()).toContain("Rename beta");
+    });
+  });
+
+  it("follows another instance's rename through state.json in a picker", async () => {
+    const stateFile = join(appTestDir, "state.json");
+    try {
+      await twoGroups();
+      writeFileSync(
+        stateFile,
+        JSON.stringify({ groupAliases: { project: { beta: "Backend" } } }),
+      );
+      // The watcher debounces 200ms after chokidar sees the write.
+      for (let i = 0; i < 40; i++) {
+        await settle(50);
+        await setup.renderOnce();
+        if (setup.captureCharFrame().includes("Backend")) break;
+      }
+      expect(setup.captureCharFrame()).toContain("Backend");
+    } finally {
+      rmSync(stateFile, { force: true });
+    }
+  });
+});

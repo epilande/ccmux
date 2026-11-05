@@ -4,7 +4,11 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { fitSegments } from "./row-segments";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../../types";
-import { WAITING_SUBTYPES, computeStatusSummary } from "../utils/grouping";
+import {
+  WAITING_SUBTYPES,
+  computeStatusSummary,
+  groupSources,
+} from "../utils/grouping";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
 import type { IconStyle } from "../../lib/icons";
 import { getStatusIcon } from "../../lib/icons";
@@ -20,6 +24,7 @@ import {
   truncateText,
 } from "../utils/format";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import { Text } from "./Text";
 import type { WireRepoFacts } from "../../daemon/repo-facts";
 import type { BranchPR } from "../../types/session";
@@ -31,6 +36,10 @@ interface GroupPreviewProps {
     label: string;
     count: number;
     members: FilteredSession[];
+    /** The group's final (possibly renamed) key. */
+    groupKey?: string;
+    /** The raw keys folded into it; a rename or merge shows them. */
+    rawKeys?: string[];
     /** Set on a project header whose members all share one repo. */
     repoRoot?: string;
   };
@@ -379,6 +388,24 @@ const InventoryRow: Component<{
   );
 };
 
+/**
+ * The dimmed line under a renamed or merged group's name: where its sessions
+ * come from, so a merged group stays inspectable. Null for a group under its
+ * own derived name. Path-shaped keys are home-shortened like a cwd label.
+ */
+function groupSourcesLine(
+  header: { groupKey?: string; rawKeys?: string[] },
+  width: number,
+): string | null {
+  const names = groupSources(header.groupKey ?? "", header.rawKeys);
+  if (!names) return null;
+  const text =
+    names.length === 1
+      ? `renamed from ${names[0]}`
+      : `${names.length} sources: ${names.join(" · ")}`;
+  return truncateText(text, Math.max(1, width));
+}
+
 export const GroupPreview: Component<GroupPreviewProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
@@ -413,15 +440,26 @@ export const GroupPreview: Component<GroupPreviewProps> = (props) => {
       : [];
   });
 
+  const sources = createMemo(() =>
+    groupSourcesLine(props.header, separatorWidth()),
+  );
+
   return (
     <PreviewFrame width={props.width} focused={props.focused}>
-      <box height={3} flexDirection="column">
+      <box height={sources() ? 4 : 3} flexDirection="column">
         <box flexDirection="row" gap={1}>
           <Text fg={theme.text}>
             <b>{props.header.label}</b>
           </Text>
           <Text fg={theme.subtext}>({props.header.count} sessions)</Text>
         </box>
+        <Show when={sources()}>
+          {(line: () => string) => (
+            <Text fg={TEXT_ROLES.groupSources.fg()} wrapMode="none">
+              {line()}
+            </Text>
+          )}
+        </Show>
         <box flexDirection="row" gap={2}>
           <Show when={summary().working > 0}>
             <Text fg={theme.peach}>

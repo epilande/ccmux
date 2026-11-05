@@ -12,6 +12,18 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { theme } from "../theme";
 import { Text } from "./Text";
 
+/** Something a header shows after its count and never drops (see
+ *  `GroupHeaderProps.notice`). */
+export interface HeaderNotice {
+  text: string;
+  /** The form a narrow line falls back to. */
+  short: string;
+  color: string;
+  /** The color on the selected row's raised background, where `color`
+   *  may not read; `color` when absent. */
+  selectedColor?: string;
+}
+
 interface GroupHeaderProps {
   label: string;
   count: number;
@@ -23,7 +35,7 @@ interface GroupHeaderProps {
    * the count, and the label truncates before it does. `short` is the form
    * a narrow line falls back to.
    */
-  notice?: { text: string; short: string; color: string };
+  notice?: HeaderNotice;
   sharedBranch?: string;
   prBadge?: string;
   prBadgeColor?: string;
@@ -142,7 +154,17 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         label: true,
       },
       { text: count, color: theme.subtext },
-      ...(notice ? [{ text: notice, color: props.notice!.color }] : []),
+      ...(notice
+        ? [
+            {
+              text: notice,
+              color:
+                props.selected && !props.dimmed
+                  ? (props.notice!.selectedColor ?? props.notice!.color)
+                  : props.notice!.color,
+            },
+          ]
+        : []),
       ...activity,
       ...(props.sharedBranch && props.sharedBranch !== "main"
         ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]
