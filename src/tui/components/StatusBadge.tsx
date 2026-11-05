@@ -86,5 +86,9 @@ export const StatusBadge: Component<StatusBadgeProps> = (props) => {
     return `${icon()} ${mode === "short" ? labelText.slice(0, 4) : labelText.padEnd(7)}`;
   };
 
-  return <Text fg={props.dimmed ? theme.border : color()}>{label()}</Text>;
+  return (
+    <Text fg={props.dimmed ? theme.border : color()} wrapMode="none">
+      {label()}
+    </Text>
+  );
 };

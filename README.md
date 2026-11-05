@@ -64,7 +64,7 @@ ccmux setup
 
 ### From Source
 
-Requires [Bun](https://bun.sh).
+Requires [Bun](https://bun.sh) 1.3.14 or later.
 
 ```bash
 git clone https://github.com/epilande/ccmux.git
