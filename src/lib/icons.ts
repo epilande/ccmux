@@ -13,6 +13,16 @@ export function isValidIconStyle(value: string): value is IconStyle {
   return (VALID_ICON_STYLES as readonly string[]).includes(value);
 }
 
+/**
+ * Columns a status glyph of `style` occupies. A status cell is sized from this
+ * rather than from its label, because the label's length says nothing about
+ * the glyph in front of it: every emoji here is two columns wide. `none` keeps
+ * the one column its empty glyph has always been given.
+ */
+export function statusIconWidth(style: IconStyle = "dot"): number {
+  return style === "emoji" ? 2 : 1;
+}
+
 /** Half-circle spinner frames for dot style working state */
 export const DOT_SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 

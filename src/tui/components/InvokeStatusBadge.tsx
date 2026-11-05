@@ -69,5 +69,9 @@ export const InvokeStatusBadge: Component<InvokeStatusBadgeProps> = (props) => {
     const text = INVOKE_LABELS[props.status];
     return `${icon()} ${mode === "short" ? text.slice(0, 4) : text.padEnd(7)}`;
   };
-  return <Text fg={props.dimmed ? theme.border : color()}>{label()}</Text>;
+  return (
+    <Text fg={props.dimmed ? theme.border : color()} wrapMode="none">
+      {label()}
+    </Text>
+  );
 };

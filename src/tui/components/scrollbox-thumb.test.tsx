@@ -2,9 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createSignal, For } from "solid-js";
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { Text } from "../components/Text";
-import { scrollbarThumb } from "../components/test-helpers";
-import { syncScrollbarThumb } from "./scrollbar-thumb";
+import { Text } from "./Text";
+import { scrollbarThumb } from "./test-helpers";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -23,7 +22,6 @@ async function mount(rows: () => number, height: number) {
         flexGrow={1}
         ref={(r: ScrollBoxRenderable) => {
           box = r;
-          syncScrollbarThumb(r);
         }}
       >
         <For each={Array.from({ length: rows() }, (_, i) => i)}>
@@ -35,19 +33,20 @@ async function mount(rows: () => number, height: number) {
   );
   const s = setup;
   return async () => {
-    // The first pass lays out and fires the resize listeners, the second
-    // draws what they set.
+    // The first pass lays out, the second draws the bar for that layout.
     await s.renderOnce();
     await s.renderOnce();
     return scrollbarThumb(s.captureCharFrame(), box);
   };
 }
 
-describe("syncScrollbarThumb", () => {
+// OpenTUI 0.1.97 needed a syncScrollbarThumb workaround for each of these
+// cases. The native scrollbar in 0.8 sizes the thumb from the scroll state.
+describe("scrollbox thumb", () => {
   it("sizes the thumb to viewport over content on first render", async () => {
     const thumb = await mount(() => 15, 10);
-    // 20 half-cells * 10 / 15 = 13. Unsynced, the slider clamps its viewport
-    // to the 5-row range and draws exactly half the track: 10.
+    // 20 half-cells * 10 / 15 = 13. OpenTUI 0.1.97 clamped the viewport to
+    // the 5-row range and drew exactly half the track: 10.
     expect(await thumb()).toEqual({ drawn: 13, expected: 13 });
   });
 
@@ -56,8 +55,8 @@ describe("syncScrollbarThumb", () => {
     const thumb = await mount(rows, 10);
     expect(await thumb()).toEqual({ drawn: 0, expected: 0 });
     setRows(40);
-    // 20 * 10 / 40 = 5. Unsynced, the viewport measured against an empty
-    // range pins the thumb at the slider's floor: 1.
+    // 20 * 10 / 40 = 5. OpenTUI 0.1.97 measured the viewport against an empty
+    // range and pinned the thumb at the slider's floor: 1.
     expect(await thumb()).toEqual({ drawn: 5, expected: 5 });
     setRows(15);
     expect(await thumb()).toEqual({ drawn: 13, expected: 13 });
@@ -66,8 +65,8 @@ describe("syncScrollbarThumb", () => {
   it("re-sizes across a resize round trip", async () => {
     const thumb = await mount(() => 15, 20);
     expect(await thumb()).toEqual({ drawn: 0, expected: 0 });
-    // Shrinking a viewport that fit its content sets the new size against
-    // the old, empty range: unsynced, the thumb pins at 1.
+    // Shrinking a viewport that fit its content set the new size against the
+    // old, empty range, so OpenTUI 0.1.97 pinned the thumb at 1.
     setup!.resize(20, 10);
     expect(await thumb()).toEqual({ drawn: 13, expected: 13 });
     setup!.resize(20, 20);
