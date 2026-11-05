@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) (runtime, package manager, and test runner)
+- [Bun](https://bun.sh) 1.3.14 or later (runtime, package manager, and test runner)
 - [tmux](https://github.com/tmux/tmux)
 
 ## Setup

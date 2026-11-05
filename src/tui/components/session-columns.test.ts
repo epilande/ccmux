@@ -31,7 +31,16 @@ import {
   normalizePrompt,
   type ProjectCellDisplay,
 } from "./session-columns";
-import type { SubagentState } from "../../types";
+import type { AttentionType, SubagentState } from "../../types";
+import {
+  DOT_SPINNER_FRAMES,
+  NERDFONT_SPINNER_FRAMES,
+  getAttentionIcon,
+  getBackgroundIcon,
+  getInvokeTerminalIcon,
+  getStatusIcon,
+  statusIconWidth,
+} from "../../lib/icons";
 import { DEFAULT_BREAKPOINTS, type Responsive } from "../../lib/preferences";
 import { mockEnrichedSession } from "./test-helpers";
 import { displayWidth } from "../utils/format";
@@ -533,6 +542,55 @@ describe("entryRightWidth", () => {
   it("returns 6 for status short, 9 for status full", () => {
     expect(entryRightWidth({ field: "status", mode: "short" })).toBe(6);
     expect(entryRightWidth({ field: "status", mode: "full" })).toBe(9);
+  });
+
+  it("makes room for a two-column emoji in every status mode", () => {
+    const status = (mode: string) =>
+      entryRightWidth({ field: "status", mode }, "emoji");
+    expect(status("icon")).toBe(2);
+    expect(status("short")).toBe(7);
+    expect(status("full")).toBe(10);
+  });
+
+  it("keeps the status widths of the one-column icon styles", () => {
+    for (const style of ["dot", "nerdfont", "none"] as const) {
+      const status = (mode: string) =>
+        entryRightWidth({ field: "status", mode }, style);
+      expect(status("icon")).toBe(1);
+      expect(status("short")).toBe(6);
+      expect(status("full")).toBe(9);
+    }
+  });
+
+  // The cell is sized from `statusIconWidth`, not from the glyph it ends up
+  // holding, so a wider glyph added to any of these sets has to fail here.
+  it("sizes the status cell for every glyph a badge can draw", () => {
+    for (const style of ["dot", "nerdfont", "emoji"] as const) {
+      const glyphs = [
+        ...(style === "dot" ? DOT_SPINNER_FRAMES : []),
+        ...(style === "nerdfont" ? NERDFONT_SPINNER_FRAMES : []),
+        ...["working", "idle"].map((status) =>
+          getStatusIcon(status, null, style),
+        ),
+        ...[null, "permission", "plan_approval", "question"].map((type) =>
+          getStatusIcon("waiting", type as AttentionType, style),
+        ),
+        ...(["unread", "read"] as const).map((state) =>
+          getAttentionIcon(state, style),
+        ),
+        ...["working", "waiting", "idle"].map((status) =>
+          getBackgroundIcon(status, style),
+        ),
+        ...(["succeeded", "failed", "cancelled"] as const).map((status) =>
+          getInvokeTerminalIcon(status, style),
+        ),
+      ];
+      for (const glyph of glyphs) {
+        expect(displayWidth(glyph), `${style} ${glyph}`).toBeLessThanOrEqual(
+          statusIconWidth(style),
+        );
+      }
+    }
   });
 
   it("returns 2 for agent short, 8 for agent full or missing mode", () => {
@@ -1866,6 +1924,18 @@ describe("columnHeaderCells", () => {
     // Icon-only status at `xs` is one column: blank.
     const xs = columnHeaderCells(inline(40));
     expect(xs.left.find((c) => c.field === "status")?.text).toBe("");
+  });
+
+  it("sizes the status label to the cell the icon style draws", () => {
+    // An emoji glyph is two columns, so the status cell is one wider than
+    // under the default dot style, and the label has to follow it.
+    const status = (style?: "dot" | "emoji") =>
+      columnHeaderCells(inline(160), style).left.find(
+        (c) => c.field === "status",
+      );
+    expect(status()?.width).toBe(9);
+    expect(status("dot")?.width).toBe(9);
+    expect(status("emoji")?.width).toBe(10);
   });
 
   it("labels only the fixed-width suffix of a custom right side", () => {
