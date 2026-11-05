@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import type { CliRenderer, Renderable } from "@opentui/core";
-import { ScrollBoxRenderable } from "@opentui/core";
+import { ScrollBoxRenderable, TextBufferRenderable } from "@opentui/core";
 import { createMockKeys } from "@opentui/core/testing";
 import type { EnrichedSession, Session } from "../../types";
 import type { FilteredSession, StatusSummary } from "../utils/grouping";
@@ -196,6 +196,33 @@ export function findScrollBoxes(renderer: CliRenderer): ScrollBoxRenderable[] {
     for (const child of node.getChildren()) walk(child);
   };
   walk(renderer.root);
+  return found;
+}
+
+/**
+ * The text of every `<text>` under a scrollbox that a wheel notch would stop
+ * at instead of the list.
+ *
+ * OpenTUI hands a notch to the innermost scroller that can still move, and a
+ * `<text>` wrapped past its own box is one: the list holds still while the
+ * text walks through its hidden lines. A clean surface returns `[]`. A
+ * zero-height text has no hit area, so nothing can wheel over it.
+ */
+export function wheelTraps(renderer: CliRenderer): string[] {
+  const found: string[] = [];
+  const walk = (node: Renderable, inScrollBox: boolean) => {
+    if (
+      inScrollBox &&
+      node instanceof TextBufferRenderable &&
+      node.height > 0 &&
+      node.maxScrollY > 0
+    ) {
+      found.push(node.plainText);
+    }
+    const scrolls = inScrollBox || node instanceof ScrollBoxRenderable;
+    for (const child of node.getChildren()) walk(child, scrolls);
+  };
+  walk(renderer.root, false);
   return found;
 }
 

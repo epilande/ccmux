@@ -474,9 +474,13 @@ const PromptCell: Component<{
             fallback={
               <Show
                 when={transcriptLine()}
-                fallback={<Text fg={contentColor(ctx)}>{text()}</Text>}
+                fallback={
+                  <Text fg={contentColor(ctx)} wrapMode="none">
+                    {text()}
+                  </Text>
+                }
               >
-                <Text fg={dimColor(ctx, theme.overlay)}>
+                <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
                   {transcriptLine()}
                 </Text>
               </Show>
@@ -516,6 +520,12 @@ function promptCellShowsMatch(ctx: FieldRenderContext): boolean {
   return src === "pane" || src === "transcript" || src === "cwd";
 }
 
+/**
+ * One cell of a one-line row. A `<Text>` here that can outgrow its cell (flex
+ * squeezes the flexible ones, and the fixed ones hold values nothing fits)
+ * sets `wrapMode="none"`: a wrapped one hides the rest in lines its box cannot
+ * show, and OpenTUI scrolls those hidden lines before it scrolls the list.
+ */
 const FieldCell: Component<{
   entry: ResolvedEntry;
   ctx: FieldRenderContext;
@@ -545,9 +555,10 @@ const FieldCell: Component<{
       // captured const) so the cell re-renders when the store flips a
       // synthetic invoke row to its terminal outcome via a fine-grained
       // setState. `ctx.session` is a stable store proxy; pulling the read out
-      // into a local would freeze the badge on the running spinner.
+      // into a local would freeze the badge on the running spinner. The width
+      // is read here too, not from `width`, since it follows the icon style.
       return (
-        <box width={width}>
+        <box width={entryRightWidth(entry, ctx.iconStyle)}>
           <Show
             when={ctx.session.originInvocationStatus}
             fallback={
@@ -636,9 +647,11 @@ const FieldCell: Component<{
             }
           >
             <Show when={fitted().prefix}>
-              <Text fg={dimColor(ctx, theme.subtext)}>{fitted().prefix}</Text>
+              <Text fg={dimColor(ctx, theme.subtext)} wrapMode="none">
+                {fitted().prefix}
+              </Text>
             </Show>
-            <Text fg={dimColor(ctx, theme.text)}>
+            <Text fg={dimColor(ctx, theme.text)} wrapMode="none">
               <Bold when={ctx.selected || !!ctx.isActiveSession}>
                 {fitted().dirname}
               </Bold>
@@ -652,7 +665,7 @@ const FieldCell: Component<{
                   displayWidth(branch()) <= ctx.maxBranchLen
                 }
                 fallback={
-                  <Text fg={dimColor(ctx, theme.blue)}>
+                  <Text fg={dimColor(ctx, theme.blue)} wrapMode="none">
                     {fitted().branchLabel}
                   </Text>
                 }
@@ -676,7 +689,7 @@ const FieldCell: Component<{
       const raw = entry.mode === "short" ? ctx.agentShortLabel : ctx.agentLabel;
       return (
         <box width={width}>
-          <Text fg={dimColor(ctx, ctx.agentColor)}>
+          <Text fg={dimColor(ctx, ctx.agentColor)} wrapMode="none">
             {alignText(raw, width, side)}
           </Text>
         </box>
@@ -685,7 +698,7 @@ const FieldCell: Component<{
     case "version":
       return (
         <box width={width}>
-          <Text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
             {alignText(ctx.versionLabel, width, side)}
           </Text>
         </box>
@@ -698,6 +711,7 @@ const FieldCell: Component<{
               ctx,
               ctx.isActivePane ? theme.rosewater : theme.subtext,
             )}
+            wrapMode="none"
           >
             {alignText(ctx.paneInfo, width, side)}
           </Text>
@@ -706,7 +720,7 @@ const FieldCell: Component<{
     case "time":
       return (
         <box width={width}>
-          <Text fg={dimColor(ctx, theme.overlay)}>
+          <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
             {alignText(ctx.timeLabel, width, side)}
           </Text>
         </box>
@@ -740,7 +754,7 @@ const FieldCell: Component<{
             <Show
               when={ctx.highlights?.summary}
               fallback={
-                <Text fg={contentColor(ctx)}>
+                <Text fg={contentColor(ctx)} wrapMode="none">
                   {truncateText(summary() ?? "", ctx.maxFlexLen(row))}
                 </Text>
               }
@@ -760,7 +774,7 @@ const FieldCell: Component<{
     }
     case "cwd":
       return (
-        <Text fg={dimColor(ctx, theme.overlay)}>
+        <Text fg={dimColor(ctx, theme.overlay)} wrapMode="none">
           {shortenCwd(ctx.session.paneCwd ?? ctx.session.cwd)}
         </Text>
       );
@@ -779,7 +793,11 @@ const FieldCell: Component<{
         const marker = ctx.session.isWorktree ? "+" : "";
         return branch ? branch + marker : "";
       };
-      return <Text fg={dimColor(ctx, theme.blue)}>{label()}</Text>;
+      return (
+        <Text fg={dimColor(ctx, theme.blue)} wrapMode="none">
+          {label()}
+        </Text>
+      );
     }
     case "pr": {
       const label = () => prLabel(ctx.session, entry.mode);
@@ -802,11 +820,17 @@ const FieldCell: Component<{
  * Sums fixed widths of row 1 left entries that come before "project", plus
  * inter-entry gaps. If row 1 has no project entry, return 0 (no auto-indent).
  */
-function row2LeadingIndent(row1Left: ResolvedEntry[]): number {
+function row2LeadingIndent(
+  row1Left: ResolvedEntry[],
+  iconStyle: IconStyle | undefined,
+): number {
   const projectIdx = row1Left.findIndex((e) => e.field === "project");
   if (projectIdx <= 0) return 0;
   const preProject = row1Left.slice(0, projectIdx);
-  const sumWidths = preProject.reduce((acc, e) => acc + entryRightWidth(e), 0);
+  const sumWidths = preProject.reduce(
+    (acc, e) => acc + entryRightWidth(e, iconStyle),
+    0,
+  );
   return sumWidths + (preProject.length - 1);
 }
 
@@ -1009,7 +1033,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       const w =
         e.field === "pr"
           ? prLabel(props.session, e.mode).length
-          : entryRightWidth(e);
+          : entryRightWidth(e, props.iconStyle);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
     const attn = attentionWidth();
@@ -1053,7 +1077,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
                 maxProjectLen(),
                 maxBranchLen(),
               )
-            : entryRightWidth(e);
+            : entryRightWidth(e, props.iconStyle);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
     }, 0);
     // The reserved attention cell is drawn on row 1 only, so it eats into a
@@ -1061,7 +1085,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     const attn = isRow1 ? attentionWidth() : 0;
     const reserved =
       2 + // item paddingLeft/paddingRight
-      (isRow1 ? 0 : row2LeadingIndent(columns().row1.left)) +
+      (isRow1 ? 0 : row2LeadingIndent(columns().row1.left, props.iconStyle)) +
       cells +
       (attn > 0 ? attn + 1 : 0) +
       2; // small margin so the `…` lands inside the flexed box, not clipped
@@ -1258,7 +1282,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
             row={row2()}
             rowIndex={2}
             ctx={ctx}
-            leadingIndent={row2LeadingIndent(row1().left)}
+            leadingIndent={row2LeadingIndent(row1().left, props.iconStyle)}
           />
         </Show>
         {/* LAST, below row 2 rather than between the two rows. Row 2 is the

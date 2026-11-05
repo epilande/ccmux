@@ -1,12 +1,14 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
+import { createMockMouse } from "@opentui/core/testing";
 import { HelpOverlay } from "./HelpOverlay";
 import {
   expectContentSizedThumb,
   findScrollBoxes,
   scrollbarThumb,
   squish,
+  wheelTraps,
 } from "./test-helpers";
 
 function escapeRe(value: string): string {
@@ -424,5 +426,43 @@ describe("HelpOverlay scrollbar thumb", () => {
     setup.resize(60, 24);
     f = await frame();
     expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+  });
+});
+
+describe("HelpOverlay wheel", () => {
+  async function mount(width: number, height = 24) {
+    setup = await testRender(() => <HelpOverlay sidebar />, { width, height });
+    await setup.renderOnce();
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  // The rail's lines are pre-wrapped, so one wrapped to the content width
+  // rather than the scrollbox's fills the row exactly once the bar takes its
+  // column, wraps again, and hides its last word where the wheel stops.
+  // Which widths that hits depends on the copy, so walk the configurable range.
+  it("leaves no line that can take the wheel at any sidebar width", async () => {
+    for (let width = 10; width <= 80; width++) {
+      await mount(width);
+      expect(wheelTraps(setup.renderer), `at ${width} columns`).toEqual([]);
+      setup.renderer.destroy();
+    }
+    await mount(30);
+  });
+
+  it("moves the list on the first notch over a line that fills the rail", async () => {
+    // 24 wide, which is exactly the content width here and one past the
+    // scrollbox's: the line a wrap to the wrong figure would leave hiding "issue".
+    const frame = await mount(28, 40);
+    const lines = frame.split("\n");
+    const y = lines.findIndex((line) => line.includes("Start from a PR"));
+    expect(y).toBeGreaterThanOrEqual(0);
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+
+    await createMockMouse(setup.renderer).scroll(4, y, "down");
+    await setup.renderOnce();
+
+    expect(box!.scrollTop).toBe(1);
   });
 });
