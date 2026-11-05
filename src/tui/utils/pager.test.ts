@@ -1,13 +1,29 @@
 import { describe, expect, it } from "bun:test";
 import { openInPager, pagerCommand } from "./pager";
 
-function fakeRenderer(events: string[], suspendThrows = false) {
+// OpenTUI 0.8's suspend and resume are async; each settles a tick late so a
+// caller that does not await them would let the next step run first.
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+function fakeRenderer(
+  events: string[],
+  suspendThrows = false,
+  resumeFailures = 0,
+) {
+  let failures = resumeFailures;
   return {
-    suspend() {
+    async suspend() {
+      await tick();
       if (suspendThrows) throw new Error("no tty");
       events.push("suspend");
     },
-    resume() {
+    async resume() {
+      await tick();
+      if (failures > 0) {
+        failures--;
+        events.push("resume failed");
+        throw new Error("resume exploded");
+      }
       events.push("resume");
     },
   };
@@ -58,6 +74,27 @@ describe("openInPager", () => {
     });
     expect(result.ok).toBe(false);
     expect(events).toEqual(["suspend", "resume"]);
+  });
+
+  it("retries a failed resume once and keeps the pager's result", async () => {
+    const events: string[] = [];
+    const result = await openInPager(fakeRenderer(events, false, 1), "x", {
+      env: {},
+      spawn: async () => 0,
+    });
+    expect(result).toEqual({ ok: true });
+    expect(events).toEqual(["suspend", "resume failed", "resume"]);
+  });
+
+  it("reports a resume that fails twice", async () => {
+    const events: string[] = [];
+    const result = await openInPager(fakeRenderer(events, false, 2), "x", {
+      env: {},
+      spawn: async () => 0,
+    });
+    expect(result.ok).toBe(false);
+    expect((result as { error: string }).error).toContain("resume exploded");
+    expect(events).toEqual(["suspend", "resume failed", "resume failed"]);
   });
 
   it("does not resume what it never suspended", async () => {

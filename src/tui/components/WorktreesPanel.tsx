@@ -78,8 +78,6 @@ import { useStatusIcon } from "../utils/useStatusIcon";
 
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
-
 import {
   DOT_SPINNER_FRAMES,
   getStatusIcon,
@@ -1410,9 +1408,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               flexGrow={1}
               ref={(r: ScrollBoxRenderable) => {
                 resultsBox = r;
-                syncScrollbarThumb(r);
               }}
             >
+              {/* Unlike the list above, these rows take whatever height their
+                  text wraps to. Nothing here is walked by a cursor, so nothing
+                  needs them to be one line, and this screen is the only place a
+                  failure's reason is shown: fitted to a narrow width, two paths
+                  read the same and an error loses its cause. A `height={1}` is
+                  worse than clipped anyway: the text it hides is scrollable, and
+                  OpenTUI gives that text the wheel before the list. */}
               <For each={result()?.outcomes ?? []}>
                 {(outcome) => (
                   <box flexDirection="column" flexShrink={0}>
@@ -1448,7 +1452,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                 paddingRight={previewShown() ? PREVIEW_GAP : 0}
                 ref={(r: ScrollBoxRenderable) => {
                   listBox = r;
-                  syncScrollbarThumb(r);
                   const bump = () => setMeasured((v) => v + 1);
                   r.viewport.on("resize", bump);
                   r.content.on("resize", bump);

@@ -27,7 +27,6 @@ import type { IconStyle } from "../../lib/icons";
 import { getStatusColor } from "./StatusBadge";
 import { DIMMED_OPACITY, theme } from "../theme";
 import { padStartWidth, truncateText } from "../utils/format";
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { FOOTER_BAR_ROWS, FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
@@ -1129,7 +1128,6 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
                     paddingRight={previewShown() ? PREVIEW_GAP : 0}
                     ref={(r: ScrollBoxRenderable) => {
                       listBox = r;
-                      syncScrollbarThumb(r);
                       const bump = () => setScrollboxLayout((v) => v + 1);
                       r.viewport.on("resize", bump);
                       r.content.on("resize", bump);

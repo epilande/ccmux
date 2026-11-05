@@ -799,6 +799,19 @@ describe("App", () => {
       }
     });
 
+    // The test renderer never finished a real terminal setup, so its own
+    // suspend() rejects, which OpenTUI 0.8's awaited suspend now reports. A
+    // real terminal suspends; stand in for one.
+    const stubSuspend = () => {
+      const suspend = spyOn(setup.renderer, "suspend").mockImplementation(
+        async () => {},
+      );
+      const resume = spyOn(setup.renderer, "resume").mockImplementation(
+        async () => {},
+      );
+      return { suspend, resume };
+    };
+
     it("says so when the pager exits nonzero", async () => {
       const original = globalThis.fetch;
       globalThis.fetch = (async (url: string | URL) =>
@@ -813,6 +826,7 @@ describe("App", () => {
           groupBy: "none",
           pager: { env: { PAGER: "nope" }, spawn: async () => 127 },
         });
+        stubSuspend();
         oneSession();
         await setup.renderOnce();
         await run("open transcript");
@@ -853,6 +867,7 @@ describe("App", () => {
             },
           },
         });
+        const terminal = stubSuspend();
         oneSession();
         await setup.renderOnce();
         await run("open transcript");
@@ -862,6 +877,8 @@ describe("App", () => {
         expect(piped[0]!.argv).toEqual(["less", "+G"]);
         expect(piped[0]!.text).toContain("fix the bug");
         expect(piped[0]!.text).toContain("fixed it");
+        expect(terminal.suspend).toHaveBeenCalledTimes(1);
+        expect(terminal.resume).toHaveBeenCalledTimes(1);
       } finally {
         globalThis.fetch = original;
       }
