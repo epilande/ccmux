@@ -627,16 +627,18 @@ export async function runHunkReview(
   const tty = await readTty();
 
   try {
-    renderer.suspend();
+    await renderer.suspend();
   } catch (err) {
     return { ok: false, error: `suspend failed: ${err}` };
   }
 
+  // `resumed` flips only after `resume()` succeeds, so a failed resume
+  // after hunk exits gets one more try in the `finally` below.
   let resumed = false;
-  const resumeOnce = () => {
+  const resumeOnce = async () => {
     if (resumed) return;
+    await renderer.resume();
     resumed = true;
-    renderer.resume();
   };
 
   try {
@@ -687,7 +689,7 @@ export async function runHunkReview(
     // hunk has restored the terminal: bring the picker back NOW. The final
     // read and snippet extraction below don't touch the terminal, and waiting
     // on them here is what left the screen blank for seconds after quitting.
-    resumeOnce();
+    await resumeOnce();
     if (exitCode !== 0) {
       return { ok: false, error: `hunk exited with code ${exitCode}` };
     }
@@ -712,6 +714,7 @@ export async function runHunkReview(
   } catch (err) {
     return { ok: false, error: `${err}` };
   } finally {
-    resumeOnce();
+    // A failed retry must not replace the result returned above.
+    await resumeOnce().catch((err) => debugLog(`resume failed: ${err}`));
   }
 }

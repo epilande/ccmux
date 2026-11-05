@@ -3,7 +3,6 @@ import type { Component, JSX, ParentComponent } from "solid-js";
 import { createMemo } from "solid-js";
 import { theme } from "../theme";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import { truncateText, wrapText } from "../utils/format";
 import { Text } from "./Text";
 
@@ -13,6 +12,7 @@ const COL_GAP = 3;
 const PAD_X = 4; // picker paddingLeft + paddingRight
 const SIDEBAR_PAD_X = 2;
 const BORDER = 2;
+const SCROLLBAR_GUTTER = 1;
 const MAX_WIDTH = COL_WIDTH * 2 + COL_GAP + PAD_X + BORDER; // cols + padding + border
 
 type Group = { section: string; items: { key: string; desc: string }[] };
@@ -132,7 +132,7 @@ const renderColumn = (columnGroups: Group[], colWidth: number): JSX.Element => (
       <>
         {gi > 0 && <box height={1} />}
         <box height={1}>
-          <Text fg={theme.blue}>
+          <Text fg={theme.blue} wrapMode="none">
             <strong>{group.section}</strong>
           </Text>
         </box>
@@ -165,7 +165,7 @@ const renderCompactColumn = (
       <>
         {gi > 0 && <box height={1} />}
         <box height={1}>
-          <Text fg={theme.blue}>
+          <Text fg={theme.blue} wrapMode="none">
             <strong>{group.section}</strong>
           </Text>
         </box>
@@ -174,7 +174,9 @@ const renderCompactColumn = (
           return (
             <>
               <box height={1}>
-                <Text fg={theme.mauve}>{item.key}</Text>
+                <Text fg={theme.mauve} wrapMode="none">
+                  {item.key}
+                </Text>
               </box>
               {descLines.map((line) => (
                 <box height={1}>
@@ -203,7 +205,6 @@ const HelpLayout: ParentComponent<{
     <scrollbox
       flexGrow={1}
       ref={(r: ScrollBoxRenderable) => {
-        syncScrollbarThumb(r);
         props.onScrollboxRef?.(r);
       }}
     >
@@ -257,6 +258,17 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
     Math.max(1, dims().width - BORDER - SIDEBAR_PAD_X),
   );
 
+  /**
+   * What a line inside the rail's SCROLLBOX may occupy, which is less than
+   * {@link compactWidth} by the column the scrollbox takes back for its bar.
+   * A line wrapped to the wider figure wraps a second time in the renderer,
+   * and in a height-1 box that hides its last word in a line the wheel then
+   * stops to scroll.
+   */
+  const compactListWidth = createMemo(() =>
+    Math.max(1, compactWidth() - SCROLLBAR_GUTTER),
+  );
+
   const pickerHint = createMemo(() =>
     truncateText("j/k scroll · ? or Esc to close", innerWidth()),
   );
@@ -290,7 +302,7 @@ export const HelpOverlay: Component<HelpOverlayProps> = (props) => {
           onScrollboxRef={props.onScrollboxRef}
         >
           <box flexDirection="column" paddingLeft={1} paddingRight={1}>
-            {renderCompactColumn(allGroups, compactWidth())}
+            {renderCompactColumn(allGroups, compactListWidth())}
           </box>
         </HelpLayout>
       </box>

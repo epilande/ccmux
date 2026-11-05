@@ -7,6 +7,7 @@ import {
   expectContentSizedThumb,
   findScrollBoxes,
   scrollbarThumb,
+  wheelTraps,
 } from "./test-helpers";
 import {
   mkdirSync,
@@ -6025,5 +6026,105 @@ describe("WorktreesPanel scrollbar thumbs", () => {
       f = await thumbFrame(harness);
       expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
     });
+  });
+});
+
+// OpenTUI 0.8 hands a wheel notch to the innermost scroller that can still
+// move, and a `<text>` wrapped past a `height={1}` box is one: the list stayed
+// at offset 0 for a notch per hidden line while the row walked through them.
+describe("WorktreesPanel prune results wheel", () => {
+  const failure = (name: string) =>
+    outcome({
+      path: `/home/erp/.t3/worktrees/ccmux/${name}`,
+      removed: false,
+      steps: [
+        {
+          step: "remove worktree",
+          ok: false,
+          detail: `fatal: '${name}' contains modified or untracked files, use --force to delete it`,
+        },
+      ],
+    });
+
+  async function narrowResults() {
+    const outcomes = Array.from({ length: 12 }, (_, i) =>
+      failure(`fix-prune-results-${i}`),
+    );
+    const harness = await mountPanel(
+      {
+        list: async () => json(listOf([mainRow(), row()])),
+        scan: async () => json({ candidates: [candidate()], skipped: [] }),
+        prune: async () => json(runResult(outcomes)),
+      },
+      { width: 36, height: 16 },
+    );
+    await harness.frame();
+    harness.keys.pressKey("j");
+    harness.keys.pressKey(" ");
+    harness.keys.pressKey("x");
+    await harness.frame();
+    harness.keys.pressKey("y");
+    await harness.frame();
+    await harness.frame();
+    const [box] = findScrollBoxes(setup!.renderer);
+    return { harness, box: box! };
+  }
+
+  const lines = (frame: string) => frame.split("\n");
+  const lineOf = (frame: string, needle: string) => {
+    const y = lines(frame).findIndex((line) => line.includes(needle));
+    expect(y, `"${needle}" is not on screen`).toBeGreaterThanOrEqual(0);
+    return y;
+  };
+
+  it("moves the list on the first notch over a wrapped detail", async () => {
+    const { harness, box } = await narrowResults();
+    const before = await harness.frame();
+    expect(box.scrollTop).toBe(0);
+
+    await harness.mouse.scroll(12, lineOf(before, "remove worktree"), "down");
+    const after = await harness.frame();
+
+    expect(box.scrollTop).toBe(1);
+    // The list moved as one: every row went up a line, and none of them
+    // scrolled its own text out from under the row.
+    const top = box.viewport.y;
+    expect(lines(after)[top]).toBe(lines(before)[top + 1]!);
+  });
+
+  it("moves the list when the notch lands on a continuation line", async () => {
+    const { harness, box } = await narrowResults();
+    const before = await harness.frame();
+
+    await harness.mouse.scroll(12, lineOf(before, "delete it"), "down");
+    await harness.frame();
+
+    expect(box.scrollTop).toBe(1);
+  });
+
+  it("wheels back up to the top", async () => {
+    const { harness, box } = await narrowResults();
+    const y = lineOf(await harness.frame(), "remove worktree");
+
+    await harness.mouse.scroll(12, y, "down");
+    await harness.mouse.scroll(12, y, "down");
+    await harness.frame();
+    expect(box.scrollTop).toBe(2);
+
+    await harness.mouse.scroll(12, y, "up");
+    await harness.frame();
+    expect(box.scrollTop).toBe(1);
+  });
+
+  it("keeps the whole path and error readable at a narrow width", async () => {
+    const { harness } = await narrowResults();
+    const frame = await harness.frame();
+
+    // The name is what tells two outcomes apart and the tail is the reason,
+    // and this screen is the only place either is shown, so a row fitted down
+    // to one line would stop the wheel fight by losing the answer.
+    expect(frame).toContain("fix-prune-results-0");
+    expect(frame).toContain("delete it");
+    expect(wheelTraps(setup!.renderer)).toEqual([]);
   });
 });
