@@ -217,14 +217,10 @@ describe("HelpOverlay sidebar mode", () => {
     });
     await setup.renderOnce();
     const frame = setup.captureCharFrame();
-    for (const desc of [
-      "Fork session",
-      "Cycle group-by",
-      "Row menu",
-      "Filter",
-      "Toggle preview",
-    ])
+    for (const desc of ["Fork session", "Cycle group-by", "Row menu", "Filter"])
       expect(frame).not.toContain(desc);
+    // Every view has a preview now.
+    expect(frame).toContain("Toggle preview");
     expect(frame).toContain("Collapse all groups");
     expect(frame).toContain("Kill or remove");
     // `n`, which the footer teaches here too, from the same registry entry.

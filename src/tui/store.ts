@@ -503,6 +503,13 @@ interface TUIState {
   previewFocused: boolean;
   showHelp: boolean;
   /**
+   * The open `:` palette, or null. `highlight` is a command id rather than a
+   * row number for the reason the row menu's is: the list is re-filtered
+   * under it on every keystroke, and by position the highlight would ride
+   * onto whatever command slid into its row.
+   */
+  palette: { query: string; highlight: string | null } | null;
+  /**
    * The repo the CURRENT view is narrowed to, or null for all repos. It is
    * the view's own: `W`/`N` narrow only the view they open (see
    * `baseScope`), and `s` changes it for every view.
@@ -662,8 +669,20 @@ interface TUIState {
   hideIdle: boolean;
 }
 
+/**
+ * The narrowest terminal the preview opens on by default: a popup at 80% of
+ * a terminal about 175 columns wide. Below it the list needs the columns
+ * more. Only a default: `--preview`, a saved `P` toggle and the
+ * `showPreview` preference all win, and it is decided once, at launch.
+ */
+const PREVIEW_AUTO_MIN_WIDTH = 140;
+
 interface TUIStoreOptions {
+  /** Undefined means nobody chose: the preview opens when `initialWidth` is
+   *  at least {@link PREVIEW_AUTO_MIN_WIDTH}. */
   initialPreview?: boolean;
+  /** The terminal's width at launch, for the preview's default. */
+  initialWidth?: number;
   promptDisplay?: PromptDisplay;
   iconStyle?: IconStyle;
   previewWidth?: number;
@@ -988,10 +1007,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     daemonHealth: { degraded: false },
     tmuxSocketError: null,
     error: null,
-    showPreview: options.sidebar ? false : (options.initialPreview ?? false),
+    showPreview: options.sidebar
+      ? false
+      : (options.initialPreview ??
+        (options.initialWidth ?? 0) >= PREVIEW_AUTO_MIN_WIDTH),
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
+    palette: null,
     scope: null,
     markedSessions: new Set<string>(),
     worktrees: null,
@@ -2627,7 +2650,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     cycleGroupBy() {
       const currentIdx = VALID_GROUP_BY.indexOf(state.groupBy);
       const nextIdx = (currentIdx + 1) % VALID_GROUP_BY.length;
-      const next = VALID_GROUP_BY[nextIdx];
+      this.setGroupBy(VALID_GROUP_BY[nextIdx]!);
+    },
+
+    /** Group by `next` directly (the palette's "Group by …" rows), with
+     *  exactly what a `b` press to it does: selection, collapse and pins are
+     *  keyed by the old grouping's names and are cleared with it. Choosing
+     *  the grouping already on screen is a no-op rather than a reset. */
+    setGroupBy(next: GroupBy) {
+      if (next === state.groupBy) return;
       batch(() => {
         setState("groupBy", next);
         setState("selectedSessionId", null);
@@ -2648,6 +2679,26 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     toggleHelp() {
       setState("showHelp", (show) => !show);
+    },
+
+    openPalette() {
+      if (options.sidebar) return;
+      setState("palette", { query: "", highlight: null });
+    },
+
+    closePalette() {
+      setState("palette", null);
+    },
+
+    setPaletteQuery(query: string) {
+      if (!state.palette) return;
+      // A new query re-ranks the list, so the highlight goes back to its top.
+      setState("palette", { query, highlight: null });
+    },
+
+    setPaletteHighlight(id: string | null) {
+      if (!state.palette) return;
+      setState("palette", "highlight", id);
     },
 
     hideHelp() {

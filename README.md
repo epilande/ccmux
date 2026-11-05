@@ -172,11 +172,27 @@ The daemon starts automatically the first time you run a ccmux command (picker, 
 
 ### Preview Pane
 
-Press <kbd>P</kbd> to split the picker and preview the highlighted session's live pane content side by side. Press <kbd>Tab</kbd> to focus the preview and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
+Press <kbd>P</kbd> to split the picker and preview the highlighted row side by side. The preview opens on its own when the terminal is at least 140 columns wide at launch; `--preview`, a saved <kbd>P</kbd> toggle, or the `showPreview` preference override that either way. <kbd>Alt+H</kbd>/<kbd>Alt+L</kbd> resize it, and the size is shared by every view.
 
-The preview header names the session: the project in bold, then the agent's own summary of the session on agents that publish one (Claude Code, Codex, OpenCode, Cursor, oh-my-pi, and Copilot do; on the rest the line is omitted), then the working directory and the branch/version/target metadata.
+Every view has one:
+
+- **Sessions** shows the selected session's live pane content. Press <kbd>Tab</kbd> to focus it and act in place: your keystrokes go straight to that agent's pane, so you can approve a permission, answer a question, or type a follow-up without ever leaving ccmux.
+- **Worktrees** shows the worktree's branch, upstream, PR and removal reason, then its uncommitted changes, last commits, and the sessions running in it.
+- **Start** shows the PR or issue's author, age, review, labels and checkout, then its checks (failing first), base and size, and its description.
+
+In Worktrees and Start, <kbd>Tab</kbd> focuses the preview to scroll it (<kbd>j</kbd>/<kbd>k</kbd>, <kbd>Ctrl+D</kbd>/<kbd>Ctrl+U</kbd>, <kbd>g</kbd>/<kbd>G</kbd>), since there is nothing to type into. Details load once the cursor rests on a row, so holding <kbd>j</kbd> through a list does not run a `gh` call per row; <kbd>R</kbd> re-reads them along with the list.
+
+The session preview header names the session: the project in bold, then the agent's own summary of the session on agents that publish one (Claude Code, Codex, OpenCode, Cursor, oh-my-pi, and Copilot do; on the rest the line is omitted), then the working directory and a metadata line: `project:branch · PR #206 ✓ · 2 agents · version · target · age`. The PR badge and agent count come right after the branch, so a narrow preview cuts the tail first. A project group's preview adds a **Repository** block (`main + 3 worktrees`, open PR and issue counts) and lists every checkout the repo has, idle ones included.
 
 When the session has agents running, an **Agents** section lists each one with its runtime. Finished agents drop off the list.
+
+### Command Palette
+
+Press <kbd>:</kbd> for a fuzzy list of everything the current view can do. Type to filter, <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>Ctrl+N</kbd>/<kbd>Ctrl+P</kbd>) to move, <kbd>Enter</kbd> to run, <kbd>Esc</kbd> to close. Each row shows the key it stands for, and running a keyed row presses that key, so the palette is also a way to learn them.
+
+A few actions have no key and live only here: **Group by** a specific mode (project, directory, tmux session, tmux window, or none), **Copy session id** (the agent's own id, what `claude --resume` takes), and **Open transcript**, which shows the selected session's last turns in `$PAGER` (or `less`). The transcript is piped to the pager, never written to a file.
+
+The footer keeps to the everyday keys and ends in `: more`; <kbd>N</kbd>, <kbd>W</kbd>, <kbd>R</kbd>, <kbd>d</kbd>/<kbd>D</kbd> and <kbd>P</kbd> still work, and are in <kbd>?</kbd> and <kbd>:</kbd>. The sidebar has no palette.
 
 https://github.com/user-attachments/assets/7e0d42b3-4e7b-43b8-8d06-72a2d69dd694
 
@@ -209,7 +225,7 @@ ccmux review          # Review the current directory's repository
 ccmux review <id>     # Review a session's repository by id
 ```
 
-Install hunk with `brew install hunk`. The <kbd>d</kbd> footer hint and help entry appear only when hunk is detected on `PATH` at launch.
+Install hunk with `brew install hunk`. The <kbd>d</kbd> help entry and its palette rows appear only when hunk is detected on `PATH` at launch.
 
 ### Sidebar Mode
 
@@ -656,7 +672,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Toggle preview        | <kbd>P</kbd>                                                                       | Show/hide the preview panel                                                                                            |
 | Scroll preview        | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd>                                              | Half-page scroll in preview                                                                                            |
 | Resize preview        | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>                                                | Increase/decrease preview width                                                                                        |
-| Focus preview         | <kbd>Tab</kbd>                                                                     | Send keys directly to tmux pane                                                                                        |
+| Focus preview         | <kbd>Tab</kbd>                                                                     | Sessions: send keys directly to the tmux pane. Worktrees, Start: scroll the preview                                    |
 | Restart session       | <kbd>r</kbd>                                                                       | Kill and resume the selected session                                                                                   |
 | Refresh               | <kbd>R</kbd>                                                                       | Refresh cached facts and reconnect to the daemon                                                                       |
 | Kill / remove         | <kbd>x</kbd>                                                                       | Act on marked rows, otherwise the cursor row / header's group                                                          |
@@ -676,6 +692,7 @@ Other skills-capable agents (Codex, Cursor, OpenCode, and others) can use the sa
 | Hide idle             | <kbd>f</kbd>                                                                       | Toggle hiding idle sessions (the strip shows `n/total` and `active`); the `needs attention` band stays visible               |
 | Cycle prompt          | <kbd>p</kbd>                                                                       | Prompt display for the `summary`/`prompt` cell: inline → own row → off                                                 |
 | Cycle group-by        | <kbd>b</kbd>                                                                       | Cycle through group-by modes                                                                                           |
+| Command palette       | <kbd>:</kbd>                                                                       | Fuzzy-find any action in the current view, including the ones with no key                                              |
 | Help                  | <kbd>?</kbd>                                                                       | Scroll the action registry's keyboard reference                                                                        |
 | Back / quit           | <kbd>q</kbd> / <kbd>Esc</kbd>                                                      | Worktrees and Start go back to Sessions; Sessions exits the picker                                                     |
 
@@ -724,7 +741,7 @@ The working directory is derived, not typed: a session row uses that session's d
 <details>
 <summary><strong>Preview focus mode</strong></summary>
 
-When preview is focused (<kbd>Tab</kbd>), keystrokes are forwarded to the tmux pane. These keys still work:
+In Sessions, when the preview is focused (<kbd>Tab</kbd>), keystrokes are forwarded to the tmux pane. These keys still work:
 
 | Action            | Key                                   |
 | :---------------- | :------------------------------------ |
@@ -732,6 +749,8 @@ When preview is focused (<kbd>Tab</kbd>), keystrokes are forwarded to the tmux p
 | Resize preview    | <kbd>Alt+H</kbd> / <kbd>Alt+L</kbd>   |
 | Scroll preview    | <kbd>Ctrl+D</kbd> / <kbd>Ctrl+U</kbd> |
 | Exit focus        | <kbd>Tab</kbd> / <kbd>Esc</kbd>       |
+
+In Worktrees and Start, focus only scrolls: <kbd>j</kbd>/<kbd>k</kbd> a line, <kbd>Ctrl+D</kbd>/<kbd>Ctrl+U</kbd> half a page, <kbd>g</kbd>/<kbd>G</kbd> top and bottom, <kbd>Tab</kbd>/<kbd>Esc</kbd> to leave.
 
 </details>
 
@@ -751,7 +770,7 @@ ccmux config list
 | `ageFade.after` | Nonnegative hours (`0` disables) | `24` | Dim task text after this many hours continuously idle |
 | `attentionBand`              | `true`, `false`                                                              | `true`             | Pin waiting sessions in a `needs attention` band at the top of the list                                                            |
 | `theme`                      | `catppuccin-*`, `tokyo-night*`, `dracula`, `gruvbox-*`, `nord`, `rose-pine*` | `catppuccin-mocha` | TUI color theme (resolved at launch; see [Theme](#-theme))                                                                         |
-| `showPreview`                | `true`, `false`                                                              | `false`            | Show preview panel on launch                                                                                                       |
+| `showPreview`                | `true`, `false`                                                              | auto               | Show preview panel on launch; unset, it opens at 140+ columns                                                                      |
 | `previewWidth`               | `20`–`80`                                                                    | `40`               | Preview panel width (percentage)                                                                                                   |
 | `command`                    | any non-blank string                                                         | `claude`           | CLI command used for session restart                                                                                               |
 | `groupBy`                    | `project`, `cwd`, `session`, `window`, `none`                                | `project`          | How sessions are grouped in the TUI                                                                                                |

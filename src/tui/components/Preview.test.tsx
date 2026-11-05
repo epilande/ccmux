@@ -36,7 +36,7 @@ mock.module("../utils/tmux", () => ({
   notifyActivePane: () => {},
 }));
 
-const { Preview } = await import("./Preview");
+const { Preview, metadataSegments } = await import("./Preview");
 const { setDaemonSocketPath } = await import("../utils/server-guard");
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -964,5 +964,83 @@ describe("Preview scrollbar thumb", () => {
       f = await frame("line 0");
       expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
     });
+  });
+});
+
+describe("Preview header badges", () => {
+  const pr = {
+    id: "206",
+    href: "https://github.com/o/r/pull/206",
+    ciStatus: "passing" as const,
+    reviewDecision: null,
+  };
+  const session = (overrides: Partial<EnrichedSession> = {}) =>
+    mockEnrichedSession({
+      project: "ccmux",
+      gitBranch: "feat/previews",
+      version: "2.1.0",
+      tmuxTarget: "dev:1",
+      subagents: ["a", "b"].map((agentId) => ({
+        agentId,
+        status: "working" as const,
+        attentionType: null,
+        pendingTool: null,
+        startedAt: null,
+      })) as EnrichedSession["subagents"],
+      ...overrides,
+    });
+  const text = (segments: { text: string }[]) =>
+    segments.map((s) => s.text).join("");
+
+  it("puts the PR and the agent count right after the branch", () => {
+    expect(text(metadataSegments(session(), [pr], 200))).toBe(
+      "ccmux:feat/previews · PR #206 ✓ · 2 agents · v2.1.0 · dev:1",
+    );
+  });
+
+  it("cuts the tail, never the PR, on a narrow preview", () => {
+    const line = text(
+      metadataSegments(
+        session({ gitBranch: "feat/a-very-long-branch-name-indeed" }),
+        [pr],
+        40,
+      ),
+    );
+    expect(line.length).toBeLessThanOrEqual(40);
+    expect(line).toContain("PR #206 ✓");
+    expect(line).toContain("2 agents");
+  });
+
+  it("renders the badge from repo facts, and hides it when headerPR is off", async () => {
+    const facts = [
+      {
+        repoRoot: "/code/ccmux",
+        repoName: "ccmux",
+        branchPRs: {
+          "feat/previews": { value: [pr], updatedAt: 0, stale: false },
+        },
+      },
+    ];
+    const s = session({
+      tmuxPane: "%1",
+      mainRepoRoot: "/code/ccmux",
+      worktreeRoot: "/code/ccmux",
+    });
+    const [tick] = createSignal(0);
+    const draw = async (headerPR: boolean) => {
+      setup = await testRender(
+        () => (
+          <TickContext.Provider value={{ tick }}>
+            <Preview session={s} width={80} facts={facts} headerPR={headerPR} />
+          </TickContext.Provider>
+        ),
+        { width: 100, height: 15 },
+      );
+      await setup.renderOnce();
+      return setup.captureCharFrame();
+    };
+    expect(await draw(true)).toContain("PR #206 ✓");
+    setup.renderer.destroy();
+    expect(await draw(false)).not.toContain("PR #206");
   });
 });
