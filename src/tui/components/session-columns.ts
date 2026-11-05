@@ -17,6 +17,7 @@ import {
   DEFAULT_BREAKPOINTS,
 } from "../../lib/preferences";
 import type { EnrichedSession, BranchPR } from "../../types";
+import { statusIconWidth, type IconStyle } from "../../lib/icons";
 import { displayWidth, sliceToWidth, truncateText } from "../utils/format";
 import { stripTerminalNoise } from "../../lib/strip-ansi";
 import { HANDOFF_PREFIX } from "../../daemon/handoff";
@@ -964,10 +965,21 @@ export function fitProjectCell(
 }
 
 /** Width allocated to a resolved entry on a "right side" (right-aligned column). */
-export function entryRightWidth(entry: ResolvedEntry): number {
+export function entryRightWidth(
+  entry: ResolvedEntry,
+  iconStyle?: IconStyle,
+): number {
   switch (entry.field) {
-    case "status":
-      return entry.mode === "full" ? 9 : entry.mode === "short" ? 6 : 1;
+    case "status": {
+      // The badges draw `<glyph> <label>`, the label padded to 7 in full mode
+      // and cut to 4 in short mode.
+      const glyph = statusIconWidth(iconStyle);
+      return entry.mode === "full"
+        ? glyph + 8
+        : entry.mode === "short"
+          ? glyph + 5
+          : glyph;
+    }
     case "agent":
       return entry.mode === "short" ? 2 : 8;
     case "version":

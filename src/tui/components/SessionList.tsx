@@ -4,7 +4,6 @@ import type { Component } from "solid-js";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { syncScrollbarThumb } from "../utils/scrollbar-thumb";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
 import type { IconStyle } from "../../lib/icons";
 import type {
@@ -406,7 +405,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <scrollbox
           ref={(r: ScrollBoxRenderable) => {
             scrollboxRef = r;
-            syncScrollbarThumb(r);
             // Handed up here rather than on mount: with no rows there is no
             // scrollbox at all (see the fallback above), and a resolver
             // published before it existed would answer null for the list's
