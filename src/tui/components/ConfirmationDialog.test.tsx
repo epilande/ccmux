@@ -115,8 +115,16 @@ describe("ConfirmationDialog", () => {
       groupLabel: "ccmux",
       sessionCount: 4,
     });
-    expect(frame).toContain("ccmux");
-    expect(frame).toContain("4 sessions");
+    expect(frame).toContain("4 sessions · ccmux");
+  });
+
+  it("keeps the count when a long target list truncates", async () => {
+    const frame = await renderDialog({
+      action: "kill-group",
+      groupLabel: Array.from({ length: 20 }, (_, i) => `repo:${i}.1`).join(", "),
+      sessionCount: 20,
+    });
+    expect(frame).toContain("20 sessions · repo:0.1");
   });
 
   it("shows count for kill-all", async () => {

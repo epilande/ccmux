@@ -395,18 +395,52 @@ export function resetScanCache(): void {
   lastCompletedScan = null;
 }
 
-export function describeRemoval(worktrees: number, branches: number): string {
+/**
+ * Why `x` refused. Only a mark can be "adjusted", so a row without one gets
+ * its own reason: the same sentence the row and preview would give, or what
+ * is missing when the scan found nothing to say about it.
+ */
+export function removalRefusal(
+  blocked: Pick<WorktreePanelRow, "row" | "skip">[],
+  target: "marks" | "header" | "row",
+  scanned: boolean,
+): string {
+  if (target === "marks")
+    return "Some marked rows are not removable; clear or adjust marks";
+  if (target === "header")
+    return "Not every worktree here is removable; mark the ones to remove with space";
+  const entry = blocked[0];
+  if (entry?.row.isMain) return "The main checkout cannot be removed";
+  if (entry?.skip?.reason) return `Not removable: ${entry.skip.reason}`;
+  if (!scanned) return "Not removable until the scan finishes; R rescans";
+  return "Not removable: its branch has not been merged";
+}
+
+export function describeRemoval(
+  worktrees: number,
+  branches: number,
+  /** The one worktree's name. Several are listed by `removalTargets`. */
+  name?: string,
+): string {
+  const target = worktrees === 1 && name ? name : null;
   if (branches === 0) {
-    return `Delete ${plural(worktrees, "worktree", "worktrees")}?`;
+    return `Delete ${target ?? plural(worktrees, "worktree", "worktrees")}?`;
   }
   if (worktrees === 1 && branches === 1) {
-    return "Delete 1 worktree and its branch?";
+    return `Delete ${target ?? "1 worktree"} and its branch?`;
   }
   return `Delete ${plural(worktrees, "worktree", "worktrees")} and ${plural(
     branches,
     "branch",
     "branches",
   )}?`;
+}
+
+/** The detail line naming a multi-row removal. One name is in the headline. */
+export function removalTargets(names: string[]): string[] {
+  if (names.length < 2) return [];
+  const shown = names.slice(0, 3).join(", ");
+  return [names.length > 3 ? `${shown} +${names.length - 3} more` : shown];
 }
 
 export function removalDetails(opts: {
@@ -898,8 +932,15 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const candidates = groups()
       .flatMap((g) => g.rows)
       .filter((r) => targets.has(r.key));
-    if (candidates.some((r) => !r.candidate)) {
-      setNote("Some marked rows are not removable; clear or adjust marks");
+    const blocked = candidates.filter((r) => !r.candidate);
+    if (blocked.length) {
+      setNote(
+        removalRefusal(
+          blocked,
+          marks().size ? "marks" : item?.kind === "header" ? "header" : "row",
+          scan() !== null,
+        ),
+      );
       return;
     }
     const pending = candidates.flatMap((r) =>
@@ -1582,16 +1623,23 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             chosen().length,
             chosen().filter((c) => c.branch && c.branchDeletion !== "none")
               .length,
+            chosen()[0]?.name,
           )}
-          details={removalDetails({
-            includedDirty: dirtyOk().size,
-            blockedDirty: 0,
-            ignoredFiles: chosen().reduce(
-              (n, c) => n + c.ignoredFiles.length,
-              0,
-            ),
-            endingSessions: chosen().reduce((n, c) => n + c.sessions.length, 0),
-          })}
+          details={[
+            ...removalTargets(chosen().map((c) => c.name)),
+            ...removalDetails({
+              includedDirty: dirtyOk().size,
+              blockedDirty: 0,
+              ignoredFiles: chosen().reduce(
+                (n, c) => n + c.ignoredFiles.length,
+                0,
+              ),
+              endingSessions: chosen().reduce(
+                (n, c) => n + c.sessions.length,
+                0,
+              ),
+            }),
+          ]}
           destructive={dirtyOk().size > 0}
           width={width()}
           onConfirm={() => void runPrune()}

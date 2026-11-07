@@ -31,6 +31,9 @@ import {
   pruneFullySucceeded,
   cachedScanFor,
   describeSessions,
+  describeRemoval,
+  removalRefusal,
+  removalTargets,
 } from "./WorktreesPanel";
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -637,7 +640,7 @@ it("does not promise branch deletion for a closed PR whose branch is kept", asyn
     }),
   });
   h.keys.pressKey("x");
-  expect(await h.frame()).toContain("Delete 1 worktree?");
+  expect(await h.frame()).toContain("Delete alpha?");
   expect(await h.frame()).not.toContain("and its branch");
 });
 
@@ -756,7 +759,7 @@ describe("Worktrees read and effect regressions", () => {
     expect(h.reads.filter((u) => u.pathname === "/worktrees")).toHaveLength(2);
     expect(h.scanCalls()).toBe(2);
     await h.keys.pressKey("x");
-    expect(await h.frame()).toContain("Delete 1 worktree");
+    expect(await h.frame()).toContain("Delete alpha");
   });
   for (const status of [404, 500]) {
     it(`surfaces a local ${status} failure and recovers on R`, async () => {
@@ -928,7 +931,7 @@ describe("Worktrees removal outcomes and cache", () => {
       });
       expect(h.scanCalls()).toBe(isReturn ? 0 : 1);
       await h.keys.pressKey("x");
-      expect((await h.frame()).includes("Delete 1 worktree")).toBe(isReturn);
+      expect((await h.frame()).includes("Delete alpha")).toBe(isReturn);
       if (isReturn) {
         deliverEscape(setup!.renderer);
         await h.keys.pressKey("R");
@@ -1344,5 +1347,52 @@ describe("WorktreesPanel prune results wheel", () => {
     expect(frame).toContain("fix-prune-results-0");
     expect(frame).toContain("delete it");
     expect(wheelTraps(setup!.renderer)).toEqual([]);
+  });
+});
+
+describe("removal wording", () => {
+  const entry = (
+    over: { isMain?: boolean; reason?: string } = {},
+  ): Parameters<typeof removalRefusal>[0][number] =>
+    ({
+      row: { isMain: over.isMain ?? false },
+      skip: over.reason ? { reason: over.reason } : null,
+    }) as Parameters<typeof removalRefusal>[0][number];
+
+  it("only mentions marks when a mark caused the refusal", () => {
+    expect(removalRefusal([entry()], "marks", true)).toContain("marked");
+    expect(removalRefusal([entry()], "row", true)).not.toContain("mark");
+    expect(removalRefusal([entry({ reason: "locked" })], "row", true)).toBe(
+      "Not removable: locked",
+    );
+  });
+
+  it("says why an unmarked row cannot go", () => {
+    expect(removalRefusal([entry({ isMain: true })], "row", true)).toBe(
+      "The main checkout cannot be removed",
+    );
+    expect(removalRefusal([entry()], "row", false)).toContain("scan");
+    expect(removalRefusal([entry()], "row", true)).toBe(
+      "Not removable: its branch has not been merged",
+    );
+    expect(removalRefusal([entry()], "header", true)).toContain("space");
+  });
+
+  it("names a lone target in the headline", () => {
+    expect(describeRemoval(1, 1, "alpha-wt")).toBe(
+      "Delete alpha-wt and its branch?",
+    );
+    expect(describeRemoval(1, 0, "alpha-wt")).toBe("Delete alpha-wt?");
+    expect(describeRemoval(2, 2, "alpha-wt")).toBe(
+      "Delete 2 worktrees and 2 branches?",
+    );
+  });
+
+  it("lists several targets and caps the list", () => {
+    expect(removalTargets(["a"])).toEqual([]);
+    expect(removalTargets(["a", "b"])).toEqual(["a, b"]);
+    expect(removalTargets(["a", "b", "c", "d", "e"])).toEqual([
+      "a, b, c +2 more",
+    ]);
   });
 });

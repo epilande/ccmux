@@ -48,7 +48,7 @@ export const ConfirmationDialog: Component<ConfirmationDialogProps> = (
     if (props.action === "kill-group") {
       const n = props.sessionCount ?? 0;
       const label = props.groupLabel || "group";
-      return `${label} (${n} session${n !== 1 ? "s" : ""})`;
+      return `${n} session${n !== 1 ? "s" : ""} · ${label}`;
     }
     if (props.action === "kill-all") {
       const n = props.sessionCount ?? 0;
