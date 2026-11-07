@@ -349,6 +349,15 @@ export async function associatedBranchPRs(
       remoteRepo = parseRepoSlug(url.stdout);
     }
   }
+  // A configured remote that does not normalize is unknown, not absent. An
+  // empty success here would be cached as fresh and clear the branch's last
+  // known PR, so only an exact tip match may still answer.
+  if (remote && remote !== "." && merge && !remoteRepo) {
+    const exact = prs.filter((pr) => pr.headRefOid === tip);
+    return exact.length
+      ? { ok: true, value: exact }
+      : { ok: false, error: "Cannot identify branch remote" };
+  }
   const upstream = merge.startsWith("refs/heads/")
     ? merge.slice("refs/heads/".length)
     : "";
