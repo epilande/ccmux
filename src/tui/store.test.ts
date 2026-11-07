@@ -3341,6 +3341,41 @@ describe("store", () => {
       expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["a"]);
     });
 
+    it("lands on the first waiting session rather than the band's header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+
+      expect(store.flatItems()[0]).toMatchObject({
+        type: "header",
+        groupKey: NEEDS_YOU_GROUP_KEY,
+      });
+      expect(store.selectedIndex()).toBe(1);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("stays on a band with nobody in it, since the next row is a header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha", mainRepoRoot: "/a" }),
+        createMockSession({
+          id: "b",
+          project: "beta",
+          mainRepoRoot: "/b",
+          status: "waiting",
+        }),
+      ]);
+      store.actions.setScope("/a");
+
+      expect(store.flatItems()[0]).toMatchObject({
+        groupKey: NEEDS_YOU_GROUP_KEY,
+      });
+      expect(store.flatItems()[1]?.type).toBe("header");
+      expect(store.selectedIndex()).toBe(0);
+    });
+
     it("should return session on initial load when groupBy is none", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([

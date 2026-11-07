@@ -58,6 +58,7 @@ import {
 import {
   buildFlatItems,
   isSyntheticGroupKey,
+  NEEDS_YOU_GROUP_KEY,
   aliasedRawKey,
   groupKeyOf,
   groupSessions,
@@ -1692,7 +1693,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (idx !== -1) return idx;
     }
 
-    // Fall back to first item
+    // Fall back to the first item, except past a needs-attention band with
+    // someone in it: Enter does nothing on that header, and the point of
+    // opening the picker is to reach whoever is waiting.
+    const [first, second] = items;
+    if (
+      first?.type === "header" &&
+      first.groupKey === NEEDS_YOU_GROUP_KEY &&
+      second?.type === "session"
+    )
+      return 1;
     return items.length > 0 ? 0 : -1;
   });
 
