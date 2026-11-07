@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 async function renderDialog(props: {
-  session?: Session | null;
+  session?: (Session & { tmuxTarget?: string | null }) | null;
   action?: ConfirmAction | null;
   sessionCount?: number;
   groupLabel?: string;
@@ -47,9 +47,9 @@ describe("ConfirmationDialog", () => {
     expect(frame).toContain("Kill All Sessions?");
   });
 
-  it("shows Kill Group title for kill-group", async () => {
+  it("shows a neutral title for kill-group, which also covers marked sets", async () => {
     const frame = await renderDialog({ action: "kill-group" });
-    expect(frame).toContain("Kill Group?");
+    expect(frame).toContain("Kill Sessions?");
   });
 
   it("shows Restart Session title for restart", async () => {
@@ -58,6 +58,29 @@ describe("ConfirmationDialog", () => {
       session: mockSession(),
     });
     expect(frame).toContain("Restart Session?");
+  });
+
+  it("names the agent and pane, which tell apart agents in one worktree", async () => {
+    const frame = await renderDialog({
+      action: "restart",
+      session: {
+        ...mockSession({ agentType: "codex", project: "myapp" }),
+        tmuxTarget: "work:2.1",
+      },
+    });
+    expect(frame).toContain("codex · work:2.1 · myapp");
+  });
+
+  it("falls back to the pane id without a target", async () => {
+    const frame = await renderDialog({
+      action: "kill",
+      session: mockSession({
+        agentType: "claude",
+        tmuxPane: "%12",
+        project: "myapp",
+      }),
+    });
+    expect(frame).toContain("claude · %12 · myapp");
   });
 
   it("shows review count and agent for send-review", async () => {

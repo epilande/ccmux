@@ -544,9 +544,9 @@ describe("SessionItem", () => {
 });
 
 describe("SessionItem sidebar mode", () => {
-  it("hides index in sidebar mode", async () => {
+  it("shows the index in sidebar mode so marking has a visible column", async () => {
     const frame = await renderItem({ index: 0, sidebar: true }, 30);
-    expect(frame).not.toContain(" 1 ");
+    expect(frame).toContain(" 1 ");
   });
 
   it("shows project dirname in sidebar mode", async () => {
