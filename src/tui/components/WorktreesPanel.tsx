@@ -402,13 +402,11 @@ export function resetScanCache(): void {
  */
 export function removalRefusal(
   blocked: Pick<WorktreePanelRow, "row" | "skip">[],
-  target: "marks" | "header" | "row",
+  target: "marks" | "row",
   scanned: boolean,
 ): string {
   if (target === "marks")
     return "Some marked rows are not removable; clear or adjust marks";
-  if (target === "header")
-    return "Not every worktree here is removable; mark the ones to remove with space";
   const entry = blocked[0];
   if (entry?.row.isMain) return "The main checkout cannot be removed";
   if (entry?.skip?.reason) return `Not removable: ${entry.skip.reason}`;
@@ -660,6 +658,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     props.initialCursor ?? props.memory?.cursor ?? null,
   );
   const [marks, setMarks] = createSignal(new Set<string>(props.memory?.marks));
+  /** Dirty rows answered "skip" in the current removal, for its confirm. */
+  const [declinedDirty, setDeclinedDirty] = createSignal(0);
   const [collapsed, setCollapsed] = createSignal(
     new Set<string>(props.memory?.collapsed),
   );
@@ -924,7 +924,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       ? marks()
       : new Set(
           item?.kind === "header"
-            ? item.rows.map((r) => r.key)
+            ? item.rows.filter((r) => r.candidate).map((r) => r.key)
             : item
               ? [item.key]
               : [],
@@ -937,7 +937,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       setNote(
         removalRefusal(
           blocked,
-          marks().size ? "marks" : item?.kind === "header" ? "header" : "row",
+          marks().size ? "marks" : "row",
           scan() !== null,
         ),
       );
@@ -956,6 +956,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     }
     setChosen(pending);
     setDirtyOk(new Set<string>());
+    setDeclinedDirty(0);
     const dirty = pending.filter((c) => c.dirty);
     setDirtyQueue(dirty);
     setPhase(dirty.length ? "dirty" : "confirm");
@@ -964,7 +965,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const candidate = dirtyQueue()[0];
     if (!candidate) return;
     if (include) setDirtyOk((prev) => new Set(prev).add(candidate.path));
-    else setChosen((prev) => prev.filter((c) => c.path !== candidate.path));
+    else {
+      setChosen((prev) => prev.filter((c) => c.path !== candidate.path));
+      setDeclinedDirty((n) => n + 1);
+    }
     const rest = dirtyQueue().slice(1);
     setDirtyQueue(rest);
     if (!rest.length) setPhase(chosen().length ? "confirm" : "list");
@@ -1097,8 +1101,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         break;
       case "a":
       case "A":
+        // Marks only ever feed removal, and `x` refuses a mark it cannot act
+        // on, so "all" means all that can go. Every repo holds a main checkout
+        // that never can, which would otherwise make this a dead end.
         setMarks(
-          new Set(key === "A" || event.shift ? [] : rows().map((r) => r.key)),
+          new Set(
+            key === "A" || event.shift
+              ? []
+              : rows()
+                  .filter((r) => r.candidate)
+                  .map((r) => r.key),
+          ),
         );
         break;
       case "x":
@@ -1629,7 +1642,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             ...removalTargets(chosen().map((c) => c.name)),
             ...removalDetails({
               includedDirty: dirtyOk().size,
-              blockedDirty: 0,
+              blockedDirty: declinedDirty(),
               ignoredFiles: chosen().reduce(
                 (n, c) => n + c.ignoredFiles.length,
                 0,

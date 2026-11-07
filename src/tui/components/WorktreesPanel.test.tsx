@@ -582,8 +582,10 @@ describe("Worktrees view", () => {
     expect(h.posts).toEqual([]);
   });
   it("refuses an unclassified mark instead of silently removing a subset", async () => {
-    const h = await mount();
-    await h.keys.pressKey("a");
+    const h = await mount({ cursor: "/repo" });
+    await h.keys.pressKey(" ");
+    await h.keys.pressKey("j");
+    await h.keys.pressKey(" ");
     await h.keys.pressKey("x");
     expect(await h.frame()).toContain("not removable");
     expect(h.posts).toEqual([]);
@@ -1375,7 +1377,6 @@ describe("removal wording", () => {
     expect(removalRefusal([entry()], "row", true)).toBe(
       "Not removable: its branch has not been merged",
     );
-    expect(removalRefusal([entry()], "header", true)).toContain("space");
   });
 
   it("names a lone target in the headline", () => {
@@ -1394,5 +1395,125 @@ describe("removal wording", () => {
     expect(removalTargets(["a", "b", "c", "d", "e"])).toEqual([
       "a, b, c +2 more",
     ]);
+  });
+});
+
+describe("bulk removal", () => {
+  const paths = ["/repo/wt/alpha", "/repo/wt/bravo", "/repo/wt/charlie"];
+  const rows = () => [
+    mainRow(),
+    ...paths.map((path) =>
+      row({ path, name: path.split("/").at(-1)!, branch: path }),
+    ),
+  ];
+  const scanned = (over: Partial<PruneCandidate>[] = []) =>
+    Promise.resolve({
+      candidates: paths.map((path, i) =>
+        candidate({
+          path,
+          name: path.split("/").at(-1)!,
+          branch: path,
+          ...over[i],
+        }),
+      ),
+      skipped: [],
+    });
+
+  it("removes the repo's removable rows from its header, past the main checkout", async () => {
+    const h = await mount({ rows: rows(), scan: () => scanned() });
+    await h.frame();
+    await h.keys.pressKey("g");
+    await h.keys.pressKey("g");
+    await h.keys.pressKey("x");
+    const frame = await h.frame();
+    expect(frame).toContain("Delete 3 worktrees and 3 branches?");
+    expect(frame).toContain("alpha, bravo, charlie");
+    await h.keys.pressKey("y");
+    await h.frame();
+    expect(h.posts[0]?.paths).toEqual(paths);
+  });
+
+  it("marks only what can go, so a marks every removable row at once", async () => {
+    const h = await mount({ rows: rows(), scan: () => scanned() });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain("Delete 3 worktrees");
+  });
+
+  it("sends the consent with the run, for exactly the picked rows", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () =>
+        scanned([
+          {},
+          { dirty: true, modified: 1 },
+          { sessions: [session()] },
+        ]),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    await h.frame();
+    await h.keys.pressKey("y"); // Include bravo, the dirty one.
+    await h.frame();
+    await h.keys.pressKey("y"); // Confirm.
+    await h.frame();
+    expect(h.posts).toHaveLength(1);
+    expect(h.posts[0]).toMatchObject({
+      paths,
+      allowDirty: ["/repo/wt/bravo"],
+      allowEndIdle: ["/repo/wt/charlie"],
+    });
+  });
+
+  it("names a declined dirty row on the confirm and leaves it out of the run", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () => scanned([{}, { dirty: true, modified: 1 }]),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    await h.frame();
+    await h.keys.pressKey("n");
+    const frame = await h.frame();
+    expect(frame).toContain("skipping 1 dirty worktree (declined)");
+    await h.keys.pressKey("y");
+    await h.frame();
+    expect(h.posts[0]?.paths).toEqual([paths[0], paths[2]]);
+    expect(h.posts[0]?.allowDirty).toEqual([]);
+  });
+
+  it("keeps the marks when the confirm is cancelled", async () => {
+    const h = await mount({ rows: rows(), scan: () => scanned() });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    await h.frame();
+    await h.keys.pressKey("n");
+    const frame = await h.frame();
+    expect(frame).not.toContain("Delete 3 worktrees");
+    expect(frame).toContain("✓");
+    expect(h.posts).toEqual([]);
+  });
+
+  it("shows why the scan skipped a row", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () =>
+        Promise.resolve({
+          candidates: [],
+          skipped: [
+            {
+              path: paths[0]!,
+              repoRoot: "/repo",
+              branch: "feat/alpha",
+              reason: "has unpushed commits",
+            },
+          ],
+        }),
+    });
+    expect(await h.frame()).toContain("has unpushed commits");
   });
 });
