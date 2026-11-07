@@ -126,6 +126,8 @@ async function mount(
     initialCursor?: string | null;
     compact?: boolean;
     showPreview?: boolean;
+    openResult?: boolean;
+    copyResult?: boolean;
     prDetail?: Handlers["prDetail"];
     actions?: Pick<
       SourcePickerProps,
@@ -143,8 +145,11 @@ async function mount(
         activeSessionId="s1"
         {...opts.actions}
         effects={{
-          openUrl: () => true,
-          copyText: () => ({ osc52: true, local: false }),
+          openUrl: () => opts.openResult ?? true,
+          copyText: () => ({
+            osc52: opts.copyResult ?? true,
+            local: false,
+          }),
         }}
         repo={opts.repo ?? "/repo"}
         cwd="/repo"
@@ -399,6 +404,26 @@ describe("SourcePicker", () => {
 });
 
 describe("SourcePicker keys", () => {
+  it("says what o and y did, or that they could not", async () => {
+    const done = await mountSettled({ prs: [openPR()] });
+    await done.keys.pressKey("o");
+    expect(await done.frame()).toContain("opened https://");
+    await done.keys.pressKey("y");
+    expect(await done.frame()).toContain("copied https://");
+    setup?.renderer.destroy();
+    setup = undefined;
+
+    const failed = await mountSettled({
+      prs: [openPR()],
+      openResult: false,
+      copyResult: false,
+    });
+    await failed.keys.pressKey("o");
+    expect(await failed.frame()).toContain("no browser opener here");
+    await failed.keys.pressKey("y");
+    expect(await failed.frame()).toContain("copy needs OSC 52 or pbcopy");
+  });
+
   it("moves the cursor with j and k", async () => {
     const harness = await mountSettled({
       prs: [openPR(), openPR({ number: 155, title: "second" })],

@@ -812,8 +812,20 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         const row = cursorRow();
         if (row) {
           const url = row.kind === "pr" ? row.pr.url : row.issue.url;
-          if (key === "o") props.effects.openUrl(url);
-          else props.effects.copyText(url, renderer);
+          if (key === "o")
+            setNote(
+              props.effects.openUrl(url)
+                ? `opened ${url}`
+                : "no browser opener here",
+            );
+          else {
+            const copied = props.effects.copyText(url, renderer);
+            setNote(
+              copied.osc52 || copied.local
+                ? `copied ${url}`
+                : "copy needs OSC 52 or pbcopy",
+            );
+          }
         }
         break;
       }
