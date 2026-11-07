@@ -5252,6 +5252,8 @@ describe("scope selection and mark lifetime", () => {
     store.actions.setScope("/b");
     expect(store.selectedHeaderKey()).toBeNull();
     expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["b"]);
+    store.actions.setScope(null);
+    expect(store.selectedHeaderKey()).toBeNull();
   });
   it("removal clears only that row's mark before its ID can be reused", () => {
     const store = createTUIStore({ groupBy: "none" });
