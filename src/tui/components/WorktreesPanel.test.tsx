@@ -32,8 +32,11 @@ import {
   cachedScanFor,
   describeSessions,
   describeRemoval,
+  markAllNote,
+  removalDetails,
   removalRefusal,
   removalTargets,
+  type WorktreePanelRow,
 } from "./WorktreesPanel";
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -587,7 +590,9 @@ describe("Worktrees view", () => {
     await h.keys.pressKey("j");
     await h.keys.pressKey(" ");
     await h.keys.pressKey("x");
-    expect(await h.frame()).toContain("not removable");
+    expect(await h.frame()).toContain(
+      "Marked main checkout cannot be removed; Space clears its mark",
+    );
     expect(h.posts).toEqual([]);
   });
   it("ignores action keys under an owning modal", async () => {
@@ -1354,29 +1359,93 @@ describe("WorktreesPanel prune results wheel", () => {
 
 describe("removal wording", () => {
   const entry = (
-    over: { isMain?: boolean; reason?: string } = {},
-  ): Parameters<typeof removalRefusal>[0][number] =>
+    over: {
+      isMain?: boolean;
+      name?: string;
+      reason?: string;
+      removable?: boolean;
+      sessions?: number;
+    } = {},
+  ) =>
     ({
-      row: { isMain: over.isMain ?? false },
+      row: { isMain: over.isMain ?? false, name: over.name ?? "alpha" },
       skip: over.reason ? { reason: over.reason } : null,
-    }) as Parameters<typeof removalRefusal>[0][number];
+      candidate: over.removable
+        ? candidate({
+            sessions: Array.from({ length: over.sessions ?? 0 }, () =>
+              session(),
+            ),
+          })
+        : null,
+    }) as WorktreePanelRow;
 
-  it("only mentions marks when a mark caused the refusal", () => {
-    expect(removalRefusal([entry()], "marks", true)).toContain("marked");
-    expect(removalRefusal([entry()], "row", true)).not.toContain("mark");
-    expect(removalRefusal([entry({ reason: "locked" })], "row", true)).toBe(
-      "Not removable: locked",
+  it("names a refused mark and how to clear it", () => {
+    expect(
+      removalRefusal([entry({ reason: "locked" })], "marks", "done"),
+    ).toBe("Marked alpha is not removable: locked; Space clears its mark");
+    expect(
+      removalRefusal(
+        [entry({ isMain: true }), entry({ name: "bravo" }), entry()],
+        "marks",
+        "done",
+      ),
+    ).toBe(
+      "Marked bravo (+2 more) is not removable: its branch has not been merged; Space clears its mark",
     );
   });
 
   it("says why an unmarked row cannot go", () => {
-    expect(removalRefusal([entry({ isMain: true })], "row", true)).toBe(
+    expect(removalRefusal([entry({ isMain: true })], "row", "done")).toBe(
       "The main checkout cannot be removed",
     );
-    expect(removalRefusal([entry()], "row", false)).toContain("scan");
-    expect(removalRefusal([entry()], "row", true)).toBe(
+    expect(removalRefusal([entry({ reason: "locked" })], "row", "done")).toBe(
+      "Not removable: locked",
+    );
+    expect(removalRefusal([entry()], "row", "pending")).toBe(
+      "Not removable: still scanning",
+    );
+    expect(removalRefusal([entry()], "row", "failed")).toBe(
+      "Not removable: removal scan failed; R retries",
+    );
+    expect(removalRefusal([entry()], "row", "done")).toBe(
       "Not removable: its branch has not been merged",
     );
+  });
+
+  it("says what a marks, and what it left", () => {
+    const rows = [
+      entry({ isMain: true }),
+      entry({ removable: true }),
+      entry({ removable: true, sessions: 1 }),
+      entry({ reason: "locked" }),
+    ];
+    expect(markAllNote(rows, "done")).toBe(
+      "marked 2 removable (1 ends an idle agent); 1 not removable",
+    );
+    expect(markAllNote([entry({ removable: true })], "done")).toBe(
+      "marked 1 removable",
+    );
+    expect(markAllNote([entry({ isMain: true })], "pending")).toBe(
+      "Waiting for removal classification",
+    );
+    expect(markAllNote([entry({ isMain: true })], "failed")).toBe(
+      "Removal scan failed; R retries",
+    );
+    expect(markAllNote([entry({ isMain: true })], "done")).toBe(
+      "Nothing here is removable",
+    );
+  });
+
+  it("names the worktrees whose idle agents a removal ends", () => {
+    expect(
+      removalDetails({
+        includedDirty: 0,
+        blockedDirty: 0,
+        ignoredFiles: 0,
+        endingSessions: 2,
+        endingIn: ["g-two", "g-three"],
+      }),
+    ).toEqual(["ending 2 idle agent sessions in g-two, g-three"]);
   });
 
   it("names a lone target in the headline", () => {
@@ -1483,6 +1552,38 @@ describe("bulk removal", () => {
     await h.frame();
     expect(h.posts[0]?.paths).toEqual([paths[0], paths[2]]);
     expect(h.posts[0]?.allowDirty).toEqual([]);
+  });
+
+  it("says what a marked, including rows whose idle agents would end", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () => scanned([{}, {}, { sessions: [session()] }]),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    expect(await h.frame()).toContain(
+      "marked 3 removable (1 ends an idle agent)",
+    );
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain("ending 1 idle agent session in charlie");
+  });
+
+  it("reports a failed scan instead of waiting on it", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: async () => {
+        throw new Error("scan exploded");
+      },
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    expect(await h.frame()).toContain("Removal scan failed; R retries");
+    await h.keys.pressKey("j");
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain(
+      "Not removable: removal scan failed; R retries",
+    );
+    expect(h.posts).toEqual([]);
   });
 
   it("keeps the marks when the confirm is cancelled", async () => {
