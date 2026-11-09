@@ -267,6 +267,14 @@ export const ACTIONS = [
     palette: [{ label: "Cycle group-by", keys: "b" }],
   },
   {
+    id: "renameGroup",
+    key: "e",
+    desc: "Rename / merge group",
+    section: "Groups",
+    views: SESSIONS,
+    palette: [{ label: "Rename group…", keys: "e" }],
+  },
+  {
     id: "moveGroup",
     key: "J / K",
     desc: "Move group down / up",
@@ -412,6 +420,12 @@ export const PALETTE_ONLY = [
   {
     id: "groupBy:none",
     label: "No grouping",
+    section: "Groups",
+    views: SESSIONS,
+  },
+  {
+    id: "resetGroupName",
+    label: "Reset group name",
     section: "Groups",
     views: SESSIONS,
   },

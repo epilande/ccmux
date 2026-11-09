@@ -21,10 +21,36 @@ export interface UIState {
   showPrompt?: boolean;
   hideIdle?: boolean;
   groupBy?: GroupBy;
+  /** Group names the user gave, per groupBy mode: raw group key to name
+   *  (`{ project: { "px-api": "ProjectX" } }`). Always written whole, since
+   *  `setUIState` merges only the top level, and never pruned for liveness. */
+  groupAliases?: Partial<Record<GroupBy, Record<string, string>>>;
+  /** Per mode, what a reset needs to give merged-away groups their own pin
+   *  and collapse back. Cleared with the mode's last merge, and written whole
+   *  beside `groupAliases`. */
+  groupLayouts?: Partial<Record<GroupBy, MergeRecord>>;
   /** Agent last spawned from the picker's new-session dialog. Persisted
    *  because the one-shot picker exits as soon as it spawns, so the
    *  "last agent" default only survives on disk. */
   lastSpawnAgent?: string;
+}
+
+/** One groupBy mode's record of its merges, for a reset to undo them. */
+export interface MergeRecord {
+  /**
+   * Each merged-away raw key's own collapse. An entry is also what marks a
+   * key as merged in: a key renamed without merging has none.
+   */
+  merged: Record<string, { collapsed: boolean }>;
+  /**
+   * `pinnedGroups` in raw keys, as of the last merge: each pin as the keys
+   * renamed to it without merging, or its own key where nothing was, with
+   * every merged-away key that was pinned still where it stood. A
+   * merged-away key goes back pinned exactly when it is here. Raw keys, not
+   * names: a name is whatever a group was called then (`Beta`), while a
+   * reset puts back raw keys (`beta`).
+   */
+  pins: string[];
 }
 
 /**

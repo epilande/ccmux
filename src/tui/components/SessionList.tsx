@@ -19,11 +19,12 @@ import {
   type FlatItem,
   NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
+  groupSources,
   scrollTarget,
   toVisualLine,
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
-import { GroupHeader } from "./GroupHeader";
+import { GroupHeader, type HeaderNotice } from "./GroupHeader";
 import { getStatusColor } from "./StatusBadge";
 import type { HeaderCells, ResolvedColumns } from "./session-columns";
 import {
@@ -45,6 +46,7 @@ import {
 } from "./session-columns";
 import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
 import { Text } from "./Text";
 import { socketErrorMessage } from "../../lib/tmux-socket";
 import { displayWidth, padStartWidth } from "../utils/format";
@@ -132,6 +134,29 @@ export function hiddenWaitingNotice(
     text: `+${hidden} waiting in other repos`,
     short: `+${hidden} elsewhere`,
     color: getStatusColor("waiting", null),
+  };
+}
+
+/**
+ * The marker a renamed or merged group's header carries after its count, so
+ * the list itself says a group is not under its derived name: the sidebar
+ * and a picker with the preview closed have nothing else that does. It is
+ * the header's `notice`, so it never drops: `from px-api` or `3 sources`
+ * (the group preview's vocabulary) where the label still fits beside it,
+ * else a single `*`. Dimmed where the theme allows (`TEXT_ROLES`), with its
+ * own color on a selected row's raised background.
+ */
+export function aliasNotice(
+  item: Extract<FlatItem, { type: "header" }>,
+): HeaderNotice | undefined {
+  const sources = groupSources(item.groupKey, item.rawKeys);
+  if (!sources) return undefined;
+  return {
+    text:
+      sources.length === 1 ? `from ${sources[0]}` : `${sources.length} sources`,
+    short: "*",
+    color: TEXT_ROLES.groupMarker.fg(),
+    selectedColor: TEXT_ROLES.groupMarkerSelected.fg(),
   };
 }
 
@@ -377,7 +402,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
             // The rule itself is sized by layout.
             width={effectiveWidth() - viewportInset()}
             facts={factsText(headerFacts(item))}
-            notice={hiddenWaitingNotice(item.hiddenWaiting)}
+            notice={
+              hiddenWaitingNotice(item.hiddenWaiting) ?? aliasNotice(item)
+            }
             collapsed={item.collapsed}
             selected={index === props.selectedIndex}
             members={item.members}
