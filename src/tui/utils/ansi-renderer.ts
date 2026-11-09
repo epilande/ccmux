@@ -117,8 +117,22 @@ function mapDecoration(decoration: string | null): number {
   return attrs;
 }
 
+/**
+ * OSC sequences: `ESC ]`, a payload, then BEL or ST (`ESC \`). tmux
+ * keeps hyperlinks under `capture-pane -e` as OSC 8 and writes both
+ * terminators as ST. Anser only knows SGR, so it drops the ESC and paints the
+ * rest (`]8;id=1;https://...`) as text. A payload never spans lines, and one
+ * cut short stops at the next escape or line end rather than eating the row.
+ */
+const OSC_SEQUENCE = /\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\|(?=[\x1b\n])|$)/g;
+
+/** Drop OSC sequences (hyperlinks, titles) and keep the text they wrap. */
+function stripOscSequences(input: string): string {
+  return input.includes("\x1b]") ? input.replace(OSC_SEQUENCE, "") : input;
+}
+
 export function parseAnsiToStyledText(input: string): StyledText {
-  const parsed = Anser.ansiToJson(input, {
+  const parsed = Anser.ansiToJson(stripOscSequences(input), {
     json: true,
     use_classes: true,
     remove_empty: true,

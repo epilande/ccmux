@@ -91,6 +91,8 @@ export function ghProblem(what: string, run: GhRunResult): string | null {
   }
   if (run.exitCode !== 0) {
     const detail = run.stderr.trim();
+    if (/no git remotes found/i.test(detail))
+      return "This repository has no GitHub remote";
     return `gh ${what} exited ${run.exitCode}${detail ? `: ${detail}` : ""}`;
   }
   return null;

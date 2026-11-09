@@ -31,6 +31,12 @@ import {
   pruneFullySucceeded,
   cachedScanFor,
   describeSessions,
+  describeRemoval,
+  markAllNote,
+  removalDetails,
+  removalRefusal,
+  removalTargets,
+  type WorktreePanelRow,
 } from "./WorktreesPanel";
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -579,10 +585,14 @@ describe("Worktrees view", () => {
     expect(h.posts).toEqual([]);
   });
   it("refuses an unclassified mark instead of silently removing a subset", async () => {
-    const h = await mount();
-    await h.keys.pressKey("a");
+    const h = await mount({ cursor: "/repo" });
+    await h.keys.pressKey(" ");
+    await h.keys.pressKey("j");
+    await h.keys.pressKey(" ");
     await h.keys.pressKey("x");
-    expect(await h.frame()).toContain("not removable");
+    expect(await h.frame()).toContain(
+      "Marked main checkout cannot be removed; Space clears its mark",
+    );
     expect(h.posts).toEqual([]);
   });
   it("ignores action keys under an owning modal", async () => {
@@ -637,7 +647,7 @@ it("does not promise branch deletion for a closed PR whose branch is kept", asyn
     }),
   });
   h.keys.pressKey("x");
-  expect(await h.frame()).toContain("Delete 1 worktree?");
+  expect(await h.frame()).toContain("Delete alpha?");
   expect(await h.frame()).not.toContain("and its branch");
 });
 
@@ -756,7 +766,7 @@ describe("Worktrees read and effect regressions", () => {
     expect(h.reads.filter((u) => u.pathname === "/worktrees")).toHaveLength(2);
     expect(h.scanCalls()).toBe(2);
     await h.keys.pressKey("x");
-    expect(await h.frame()).toContain("Delete 1 worktree");
+    expect(await h.frame()).toContain("Delete alpha");
   });
   for (const status of [404, 500]) {
     it(`surfaces a local ${status} failure and recovers on R`, async () => {
@@ -928,7 +938,7 @@ describe("Worktrees removal outcomes and cache", () => {
       });
       expect(h.scanCalls()).toBe(isReturn ? 0 : 1);
       await h.keys.pressKey("x");
-      expect((await h.frame()).includes("Delete 1 worktree")).toBe(isReturn);
+      expect((await h.frame()).includes("Delete alpha")).toBe(isReturn);
       if (isReturn) {
         deliverEscape(setup!.renderer);
         await h.keys.pressKey("R");
@@ -1344,5 +1354,267 @@ describe("WorktreesPanel prune results wheel", () => {
     expect(frame).toContain("fix-prune-results-0");
     expect(frame).toContain("delete it");
     expect(wheelTraps(setup!.renderer)).toEqual([]);
+  });
+});
+
+describe("removal wording", () => {
+  const entry = (
+    over: {
+      isMain?: boolean;
+      name?: string;
+      reason?: string;
+      removable?: boolean;
+      sessions?: number;
+    } = {},
+  ) =>
+    ({
+      row: { isMain: over.isMain ?? false, name: over.name ?? "alpha" },
+      skip: over.reason ? { reason: over.reason } : null,
+      candidate: over.removable
+        ? candidate({
+            sessions: Array.from({ length: over.sessions ?? 0 }, () =>
+              session(),
+            ),
+          })
+        : null,
+    }) as WorktreePanelRow;
+
+  it("names a refused mark and how to clear it", () => {
+    expect(
+      removalRefusal([entry({ reason: "locked" })], "marks", "done"),
+    ).toBe("Marked alpha is not removable: locked; Space clears its mark");
+    expect(
+      removalRefusal(
+        [entry({ isMain: true }), entry({ name: "bravo" }), entry()],
+        "marks",
+        "done",
+      ),
+    ).toBe(
+      "Marked bravo (+2 more) is not removable: its branch has not been merged; Space clears its mark",
+    );
+  });
+
+  it("says why an unmarked row cannot go", () => {
+    expect(removalRefusal([entry({ isMain: true })], "row", "done")).toBe(
+      "The main checkout cannot be removed",
+    );
+    expect(removalRefusal([entry({ reason: "locked" })], "row", "done")).toBe(
+      "Not removable: locked",
+    );
+    expect(removalRefusal([entry()], "row", "pending")).toBe(
+      "Not removable: still scanning",
+    );
+    expect(removalRefusal([entry()], "row", "failed")).toBe(
+      "Not removable: removal scan failed; R retries",
+    );
+    expect(removalRefusal([entry()], "row", "done")).toBe(
+      "Not removable: its branch has not been merged",
+    );
+  });
+
+  it("says what a marks, and what it left", () => {
+    const rows = [
+      entry({ isMain: true }),
+      entry({ removable: true }),
+      entry({ removable: true, sessions: 1 }),
+      entry({ reason: "locked" }),
+    ];
+    expect(markAllNote(rows, "done")).toBe(
+      "marked 2 removable (1 ends an idle agent); 1 not removable",
+    );
+    expect(markAllNote([entry({ removable: true })], "done")).toBe(
+      "marked 1 removable",
+    );
+    expect(markAllNote([entry({ isMain: true })], "pending")).toBe(
+      "Waiting for removal classification",
+    );
+    expect(markAllNote([entry({ isMain: true })], "failed")).toBe(
+      "Removal scan failed; R retries",
+    );
+    expect(markAllNote([entry({ isMain: true })], "done")).toBe(
+      "Nothing here is removable",
+    );
+  });
+
+  it("names the worktrees whose idle agents a removal ends", () => {
+    expect(
+      removalDetails({
+        includedDirty: 0,
+        blockedDirty: 0,
+        ignoredFiles: 0,
+        endingSessions: 2,
+        endingIn: ["g-two", "g-three"],
+      }),
+    ).toEqual(["ending 2 idle agent sessions in g-two, g-three"]);
+  });
+
+  it("names a lone target in the headline", () => {
+    expect(describeRemoval(1, 1, "alpha-wt")).toBe(
+      "Delete alpha-wt and its branch?",
+    );
+    expect(describeRemoval(1, 0, "alpha-wt")).toBe("Delete alpha-wt?");
+    expect(describeRemoval(2, 2, "alpha-wt")).toBe(
+      "Delete 2 worktrees and 2 branches?",
+    );
+  });
+
+  it("lists several targets and caps the list", () => {
+    expect(removalTargets(["a"])).toEqual([]);
+    expect(removalTargets(["a", "b"])).toEqual(["a, b"]);
+    expect(removalTargets(["a", "b", "c", "d", "e"])).toEqual([
+      "a, b, c +2 more",
+    ]);
+  });
+});
+
+describe("bulk removal", () => {
+  const paths = ["/repo/wt/alpha", "/repo/wt/bravo", "/repo/wt/charlie"];
+  const rows = () => [
+    mainRow(),
+    ...paths.map((path) =>
+      row({ path, name: path.split("/").at(-1)!, branch: path }),
+    ),
+  ];
+  const scanned = (over: Partial<PruneCandidate>[] = []) =>
+    Promise.resolve({
+      candidates: paths.map((path, i) =>
+        candidate({
+          path,
+          name: path.split("/").at(-1)!,
+          branch: path,
+          ...over[i],
+        }),
+      ),
+      skipped: [],
+    });
+
+  it("removes the repo's removable rows from its header, past the main checkout", async () => {
+    const h = await mount({ rows: rows(), scan: () => scanned() });
+    await h.frame();
+    await h.keys.pressKey("g");
+    await h.keys.pressKey("g");
+    await h.keys.pressKey("x");
+    const frame = await h.frame();
+    expect(frame).toContain("Delete 3 worktrees and 3 branches?");
+    expect(frame).toContain("alpha, bravo, charlie");
+    await h.keys.pressKey("y");
+    await h.frame();
+    expect(h.posts[0]?.paths).toEqual(paths);
+  });
+
+  it("marks only what can go, so a marks every removable row at once", async () => {
+    const h = await mount({ rows: rows(), scan: () => scanned() });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain("Delete 3 worktrees");
+  });
+
+  it("sends the consent with the run, for exactly the picked rows", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () =>
+        scanned([
+          {},
+          { dirty: true, modified: 1 },
+          { sessions: [session()] },
+        ]),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    await h.frame();
+    await h.keys.pressKey("y"); // Include bravo, the dirty one.
+    await h.frame();
+    await h.keys.pressKey("y"); // Confirm.
+    await h.frame();
+    expect(h.posts).toHaveLength(1);
+    expect(h.posts[0]).toMatchObject({
+      paths,
+      allowDirty: ["/repo/wt/bravo"],
+      allowEndIdle: ["/repo/wt/charlie"],
+    });
+  });
+
+  it("names a declined dirty row on the confirm and leaves it out of the run", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () => scanned([{}, { dirty: true, modified: 1 }]),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    await h.frame();
+    await h.keys.pressKey("n");
+    const frame = await h.frame();
+    expect(frame).toContain("skipping 1 dirty worktree (declined)");
+    await h.keys.pressKey("y");
+    await h.frame();
+    expect(h.posts[0]?.paths).toEqual([paths[0], paths[2]]);
+    expect(h.posts[0]?.allowDirty).toEqual([]);
+  });
+
+  it("says what a marked, including rows whose idle agents would end", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () => scanned([{}, {}, { sessions: [session()] }]),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    expect(await h.frame()).toContain(
+      "marked 3 removable (1 ends an idle agent)",
+    );
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain("ending 1 idle agent session in charlie");
+  });
+
+  it("reports a failed scan instead of waiting on it", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: async () => {
+        throw new Error("scan exploded");
+      },
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    expect(await h.frame()).toContain("Removal scan failed; R retries");
+    await h.keys.pressKey("j");
+    await h.keys.pressKey("x");
+    expect(await h.frame()).toContain(
+      "Not removable: removal scan failed; R retries",
+    );
+    expect(h.posts).toEqual([]);
+  });
+
+  it("keeps the marks when the confirm is cancelled", async () => {
+    const h = await mount({ rows: rows(), scan: () => scanned() });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.keys.pressKey("x");
+    await h.frame();
+    await h.keys.pressKey("n");
+    const frame = await h.frame();
+    expect(frame).not.toContain("Delete 3 worktrees");
+    expect(frame).toContain("✓");
+    expect(h.posts).toEqual([]);
+  });
+
+  it("shows why the scan skipped a row", async () => {
+    const h = await mount({
+      rows: rows(),
+      scan: () =>
+        Promise.resolve({
+          candidates: [],
+          skipped: [
+            {
+              path: paths[0]!,
+              repoRoot: "/repo",
+              branch: "feat/alpha",
+              reason: "has unpushed commits",
+            },
+          ],
+        }),
+    });
+    expect(await h.frame()).toContain("has unpushed commits");
   });
 });

@@ -122,6 +122,40 @@ describe("parseAnsiToStyledText", () => {
     return chunks[0]!;
   }
 
+  const text = (input: string) =>
+    parseAnsiToStyledText(input)
+      .chunks.map((c) => c.text)
+      .join("");
+
+  it("keeps a hyperlink's text and drops its OSC 8 codes", () => {
+    // What tmux 3.8 `capture-pane -e` returns for a link (ST terminators).
+    expect(
+      text(
+        "see \x1b]8;id=x1;https://example.com/a\x1b\\docs\x1b]8;;\x1b\\ end",
+      ),
+    ).toBe("see docs end");
+  });
+
+  it("drops BEL-terminated OSC sequences too", () => {
+    expect(
+      text(
+        "\x1b]0;window title\x07$ \x1b]8;;https://b.test\x07bel\x1b]8;;\x07",
+      ),
+    ).toBe("$ bel");
+  });
+
+  it("keeps styling around a link", () => {
+    const chunks = parseAnsiToStyledText(
+      "\x1b[31m\x1b]8;;https://a.test\x1b\\red\x1b]8;;\x1b\\\x1b[0m",
+    ).chunks;
+    expect(chunks.map((c) => c.text).join("")).toBe("red");
+    expect(rgb(chunks[0]!.fg)).toEqual([243, 139, 168]);
+  });
+
+  it("stops an unterminated OSC at the line end instead of eating the next row", () => {
+    expect(text("a\x1b]8;;https://cut.off\nnext row")).toBe("a\nnext row");
+  });
+
   it("maps the basic 16 colors to the Catppuccin palette, not Anser's VGA defaults", () => {
     // Anser's default would be 187,0,0 / 0,187,0; the themed palette is vivid.
     expect(rgb(only("\x1b[31mred\x1b[0m").fg)).toEqual([243, 139, 168]);

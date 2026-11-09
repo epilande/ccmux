@@ -50,7 +50,7 @@ import {
   type HunkReviewNote,
 } from "./utils/review";
 import { copyToClipboard } from "./utils/clipboard";
-import { SSEClient } from "./utils/sse";
+import { connectionErrorText, SSEClient } from "./utils/sse";
 import {
   switchToPane,
   sendKeys,
@@ -2538,7 +2538,7 @@ export function App(props: AppProps) {
         // the group collapsed underneath.
         id: "collapse",
         label: isCollapsed ? "Expand" : "Collapse",
-        hint: "space",
+        hint: "enter",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
       },
@@ -2592,7 +2592,9 @@ export function App(props: AppProps) {
       {
         id: "kill-group",
         label: "Kill group",
-        hint: "X",
+        // A hint names the key the list answers to, and there `X` kills every
+        // session in view while `x` on a header kills this group.
+        hint: "x",
         color: theme.red,
         action: groupContextMenuKill,
       },
@@ -4342,14 +4344,16 @@ export function App(props: AppProps) {
           const marked = store
             .filteredSessions()
             .filter((s) => store.state.markedSessions.has(s.session.id))
-            .map((s) => s.session.id);
+            .map((s) => s.session);
           const sessionToKill = store.selectedSession();
           if (marked.length) {
             store.actions.showConfirmDialog(
               null,
               "kill-group",
-              marked,
-              "Marked sessions",
+              marked.map((s) => s.id),
+              marked
+                .map((s) => s.tmuxTarget ?? s.tmuxPane ?? s.project)
+                .join(", "),
             );
             break;
           }
@@ -4651,7 +4655,9 @@ export function App(props: AppProps) {
 
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
-            <Text fg={theme.red}>Error: {store.state.error}</Text>
+            <Text fg={theme.red}>
+              {connectionErrorText(store.state.error ?? "")}
+            </Text>
           </box>
         </Show>
 

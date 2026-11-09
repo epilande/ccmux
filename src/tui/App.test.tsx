@@ -2113,7 +2113,7 @@ describe("App kill/restart dispatch routing", () => {
         await setup.renderOnce();
       }
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Marked sessions (2 sessions)");
+      expect(frame).toContain("2 sessions · ");
     } finally {
       restore();
     }
@@ -6900,6 +6900,9 @@ describe("App row menu (m)", () => {
       // The group menu's own items, and none of the row menu's.
       expect(frame).toContain("Pin to top");
       expect(frame).toContain("Kill group");
+      // Hints name the list's keys: `X` there kills everything, Space marks.
+      expect(frame).toMatch(/Kill group\s+x/);
+      expect(frame).toMatch(/Collapse\s+enter/);
       expect(frame).not.toContain("Attach");
     } finally {
       restore();

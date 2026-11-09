@@ -76,7 +76,7 @@ export const ACTIONS = [
       { label: "Last row", keys: "G" },
     ],
   },
-  { id: "number", key: "1-9", desc: "Go to row N", section: "Navigation" },
+  { id: "number", key: "1-9", desc: "Jump to row N", section: "Navigation" },
   {
     id: "enter",
     key: "Enter",

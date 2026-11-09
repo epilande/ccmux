@@ -58,6 +58,7 @@ import {
 import {
   buildFlatItems,
   isSyntheticGroupKey,
+  NEEDS_YOU_GROUP_KEY,
   aliasedRawKey,
   groupKeyOf,
   groupSessions,
@@ -1692,7 +1693,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (idx !== -1) return idx;
     }
 
-    // Fall back to first item
+    // Fall back to the first item, except past a needs-attention band with
+    // someone in it: Enter does nothing on that header, and the point of
+    // opening the picker is to reach whoever is waiting.
+    const [first, second] = items;
+    if (
+      first?.type === "header" &&
+      first.groupKey === NEEDS_YOU_GROUP_KEY &&
+      second?.type === "session"
+    )
+      return 1;
     return items.length > 0 ? 0 : -1;
   });
 
@@ -1954,6 +1964,24 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   }
 
   /**
+   * Turn the cursor's band fallback into a real selection before the list
+   * changes under it. `selectedIndex` opens on the first waiting session
+   * without committing it, so once that session stops waiting the band
+   * empties and the fallback drops to whatever header is now first, away
+   * from the row the user was looking at. Pinned, the cursor follows the
+   * session out of the band, as it would had the user moved there. Only the
+   * band case pins: every other fallback is the top row, which tracks the
+   * list's order on purpose. Local only, so it is not broadcast.
+   */
+  function pinBandFallback() {
+    if (state.selectedSessionId || selectedHeaderKey()) return;
+    const item = selectedFlatItem();
+    if (item?.type !== "session") return;
+    const session = item.filteredSession.session;
+    if (inBand(session)) setState("selectedSessionId", session.id);
+  }
+
+  /**
    * Flip a synthetic subprocess invoke row to its terminal outcome and arm
    * the ~6s linger removal. Shared by `finishInvocation` (live finish) and
    * `reconcileInvocations` (a `finished` missed while disconnected). No-op
@@ -2179,6 +2207,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       const merged =
         synthetic.length > 0 ? [...sessions, ...synthetic] : sessions;
+      pinBandFallback();
       const wasWaiting = selectedSession()?.status === "waiting";
       batch(() => {
         setState("sessions", merged);
@@ -2210,6 +2239,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         this.updateSession(session);
         return;
       }
+      pinBandFallback();
       setState("sessions", (s) => [...s, session]);
     },
 
@@ -2227,6 +2257,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
+        pinBandFallback();
         const wasWaiting =
           state.selectedSessionId === session.id &&
           state.sessions[idx]?.status === "waiting";
