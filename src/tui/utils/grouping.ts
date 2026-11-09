@@ -76,6 +76,11 @@ export type FlatItem =
       count: number;
       /** Present only when a project header unambiguously names one repository. */
       repoRoot?: string;
+      /**
+       * On the `needs attention` band only: waiting sessions the repo scope
+       * hides from it. The band says so rather than looking complete.
+       */
+      hiddenWaiting?: number;
       collapsed: boolean;
       /** Raw member references, not a precomputed summary. The status summary
        * is derived downstream in the header's own reactive scope so this memo
@@ -273,6 +278,9 @@ export function sortGroups(
  * sorting, and collapse state.
  * During search, all groups are forced expanded.
  * With `attentionBand` off, waiting sessions stay in their own groups.
+ * `hiddenWaiting` counts waiting sessions the repo scope keeps out of
+ * `filtered`; the band carries it, and draws for it alone when none of its
+ * own are left, so a scope never hides a waiting session without a word.
  */
 export function buildFlatItems(
   filtered: FilteredSession[],
@@ -281,6 +289,7 @@ export function buildFlatItems(
   isSearching: boolean,
   pinnedGroups: string[] = [],
   attentionBand = true,
+  hiddenWaiting = 0,
 ): FlatItem[] {
   const waitingStartedAt = (fs: FilteredSession): number => {
     const parsed = Date.parse(
@@ -295,12 +304,14 @@ export function buildFlatItems(
     .sort((a, b) => waitingStartedAt(a) - waitingStartedAt(b));
   const rest = filtered.filter((fs) => !inBand(fs));
   const items: FlatItem[] = [];
-  if (waiting.length) {
+  const hidden = attentionBand ? hiddenWaiting : 0;
+  if (waiting.length || hidden) {
     items.push({
       type: "header",
       groupKey: NEEDS_YOU_GROUP_KEY,
       label: NEEDS_YOU_GROUP_LABEL,
       count: waiting.length,
+      ...(hidden ? { hiddenWaiting: hidden } : {}),
       collapsed: false,
       members: waiting,
     });
@@ -312,7 +323,7 @@ export function buildFlatItems(
       });
   }
   if (groupBy === "none") {
-    if (waiting.length && rest.length) {
+    if ((waiting.length || hidden) && rest.length) {
       items.push({
         type: "header",
         groupKey: SESSIONS_GROUP_KEY,
