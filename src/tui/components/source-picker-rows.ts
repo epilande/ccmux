@@ -24,6 +24,7 @@ import {
   pickIssueWorktree,
 } from "../../daemon/worktree-create";
 import { theme } from "../theme";
+import { displayWidth, truncateText } from "../utils/format";
 import { oneLine, orderRepos, unhandled, type Phrase } from "./row-segments";
 import {
   PR_MARKER,
@@ -491,4 +492,128 @@ export function emptyStateText(
     };
   }
   return { text: "Nothing open here", fg: theme.subtext };
+}
+
+/** A Start row's right-hand cells, before they are sized to the list. */
+export interface SourceRowCells {
+  /** `CI ✓`/`CI ✗`/`CI ◐`, or null when the PR has no checks (or is an
+   *  issue). */
+  ci: Phrase | null;
+  /** `changes` or `approved`, or null. */
+  review: Phrase | null;
+  age: string;
+  /** `draft`, labels, the head branch, then the author: the part of the row
+   *  that yields first. `rank` orders the yielding (lowest goes first). */
+  middle: (Phrase & { rank: number })[];
+}
+
+/**
+ * What a Start row says on its right. CI, review and age are fixed cells,
+ * sized once for the list (`sourceCellWidths`) so they line up the way the
+ * session list's right-side columns do; the rest is the flexible middle.
+ */
+export function sourceRowCells(
+  row: SourceRow,
+  age: string,
+  showAuthor: boolean,
+): SourceRowCells {
+  const middle: (Phrase & { rank: number })[] = [];
+  if (row.kind === "pr" && row.pr.isDraft)
+    middle.push({ text: "draft", fg: theme.subtext, rank: 3 });
+  const labels = row.kind === "pr" ? row.pr.labels : row.issue.labels;
+  if (labels?.length)
+    middle.push({
+      text: oneLine(labels.join(",")),
+      fg: theme.subtext,
+      rank: 1,
+    });
+  if (row.kind === "pr" && row.pr.headRefName)
+    middle.push({ text: oneLine(row.pr.headRefName), fg: theme.blue, rank: 2 });
+  const author = row.kind === "pr" ? row.pr.author : row.issue.author;
+  if (author && showAuthor)
+    middle.push({ text: `@${oneLine(author)}`, fg: theme.overlay, rank: 0 });
+  if (row.kind !== "pr") return { ci: null, review: null, age, middle };
+  const pr = row.pr;
+  const ci =
+    pr.ciStatus === "passing"
+      ? { text: "CI ✓", fg: theme.green }
+      : pr.ciStatus === "failing"
+        ? { text: "CI ✗", fg: theme.red }
+        : pr.ciStatus === "pending"
+          ? { text: "CI ◐", fg: theme.yellow }
+          : null;
+  const review =
+    pr.reviewDecision === "CHANGES_REQUESTED"
+      ? { text: "changes", fg: theme.peach }
+      : pr.reviewDecision === "APPROVED"
+        ? { text: "approved", fg: theme.green }
+        : null;
+  return { ci, review, age, middle };
+}
+
+/** One width per fixed cell, the widest any visible row draws (0 drops the
+ *  cell, so an issue-only list spends nothing on CI and review). */
+export function sourceCellWidths(cells: SourceRowCells[]): {
+  ci: number;
+  review: number;
+  age: number;
+} {
+  const widest = (pick: (c: SourceRowCells) => string) =>
+    cells.reduce((n, c) => Math.max(n, displayWidth(pick(c))), 0);
+  return {
+    ci: widest((c) => c.ci?.text ?? ""),
+    review: widest((c) => c.review?.text ?? ""),
+    age: widest((c) => c.age),
+  };
+}
+
+/** Columns between the title and the middle, and between middle phrases. */
+const MIDDLE_GAP = 2;
+const MIDDLE_SEP = " · ";
+/** A middle squeezed below this says nothing; it drops instead. */
+const MIDDLE_MIN = 6;
+
+/**
+ * Fit a Start row's title and flexible middle into `width` columns (what the
+ * fixed right cells leave). The middle yields FIRST: the author goes, then
+ * the labels, then the branch, then `draft` (the last phrase left truncates
+ * before it goes), and only then does the title truncate. The title is the row's identity; the middle is detail
+ * that the PR itself carries.
+ */
+export function fitSourceRow(
+  title: string,
+  middle: (Phrase & { rank: number })[],
+  width: number,
+): { title: string; middle: Phrase[]; titleRoom: number } {
+  const titleWidth = displayWidth(title);
+  let kept = [...middle];
+  const middleWidth = (phrases: Phrase[]) =>
+    phrases.reduce((n, p) => n + displayWidth(p.text), 0) +
+    Math.max(0, phrases.length - 1) * MIDDLE_SEP.length;
+  while (
+    kept.length > 1 &&
+    titleWidth + MIDDLE_GAP + middleWidth(kept) > width
+  ) {
+    const lowest = kept.reduce((a, b) => (b.rank < a.rank ? b : a));
+    kept = kept.filter((p) => p !== lowest);
+  }
+  if (
+    kept.length === 1 &&
+    titleWidth + MIDDLE_GAP + middleWidth(kept) > width
+  ) {
+    const room = width - titleWidth - MIDDLE_GAP;
+    kept =
+      room >= MIDDLE_MIN
+        ? [{ ...kept[0]!, text: truncateText(kept[0]!.text, room) }]
+        : [];
+  }
+  const shown: Phrase[] = kept.map(({ text, fg }, i) => ({
+    text: i ? `${MIDDLE_SEP}${text}` : text,
+    fg,
+  }));
+  const titleRoom = Math.max(
+    1,
+    width - (shown.length ? MIDDLE_GAP + middleWidth(kept) : 0),
+  );
+  return { title: truncateText(title, titleRoom), middle: shown, titleRoom };
 }

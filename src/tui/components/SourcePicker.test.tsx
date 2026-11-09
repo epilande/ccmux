@@ -792,14 +792,17 @@ describe("SourcePicker filter", () => {
 
   it("hints the nav keys in nav mode and the input keys in filter mode", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
-    expect(await harness.frame()).toContain("/ filter");
+    // The session list's verb for the same key.
+    expect(await harness.frame()).toContain("/ search");
 
     harness.keys.pressKey("/");
     const filtering = await harness.frame();
     // `q` types here, so the hint that names it must go: the surface would
-    // otherwise advertise a key that does something else entirely.
+    // otherwise advertise a key that does something else entirely. What
+    // replaces it is the session search's own line.
+    expect(filtering).toContain("type to search");
     expect(filtering).toContain("esc cancel");
-    expect(filtering).not.toContain("q close");
+    expect(filtering).not.toContain("q back");
   });
 
   /**
@@ -1582,4 +1585,63 @@ it("opening help consumes a pending z prefix before the next restart", async () 
   await h.keys.pressKey("?");
   await h.keys.pressKey("r");
   expect(restarted).toEqual(["s1"]);
+});
+
+describe("Start status glyphs", () => {
+  it("draws a waiting checkout with the session list's icon, not the background diamond", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "waiting",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+    });
+    const line =
+      (await harness.frame()).split("\n").find((l) => l.includes("#156")) ?? "";
+    expect(line).toContain("■");
+    expect(line).not.toContain("◆");
+  });
+});
+
+it("lines CI and age up across rows, with the middle yielding before the title", async () => {
+  const day = 86_400_000;
+  const h = await mountSettled({
+    width: 96,
+    prs: [
+      openPR({
+        number: 7,
+        title: "short",
+        ciStatus: "passing",
+        headRefName: "a",
+        createdAt: new Date(Date.now() - 3 * day).toISOString(),
+      }),
+      openPR({
+        number: 8,
+        title: "a much longer title that takes most of the row on its own",
+        ciStatus: "failing",
+        headRefName: "a-branch-name-long-enough-to-yield",
+        createdAt: new Date(Date.now() - 120 * day).toISOString(),
+      }),
+    ],
+  });
+  const lines = (await h.frame()).split("\n");
+  const seven = lines.find((l) => l.includes("#7 short"))!;
+  const eight = lines.find((l) => l.includes("#8 a much"))!;
+  // Fixed cells: CI starts, and age ends, on the same column on both rows.
+  expect(seven.indexOf("CI ✓")).toBe(eight.indexOf("CI ✗"));
+  expect(seven.indexOf("3d") + 2).toBe(eight.indexOf("120d") + 4);
+  // The long title kept its words; the branch yielded instead.
+  expect(eight).toContain("takes most of the row on its own");
+  expect(eight).not.toContain("a-branch-name-long-enough-to-yield");
 });

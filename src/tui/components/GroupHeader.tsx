@@ -132,14 +132,16 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         }`
       : "";
     const labelWidth = Math.max(1, left - fixed - displayWidth(notice));
+    // The collapse triangle and the count are read, not decoration, so they
+    // take subtext like the strip's counts (overlay is 2.3:1 in latte).
     const segments: Array<{ text: string; color: string; label?: boolean }> = [
-      { text: `${indicator()} `, color: theme.overlay },
+      { text: `${indicator()} `, color: theme.subtext },
       {
         text: truncateText(props.label, labelWidth),
         color: theme.text,
         label: true,
       },
-      { text: count, color: theme.overlay },
+      { text: count, color: theme.subtext },
       ...(notice ? [{ text: notice, color: props.notice!.color }] : []),
       ...activity,
       ...(props.sharedBranch && props.sharedBranch !== "main"

@@ -6,6 +6,7 @@ import {
   padStartWidth,
   sliceToWidth,
   truncateMiddle,
+  truncatePath,
   truncateText,
   truncateHighlighted,
 } from "./format";
@@ -368,5 +369,46 @@ describe("formatSubagentName", () => {
 
   it("passes through IDs without the a-prefix convention", () => {
     expect(formatSubagentName("custom-name")).toBe("custom-name");
+  });
+});
+
+describe("truncatePath", () => {
+  const path = "~/code/worktrees/customer-analytics-dashboard-staging";
+
+  it("leaves a path that fits alone", () => {
+    expect(truncatePath(path, 60)).toBe(path);
+    expect(truncatePath(path, path.length)).toBe(path);
+  });
+
+  it("drops whole folders from the middle, keeping the start and the final folder", () => {
+    expect(truncatePath(path, 52)).toBe(
+      "~/code/…/customer-analytics-dashboard-staging",
+    );
+    expect(truncatePath(path, 44)).toBe(
+      "~/…/customer-analytics-dashboard-staging",
+    );
+  });
+
+  it("keeps more of the start as room allows", () => {
+    const deep = "/home/dev/code/clients/acme/project-final";
+    expect(truncatePath(deep, 29)).toBe("/home/dev/…/project-final");
+    expect(truncatePath(deep, 30)).toBe("/home/dev/code/…/project-final");
+    expect(truncatePath(deep, 38)).toBe(
+      "/home/dev/code/clients/…/project-final",
+    );
+  });
+
+  it("falls back to a middle cut when even start/…/final does not fit", () => {
+    const cut = truncatePath(path, 30);
+    expect(displayWidth(cut)).toBe(30);
+    expect(cut.startsWith("~/code")).toBe(true);
+    expect(cut.endsWith("staging")).toBe(true);
+    expect(cut).toContain("…");
+  });
+
+  it("cuts a path with no folder between its ends from the middle", () => {
+    expect(truncatePath("~/a-very-long-folder-name-here", 12)).toBe(
+      truncateMiddle("~/a-very-long-folder-name-here", 12),
+    );
   });
 });
