@@ -19,6 +19,7 @@ async function renderHeader(props: {
   selected?: boolean;
   statusSummary?: StatusSummary;
   dimmed?: boolean;
+  width?: number;
 }) {
   setup = await testRender(
     () => (
@@ -29,6 +30,7 @@ async function renderHeader(props: {
         selected={props.selected ?? false}
         members={membersFromSummary(props.statusSummary ?? emptySummary())}
         dimmed={props.dimmed}
+        width={props.width}
       />
     ),
     { width: 80, height: 3 },
@@ -54,6 +56,43 @@ describe("GroupHeader", () => {
     const frame = await renderHeader({ label: "ccmux", count: 4 });
     expect(frame).toContain("ccmux");
     expect(frame).toContain("(4)");
+  });
+
+  it("fills the rest of the line with a rule, one space after the label", async () => {
+    // The header is the group divider: no separate rule line above it.
+    const frame = await renderHeader({ label: "ccmux", count: 4 });
+    const line = frame.split("\n")[0];
+    expect(line).toMatch(/^ ▾ ccmux \(4\) ─+ $/);
+    // width 80, one cell of padding each side
+    expect(line.trimEnd().length).toBe(79);
+  });
+
+  it("ends the rule at the box edge whatever width budget the caller passed", async () => {
+    // `width` only budgets the label; the rule is sized by layout, so a
+    // caller whose estimate drifts from the real box neither stops short
+    // nor overflows.
+    for (const width of [40, 120]) {
+      const frame = await renderHeader({ label: "ccmux", count: 4, width });
+      const [line, next] = frame.split("\n");
+      expect(line).toMatch(/^ ▾ ccmux \(4\) ─+ $/);
+      expect(line.trimEnd().length).toBe(79);
+      expect(next.trim()).toBe("");
+      setup.renderer.destroy();
+    }
+  });
+
+  it("keeps a label with a wide glyph on one line", async () => {
+    // `⚠` is one cell to displayWidth and two to the renderer; the extra
+    // column must come out of the rule, not wrap the count off the line.
+    const frame = await renderHeader({ label: "⚠ build", count: 4 });
+    const [line, next] = frame.split("\n");
+    expect(line).toMatch(/\(4\) ─+ $/);
+    expect(next.trim()).toBe("");
+  });
+
+  it("drops the rule when the label leaves no room for it", async () => {
+    const frame = await renderHeader({ label: "x".repeat(200), count: 4 });
+    expect(frame.split("\n")[0]).not.toContain("─");
   });
 
   it("shows status dots when collapsed", async () => {
