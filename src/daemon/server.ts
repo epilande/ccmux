@@ -89,7 +89,9 @@ import {
   lookupIssue,
   lookupPR,
   preparePRBranch,
+  runGh,
   seedPrompt,
+  type GhRun,
   type PRSource,
 } from "./gh-spawn-source";
 import { getAgents, type AgentDef } from "../lib/agents";
@@ -143,7 +145,22 @@ import {
   type PruneScan,
   type WorktreeSession,
 } from "./worktree-prune";
-import { fetchPrune, listWorktrees, normalizePath } from "./worktree-git";
+import {
+  fetchPrune,
+  listWorktrees,
+  normalizePath,
+  runMetadataGit,
+  type GitRun,
+} from "./worktree-git";
+import { readWorktreeDetail } from "./worktree-detail";
+import {
+  Limiter,
+  readIssueDetail,
+  readPRDetail,
+  type DetailAnswer,
+  type IssueDetail,
+  type PRDetail,
+} from "./source-detail";
 import { RepoFactsCache, wireRepoFacts } from "./repo-facts";
 import {
   countRepoWorktrees,
@@ -433,6 +450,17 @@ type PRListAnswer = Awaited<ReturnType<typeof listOpenPRs>>;
 
 /** What one `listOpenIssues` call answers with. */
 type IssueListAnswer = Awaited<ReturnType<typeof listOpenIssues>>;
+
+/**
+ * How many per-item answers each detail cache (`GET /prs/detail`,
+ * `GET /issues/detail`) keeps. Keys are `<root>#<n>` and grow with every row
+ * a cursor settles on, so unlike the per-repo caches this one needs a bound.
+ */
+const DETAIL_CACHE_MAX = 200;
+
+/** `gh ... view` detail reads running at once, across both detail routes and
+ *  every client. The rest wait their turn. */
+const DETAIL_GH_CONCURRENCY = 3;
 
 /** How many repos one source list asks about at once, matching
  *  `worktree-list.ts`. Shared by `GET /prs` and `GET /issues`. */
@@ -730,6 +758,27 @@ export class DaemonServer {
     ttlMs: SOURCE_LIST_TTL_MS,
     failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
   });
+  /**
+   * One PR's or issue's detail, keyed `<root>#<n>`, on the list TTLs so a
+   * row's body and its list entry go stale together. Bounded, see
+   * {@link DETAIL_CACHE_MAX}. A refresh bypasses a fresh success exactly as
+   * it does on `/prs`, so the Start view's `R` re-reads both.
+   */
+  private prDetailCache = new RepoAnswerCache<PRDetail>({
+    ttlMs: SOURCE_LIST_TTL_MS,
+    failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
+    maxEntries: DETAIL_CACHE_MAX,
+  });
+  private issueDetailCache = new RepoAnswerCache<IssueDetail>({
+    ttlMs: SOURCE_LIST_TTL_MS,
+    failureTtlMs: SOURCE_LIST_FAILURE_TTL_MS,
+    maxEntries: DETAIL_CACHE_MAX,
+  });
+  private detailLimiter = new Limiter(DETAIL_GH_CONCURRENCY);
+  /** The detail routes' runners: plain fields, so a test can stub them the
+   *  way it stubs `homeDir`. */
+  private detailGh: GhRun = runGh;
+  private detailGit: GitRun = runMetadataGit;
   /**
    * Home directory, for the `project` $HOME-boundary guard (S4). A plain
    * field rather than a constructor param, so a test can stub it directly
@@ -1435,6 +1484,14 @@ export class DaemonServer {
       return await this.handleIssueList(url, corsHeaders);
     }
 
+    if (path === "/prs/detail" && req.method === "GET") {
+      return await this.handleSourceDetail("pr", url, corsHeaders);
+    }
+
+    if (path === "/issues/detail" && req.method === "GET") {
+      return await this.handleSourceDetail("issue", url, corsHeaders);
+    }
+
     if (
       (path === "/repo-facts" && req.method === "GET") ||
       (path === "/repo-facts/refresh" && req.method === "POST")
@@ -1465,6 +1522,10 @@ export class DaemonServer {
 
     if (path === "/worktrees/counts" && req.method === "GET") {
       return await this.handleWorktreeCounts(url, corsHeaders);
+    }
+
+    if (path === "/worktrees/detail" && req.method === "GET") {
+      return await this.handleWorktreeDetail(url, corsHeaders);
     }
 
     if (path === "/worktrees/prune-candidates" && req.method === "GET") {
@@ -2101,6 +2162,107 @@ export class DaemonServer {
     return this.issueListCache.answer(repoRoot, refresh, () =>
       listOpenIssues(repoRoot),
     );
+  }
+
+  /**
+   * `GET /prs/detail?repo=<path>&number=N` and `GET /issues/detail?...`: one
+   * PR's or issue's body (and for a PR, its checks by name and its size),
+   * for the Start view's preview.
+   *
+   * `repo` resolves to its main checkout the way `/prs?repo=` does, so a
+   * worktree path and its main checkout share one cache entry. A `gh`
+   * failure is `{ ok: false, error }` inside a 200, as on `/prs`: the
+   * preview shows it where the body would be. Only a malformed request is a
+   * 400.
+   */
+  private async handleSourceDetail(
+    kind: "pr" | "issue",
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const repo = url.searchParams.get("repo");
+    const raw = url.searchParams.get("number") ?? "";
+    const number = /^[1-9]\d{0,9}$/.test(raw) ? Number(raw) : NaN;
+    if (!repo || !Number.isSafeInteger(number)) {
+      return Response.json(
+        { error: "repo and a positive integer number are required" },
+        { status: 400, headers },
+      );
+    }
+    try {
+      const root = await this.resolveMainRepoRoot(repo);
+      if (!root) {
+        return Response.json(
+          { error: `not a git repository: ${repo}` },
+          { status: 400, headers },
+        );
+      }
+      const refresh = url.searchParams.get("refresh") === "1";
+      const key = `${root}#${number}`;
+      const run = this.detailGh;
+      const result =
+        kind === "pr"
+          ? await this.prDetailCache.answer(key, refresh, () =>
+              this.detailLimiter.run(() => readPRDetail(root, number, run)),
+            )
+          : await this.issueDetailCache.answer(key, refresh, () =>
+              this.detailLimiter.run(() => readIssueDetail(root, number, run)),
+            );
+      const body: DetailAnswer<PRDetail | IssueDetail> = result.ok
+        ? { ok: true, detail: result.value }
+        : { ok: false, error: result.error };
+      return Response.json(body, { headers });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to read ${kind} detail: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
+  }
+
+  /**
+   * `GET /worktrees/detail?path=<abs>`: one worktree's uncommitted changes
+   * and recent commits, for the Worktrees view's preview.
+   *
+   * The path must be a worktree its own repo has registered (compared by
+   * realpath), or the request is refused: this runs git in whatever
+   * directory it is handed, and the panel only ever asks about rows the
+   * listing gave it. Local only, so it is not cached.
+   */
+  private async handleWorktreeDetail(
+    url: URL,
+    headers: Record<string, string>,
+  ): Promise<Response> {
+    const path = url.searchParams.get("path");
+    if (!path || !path.startsWith("/")) {
+      return Response.json(
+        { error: "an absolute path is required" },
+        { status: 400, headers },
+      );
+    }
+    try {
+      const root = await this.resolveMainRepoRoot(path);
+      const wanted = normalizePath(path);
+      const registered = root
+        ? (await listWorktrees(root)).some(
+            (entry) => !entry.bare && normalizePath(entry.path) === wanted,
+          )
+        : false;
+      if (!registered) {
+        return Response.json(
+          { error: `not a registered worktree: ${path}` },
+          { status: 400, headers },
+        );
+      }
+      return Response.json(await readWorktreeDetail(wanted, this.detailGit), {
+        headers,
+      });
+    } catch (err) {
+      return Response.json(
+        { error: `Failed to read worktree: ${errorMessage(err)}` },
+        { status: 500, headers },
+      );
+    }
   }
 
   private async handlePruneCandidates(

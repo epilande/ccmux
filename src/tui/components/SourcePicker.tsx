@@ -51,6 +51,7 @@ import {
   type SourceRowCells,
 } from "./source-picker-rows";
 import { Text } from "./Text";
+import { SourcePreview } from "./SourcePreview";
 
 /** Start is one filterable list across PRs and issues. Enter starts work or
  * opens the checkout already holding the source. `/` gives the input the
@@ -88,11 +89,17 @@ export interface SourcePickerProps {
   memory?: ViewMemory;
   onRemember?: (memory: ViewMemory) => void;
   embedded?: boolean;
-  /** Whether `d`/`D` review is installed, for the footer's hint. */
-  reviewable?: boolean;
   /** A dialog opened from this view sits over it: the view stays, dimmed,
    *  so it is still the view the user is in. */
   dimmed?: boolean;
+  /** The preview beside the list, as App's `P` and `Alt+H/L` set it. Never
+   *  drawn in the sidebar's compact overlay. */
+  showPreview?: boolean;
+  previewWidth?: number;
+  /** App owns focus (`Tab`) and its scroll keys; this only colors the
+   *  frame and hands App the scrollbox to scroll. */
+  previewFocused?: boolean;
+  onPreviewScrollbox?: (ref: ScrollBoxRenderable) => void;
   enabled?: boolean;
   onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
   onScope?: (repo: string | null) => void;
@@ -149,6 +156,9 @@ export interface SourcePickerProps {
 
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
+/** The column between the list and the preview's border, so a row's
+ *  right-aligned age cell does not touch it. */
+const PREVIEW_GAP = 1;
 
 /** One row in both overlays and the persistent Start view. */
 export function sourceRowHeight(_row: SourceRow, _compact = false): number {
@@ -259,8 +269,21 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const width = () => dims().width;
   /** The box less its border and padding. */
   const contentWidth = () => Math.max(8, width() - (props.embedded ? 2 : 4));
+  const previewShown = () => !!props.showPreview && !props.compact;
+  const previewWidth = () => props.previewWidth ?? 50;
+  /** What the list may spend beside the preview, by the session list's own
+   *  formula. The footer still spans the whole view (`contentWidth`). */
+  const listArea = () =>
+    previewShown()
+      ? Math.max(
+          8,
+          Math.floor((width() * (100 - previewWidth())) / 100) - PREVIEW_GAP,
+        )
+      : contentWidth();
   /** Inside the scrollbox, which keeps a column for its bar. */
-  const listWidth = () => Math.max(4, contentWidth() - SCROLLBAR_GUTTER);
+  const listWidth = () => Math.max(4, listArea() - SCROLLBAR_GUTTER);
+  /** Bumped by `R`, so the preview re-reads past its caches too. */
+  const [detailRefresh, setDetailRefresh] = createSignal(0);
 
   function worktreesUrl(): URL {
     const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
@@ -697,6 +720,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         if (key === "R" || event.shift) {
           props.onRefresh?.();
           load({ refresh: true });
+          setDetailRefresh((n) => n + 1);
         } else {
           const path = cursorRow()?.checkedOutPath;
           const session = worktrees()
@@ -860,7 +884,6 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         view="start"
         width={contentWidth()}
         sidebar={props.compact}
-        reviewable={props.reviewable}
         note={note() ?? sourceNotice() ?? undefined}
         noteColor={note() ? theme.yellow : theme.subtext}
       />
@@ -1073,70 +1096,95 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         <box
           flexGrow={1}
           flexDirection="column"
-          paddingRight={props.embedded ? 1 : 0}
+          paddingRight={props.embedded && !previewShown() ? 1 : 0}
         >
           <Show when={phase() === "error"}>
             <box paddingTop={1} flexDirection="column">
               <Text fg={theme.red}>
-                {truncateText(error() ?? "", contentWidth())}
+                {truncateText(error() ?? "", listArea())}
               </Text>
               <Text fg={theme.subtext}>R retry · q back</Text>
             </box>
           </Show>
 
           <Show when={phase() !== "error"}>
-            <Show
-              when={hasRows(visible())}
-              fallback={
-                <box paddingTop={1}>
-                  <Text fg={emptyState().fg}>
-                    {truncateText(emptyState().text, contentWidth())}
-                  </Text>
-                </box>
-              }
-            >
-              <scrollbox
-                flexGrow={1}
-                ref={(r: ScrollBoxRenderable) => {
-                  listBox = r;
-                  const bump = () => setScrollboxLayout((v) => v + 1);
-                  r.viewport.on("resize", bump);
-                  r.content.on("resize", bump);
-                }}
-              >
-                <For
-                  each={visible().filter(
-                    (r) => r.prs.length + r.issues.length > 0,
-                  )}
-                >
-                  {(repo) => (
-                    <box flexDirection="column">
-                      <GroupHeader
-                        label={repo.repoName}
-                        count={repo.prs.length + repo.issues.length}
-                        width={listWidth()}
-                        // Rows here have no right padding, so neither does
-                        // the header: its rule ends where they do.
-                        flushRight
-                        collapsed={collapsed().has(repo.repoRoot)}
-                        selected={headerRepo()?.repoRoot === repo.repoRoot}
-                        members={[]}
-                        onActivate={() => {
-                          if (props.enabled === false) return;
-                          setCursorKey(`repo:${repo.repoRoot}`);
-                          toggleGroup(repo.repoRoot);
-                        }}
-                      />
-                      <Show when={!collapsed().has(repo.repoRoot)}>
-                        <For each={[...repo.prs, ...repo.issues]}>
-                          {renderRow}
-                        </For>
-                      </Show>
+            {/* The preview sits OUTSIDE the rows' gate: `R` empties the lists
+                while they reload, and a preview inside it would unmount,
+                taking its loader, cache and pending refresh with it. */}
+            <box flexDirection="row" flexGrow={1}>
+              <box flexDirection="column" flexGrow={1}>
+                <Show
+                  when={hasRows(visible())}
+                  fallback={
+                    <box paddingTop={1}>
+                      <Text fg={emptyState().fg}>
+                        {truncateText(emptyState().text, listArea())}
+                      </Text>
                     </box>
-                  )}
-                </For>
-              </scrollbox>
-            </Show>
+                  }
+                >
+                  <scrollbox
+                    flexGrow={1}
+                    paddingRight={previewShown() ? PREVIEW_GAP : 0}
+                    ref={(r: ScrollBoxRenderable) => {
+                      listBox = r;
+                      const bump = () => setScrollboxLayout((v) => v + 1);
+                      r.viewport.on("resize", bump);
+                      r.content.on("resize", bump);
+                    }}
+                  >
+                    <For
+                      each={visible().filter(
+                        (r) => r.prs.length + r.issues.length > 0,
+                      )}
+                    >
+                      {(repo) => (
+                        <box flexDirection="column">
+                          <GroupHeader
+                            label={repo.repoName}
+                            count={repo.prs.length + repo.issues.length}
+                            width={listWidth()}
+                            // Rows here have no right padding, so neither does
+                            // the header: its rule ends where they do.
+                            flushRight
+                            collapsed={collapsed().has(repo.repoRoot)}
+                            selected={headerRepo()?.repoRoot === repo.repoRoot}
+                            members={[]}
+                            onActivate={() => {
+                              if (props.enabled === false) return;
+                              setCursorKey(`repo:${repo.repoRoot}`);
+                              toggleGroup(repo.repoRoot);
+                            }}
+                          />
+                          <Show when={!collapsed().has(repo.repoRoot)}>
+                            <For each={[...repo.prs, ...repo.issues]}>
+                              {renderRow}
+                            </For>
+                          </Show>
+                        </box>
+                      )}
+                    </For>
+                  </scrollbox>
+                </Show>
+              </box>
+              <Show when={previewShown()}>
+                <SourcePreview
+                  row={cursorRow()}
+                  age={(() => {
+                    const row = cursorRow();
+                    return row
+                      ? sourceAge(
+                          (row.kind === "pr" ? row.pr : row.issue).createdAt,
+                        )
+                      : "";
+                  })()}
+                  width={previewWidth()}
+                  focused={props.previewFocused}
+                  onScrollboxRef={(ref) => props.onPreviewScrollbox?.(ref)}
+                  refreshKey={detailRefresh()}
+                />
+              </Show>
+            </box>
           </Show>
         </box>
 

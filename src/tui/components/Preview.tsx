@@ -15,6 +15,10 @@ import type {
   ScrollBoxRenderable,
 } from "@opentui/core";
 import type { EnrichedSession, SubagentState } from "../../types";
+import type { BranchPR } from "../../types/session";
+import type { WireRepoFacts } from "../../daemon/repo-facts";
+import { badgeColor, badgeText, branchPRs } from "../utils/repo-facts";
+import { fitSegments, type RowSegment } from "./row-segments";
 import type { IconStyle } from "../../lib/icons";
 import { capturePane } from "../utils/tmux";
 import { isSameServerCached } from "../utils/server-guard";
@@ -39,6 +43,7 @@ import {
   truncateText,
 } from "../utils/format";
 import { Text } from "./Text";
+import { PreviewFrame, previewContentWidth } from "./PreviewFrame";
 
 /**
  * One row of the preview's Agents section: activity spinner, the agent's
@@ -221,8 +226,69 @@ const CROSS_SERVER = Symbol("ccmux.preview.cross-server");
  */
 const SELECTION_CAPTURE_DEBOUNCE_MS = 80;
 
+/**
+ * The preview header's metadata row, as colored segments in reading order:
+ * `project:branch (worktree) · PR #206 ✓ · 2 agents · version · target · age`.
+ *
+ * The PR badge and the agent count sit right after the branch so a narrow
+ * preview cuts the version, target and age first; the branch is capped so
+ * a long one cannot push them off either. Pure, and fitted to `width`
+ * as a whole (OpenTUI wraps rather than clips).
+ */
+export function metadataSegments(
+  session: EnrichedSession,
+  prs: BranchPR[],
+  width: number,
+): RowSegment[] {
+  const sep = (text: string) => ` · ${text}`;
+  const lead: RowSegment[] = [];
+  const pr = prs.map((p) => badgeText(p)).join(" ");
+  if (pr) lead.push({ text: pr, fg: badgeColor(prs) });
+  const agents = session.subagents?.length ?? 0;
+  if (agents)
+    lead.push({
+      text: `${agents} agent${agents === 1 ? "" : "s"}`,
+      fg: theme.peach,
+    });
+  const tail: RowSegment[] = [];
+  if (session.version)
+    tail.push({ text: formatVersion(session.version), fg: theme.overlay });
+  if (session.tmuxTarget)
+    tail.push({ text: session.tmuxTarget, fg: theme.overlay });
+  if (session.lastUserInputAt)
+    tail.push({
+      text: formatRelativeTime(new Date(session.lastUserInputAt)),
+      fg: theme.overlay,
+    });
+
+  const segments: RowSegment[] = [];
+  if (session.gitBranch) {
+    const branch = session.isWorktree
+      ? `${session.project}:${session.gitBranch} (worktree)`
+      : `${session.project}:${session.gitBranch}`;
+    const leadWidth = lead.reduce(
+      (n, segment) => n + displayWidth(sep(segment.text)),
+      0,
+    );
+    segments.push({
+      text: truncateText(branch, Math.max(8, width - leadWidth)),
+      fg: theme.subtext,
+    });
+  }
+  for (const segment of [...lead, ...tail])
+    segments.push({
+      ...segment,
+      text: segments.length ? sep(segment.text) : segment.text,
+    });
+  return fitSegments(segments, width);
+}
+
 interface PreviewProps {
   session: EnrichedSession | null;
+  /** Repo facts, for the header's PR badge (the list's own answer). */
+  facts?: WireRepoFacts[];
+  /** `headerFacts.pr`: false hides PR badges everywhere, here included. */
+  headerPR?: boolean;
   onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
   iconStyle?: IconStyle;
   width: number;
@@ -239,7 +305,7 @@ interface PreviewProps {
 export const Preview: Component<PreviewProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
-    Math.max(1, Math.floor((dims().width * props.width) / 100) - 3),
+    previewContentWidth(dims().width, props.width),
   );
   const [content, setContent] = createSignal<StyledText | null>(null);
   let textRef: TextRenderable | undefined;
@@ -441,35 +507,15 @@ export const Preview: Component<PreviewProps> = (props) => {
    */
   const title = () => props.session?.summary ?? null;
 
-  const metadataLine = () => {
+  const metadata = createMemo(() => {
     const s = props.session;
-    if (!s) return "";
-    const parts: string[] = [];
-    if (s.gitBranch) {
-      const branchDisplay = s.isWorktree
-        ? `${s.project}:${s.gitBranch} (worktree)`
-        : `${s.project}:${s.gitBranch}`;
-      parts.push(branchDisplay);
-    }
-    if (s.version) parts.push(formatVersion(s.version));
-    if (s.tmuxTarget) parts.push(s.tmuxTarget);
-    if (s.lastUserInputAt) {
-      parts.push(formatRelativeTime(new Date(s.lastUserInputAt)));
-    }
-    return parts.join(" · ");
-  };
+    if (!s) return [];
+    const prs = props.headerPR === false ? [] : branchPRs(s, props.facts ?? []);
+    return metadataSegments(s, prs, separatorWidth());
+  });
 
   return (
-    <box
-      flexDirection="column"
-      width={`${props.width}%`}
-      height="100%"
-      border={["left"]}
-      borderStyle="single"
-      borderColor={props.focused ? theme.mauve : theme.border}
-      paddingLeft={1}
-      paddingRight={1}
-    >
+    <PreviewFrame width={props.width} focused={props.focused}>
       <Show
         when={props.session}
         fallback={<Text fg={theme.overlay}>Select a session to preview</Text>}
@@ -512,10 +558,14 @@ export const Preview: Component<PreviewProps> = (props) => {
               )}
             </Text>
           </box>
-          <box height={1} flexShrink={0}>
-            <Text fg={theme.overlay} wrapMode="none">
-              {truncateText(metadataLine(), separatorWidth())}
-            </Text>
+          <box height={1} flexShrink={0} flexDirection="row">
+            <For each={metadata()}>
+              {(segment) => (
+                <Text fg={segment.fg} wrapMode="none">
+                  {segment.text}
+                </Text>
+              )}
+            </For>
           </box>
           <box height={1} flexShrink={0}>
             <Text fg={theme.border}>{"─".repeat(separatorWidth())}</Text>
@@ -570,6 +620,6 @@ export const Preview: Component<PreviewProps> = (props) => {
           </Show>
         </Show>
       </Show>
-    </box>
+    </PreviewFrame>
   );
 };

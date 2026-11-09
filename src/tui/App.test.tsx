@@ -692,6 +692,199 @@ describe("App", () => {
     expect(frame).not.toContain("Select a session to preview");
   });
 
+  it("runs the palette's Toggle preview through the P key's own path", async () => {
+    await renderApp();
+    expect(setup.captureCharFrame()).not.toContain(
+      "Select a session to preview",
+    );
+
+    setup.mockInput.pressKey(":");
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Type a command");
+
+    for (const ch of "toggle pre") setup.mockInput.pressKey(ch);
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Toggle preview");
+    setup.mockInput.pressEnter();
+    // The palette closes first; the key it stands for is replayed on the
+    // next microtask, through the same keyboard handler a real `P` reaches.
+    await Promise.resolve();
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Select a session to preview");
+    expect(frame).not.toContain("Toggle preview");
+    // The same debounced write a `P` makes.
+    await Bun.sleep(350);
+    expect(uiStateWrites).toContainEqual({ showPreview: true });
+  });
+
+  describe("the : palette", () => {
+    const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+    const type = async (text: string) => {
+      for (const ch of text) setup.mockInput.pressKey(ch);
+      await setup.renderOnce();
+    };
+    const run = async (query: string) => {
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      await type(query);
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+    };
+    const oneSession = (overrides: Record<string, unknown> = {}) => {
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+            ...overrides,
+          }),
+        ],
+        null,
+      );
+    };
+
+    it("opens on : and closes on Esc without running anything", async () => {
+      await renderApp();
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Type a command");
+      expect(setup.captureCharFrame()).toContain("enter run");
+
+      deliverEscape(setup.renderer);
+      await settle(30);
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Type a command");
+      // Esc closed the palette; it did not also quit or go back.
+      expect(frame).toContain("Sessions (0)");
+    });
+
+    it("runs a palette-only command: Group by directory", async () => {
+      await renderApp(120, 20, { groupBy: "project" });
+      await run("group by dir");
+      await settle(350);
+      expect(uiStateWrites).toContainEqual(
+        expect.objectContaining({ groupBy: "cwd" }),
+      );
+    });
+
+    it("is not offered in the sidebar", async () => {
+      await renderApp(30, 20, { sidebar: true });
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Type a command");
+    });
+
+    it("copies the agent's own session id", async () => {
+      const copied: string[] = [];
+      const copySpy = spyOn(clipboard, "copyToClipboard").mockImplementation(
+        async (text: string) => {
+          copied.push(text);
+          return { ok: true, via: "command" };
+        },
+      );
+      try {
+        await renderApp(120, 20, { groupBy: "none" });
+        oneSession({ nativeSessionId: "native-123" });
+        await setup.renderOnce();
+        await run("copy session id");
+        expect(copied).toEqual(["native-123"]);
+      } finally {
+        copySpy.mockRestore();
+      }
+    });
+
+    // The test renderer never finished a real terminal setup, so its own
+    // suspend() rejects, which OpenTUI 0.8's awaited suspend now reports. A
+    // real terminal suspends; stand in for one.
+    const stubSuspend = () => {
+      const suspend = spyOn(setup.renderer, "suspend").mockImplementation(
+        async () => {},
+      );
+      const resume = spyOn(setup.renderer, "resume").mockImplementation(
+        async () => {},
+      );
+      return { suspend, resume };
+    };
+
+    it("says so when the pager exits nonzero", async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL) =>
+        String(url).includes("/transcript")
+          ? Response.json({
+              source: "transcript",
+              turns: [{ role: "assistant", text: "fixed it" }],
+            })
+          : Response.json({})) as unknown as typeof fetch;
+      try {
+        await renderApp(120, 20, {
+          groupBy: "none",
+          pager: { env: { PAGER: "nope" }, spawn: async () => 127 },
+        });
+        stubSuspend();
+        oneSession();
+        await setup.renderOnce();
+        await run("open transcript");
+        await settle(20);
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("nope exited 127");
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+
+    it("pipes the session's rendered turns to the pager", async () => {
+      const original = globalThis.fetch;
+      const asked: string[] = [];
+      globalThis.fetch = (async (url: string | URL) => {
+        const href = String(url);
+        if (href.includes("/transcript")) {
+          asked.push(href);
+          return Response.json({
+            source: "transcript",
+            turns: [
+              { role: "user", text: "fix the bug" },
+              { role: "assistant", text: "fixed it" },
+            ],
+          });
+        }
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      const piped: { argv: string[]; text: string }[] = [];
+      try {
+        await renderApp(120, 20, {
+          groupBy: "none",
+          pager: {
+            env: {},
+            spawn: async (argv: string[], text: string) => {
+              piped.push({ argv, text });
+              return 0;
+            },
+          },
+        });
+        const terminal = stubSuspend();
+        oneSession();
+        await setup.renderOnce();
+        await run("open transcript");
+        await settle(20);
+        expect(asked[0]).toContain("/sessions/s1/transcript");
+        expect(piped).toHaveLength(1);
+        expect(piped[0]!.argv).toEqual(["less", "+G"]);
+        expect(piped[0]!.text).toContain("fix the bug");
+        expect(piped[0]!.text).toContain("fixed it");
+        expect(terminal.suspend).toHaveBeenCalledTimes(1);
+        expect(terminal.resume).toHaveBeenCalledTimes(1);
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  });
+
   it("updates session count in header after SSE init", async () => {
     await renderApp();
     expect(setup.captureCharFrame()).toContain("Sessions (0)");
@@ -9994,6 +10187,155 @@ describe("repo scope across views", () => {
   });
 });
 
+describe("previews in every view", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+  const row = {
+    path: "/repo/wt/parking",
+    name: "parking",
+    repoRoot: "/repo",
+    repoName: "repo",
+    branch: "feat/parking",
+    tip: "sha-parking",
+    detached: false,
+    isMain: false,
+    locked: false,
+    dirty: { dirty: true, modified: 1, untracked: 0 },
+    upstream: null,
+    sessions: [],
+  };
+  const pr = {
+    number: 206,
+    title: "park the renderer",
+    url: "https://github.com/o/r/pull/206",
+    author: "epilande",
+    isDraft: false,
+    reviewDecision: null,
+    ciStatus: "none",
+    headRefName: "feat/other",
+    headRefOid: "sha-other",
+    labels: [],
+  };
+  let original: typeof fetch;
+  const asked: string[] = [];
+
+  beforeEach(() => {
+    asked.length = 0;
+    original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      asked.push(url.pathname);
+      if (url.pathname === "/worktrees/detail")
+        return Response.json({
+          ok: true,
+          detail: {
+            path: row.path,
+            changes: [{ code: " M", path: "src/park.ts" }],
+            total: 1,
+            truncated: false,
+            commits: [],
+          },
+        });
+      if (url.pathname === "/worktrees/prune-candidates")
+        return Response.json({ candidates: [], skipped: [] });
+      if (url.pathname === "/worktrees")
+        return Response.json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [row] }],
+        });
+      if (url.pathname === "/prs/detail")
+        return Response.json({
+          ok: true,
+          detail: {
+            number: 206,
+            body: "Parks the renderer while hidden.",
+            truncated: false,
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            checks: [],
+          },
+        });
+      if (url.pathname === "/prs")
+        return Response.json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: [pr] }],
+          errors: [],
+        });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const frame = async (ms = 0) => {
+    await settle(ms);
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  };
+  const footer = (text: string) => text.split("\n").at(-2) ?? "";
+
+  it("previews the worktree under the cursor and scrolls it on Tab", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    let text = await frame(250);
+    expect(text).toContain("Changes (1)");
+    expect(text).toContain("src/park.ts");
+    // The Sessions preview is not left running under the panel.
+    expect(text).not.toContain("Select a session to preview");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+    // Focused, `x` reaches neither the panel nor a pane.
+    setup.mockInput.pressKey("x");
+    text = await frame();
+    expect(text).not.toContain("Remove");
+    expect(footer(text)).toContain("j/k scroll");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("x remove");
+  });
+
+  it("previews the PR under the cursor in Start", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    await frame(50);
+    setup.mockInput.pressKey("l");
+    let text = await frame(400);
+    expect(text).toContain("#206 park the renderer");
+    expect(text).toContain("Parks the renderer while hidden.");
+    expect(asked).toContain("/prs/detail");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+  });
+
+  it("toggles the preview with P from a panel", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    expect(await frame(250)).toContain("Changes (1)");
+    setup.mockInput.pressKey("P");
+    expect(await frame()).not.toContain("Changes (1)");
+  });
+
+  it("leaves focus behind when a view-strip click changes views", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    await frame(250);
+    setup.mockInput.pressKey("\t");
+    let text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+    const strip = text.split("\n")[0]!;
+    await setup.mockMouse.click(strip.indexOf("Start") + 1, 0);
+    text = await frame(50);
+    expect(footer(text)).not.toContain("j/k scroll");
+    expect(footer(text)).toContain("q back");
+  });
+});
+
 describe("one footer across views", () => {
   it("draws the same registry-built line, pinned four included, on every view", async () => {
     const original = globalThis.fetch;
@@ -10021,7 +10363,7 @@ describe("one footer across views", () => {
       for (const text of ["j/k nav", "h/l views", "s scope", "? help"])
         expect(sessions).toContain(text);
       expect(sessions).toContain("q quit");
-      for (const text of ["P preview", "r restart", "x kill"])
+      for (const text of [": more", "r restart", "x kill"])
         expect(sessions).toContain(text);
       setup.mockInput.pressKey("l");
       const worktrees = await footer();

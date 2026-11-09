@@ -234,3 +234,58 @@ describe("RepoAnswerCache", () => {
     expect(subject.entries.get("/repo")?.done?.result).toEqual(ok("second"));
   });
 });
+
+describe("RepoAnswerCache maxEntries", () => {
+  const bounded = (maxEntries: number) =>
+    new RepoAnswerCache<string>({
+      ttlMs: TTL,
+      failureTtlMs: FAILURE_TTL,
+      maxEntries,
+    });
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("evicts the oldest settled entries past the cap", async () => {
+    const subject = bounded(2);
+    for (const key of ["a", "b", "c"]) {
+      await subject.answer(key, false, () => Promise.resolve(ok(key)));
+      await settle();
+    }
+    expect([...subject.entries.keys()]).toEqual(["b", "c"]);
+  });
+
+  it("counts a re-asked key as the newest", async () => {
+    const subject = bounded(2);
+    await subject.answer("a", false, () => Promise.resolve(ok("a")));
+    await subject.answer("b", false, () => Promise.resolve(ok("b")));
+    await settle();
+    // Refresh `a`: it is re-fetched, so it is now the newest.
+    await subject.answer("a", true, () => Promise.resolve(ok("a2")));
+    await settle();
+    await subject.answer("c", false, () => Promise.resolve(ok("c")));
+    await settle();
+    expect([...subject.entries.keys()]).toEqual(["a", "c"]);
+  });
+
+  it("never evicts a call still in flight, which is the lock", async () => {
+    const subject = bounded(1);
+    let finish: (result: SourceResult<string>) => void = () => {};
+    const slow = new Promise<SourceResult<string>>((resolve) => {
+      finish = resolve;
+    });
+    const first = subject.answer("a", false, () => slow);
+    await subject.answer("b", false, () => Promise.resolve(ok("b")));
+    await settle();
+    // Over the cap, but `a` is still running: `b` went instead.
+    expect(subject.entries.has("a")).toBe(true);
+    // A second caller for `a` joins rather than spawning another call.
+    let calls = 0;
+    const joined = subject.answer("a", false, () => {
+      calls += 1;
+      return Promise.resolve(ok("dup"));
+    });
+    finish(ok("a"));
+    expect(await first).toEqual(ok("a"));
+    expect(await joined).toEqual(ok("a"));
+    expect(calls).toBe(0);
+  });
+});

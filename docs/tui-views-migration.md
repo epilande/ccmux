@@ -6,7 +6,7 @@ The picker now has three persistent views and starts with all repositories in sc
 | ------------------------------------------- | ------------------------------------------------------------- |
 | Sessions: `h`/`l` or Space collapse groups  | Enter on a header collapses it; `zm`/`zr` collapse/expand all |
 | Worktrees: `h`/`l` switch Worktrees/PR tabs | Cycle Sessions/Worktrees/Start; PRs and issues share Start    |
-| Worktrees: Tab changes scope                | `s` changes scope; preview focus stays on Sessions            |
+| Worktrees: Tab changes scope                | `s` changes scope; Tab focuses the preview in every view      |
 | Worktrees/Source picker: `r` refreshes      | `R` refreshes; `r` restarts the attached session              |
 | Worktrees: `n` opens the Source picker      | `N` opens Start; `n` creates a session here                   |
 | Worktrees: `d` reviews the branch           | `d` reviews uncommitted work; `D` reviews branch vs base      |
@@ -18,4 +18,6 @@ Space marks a row or a header's group in every view. `a` marks all visible rows;
 
 Start also keeps one-line rows. Compact `CI ✓`/`CI ✗`/`CI ◐` marks show checks; `changes` means changes requested in review. Draft, labels and branch follow, with author and age where space permits. The sidebar now includes the index so marks remain visible. Session row identity and the needs attention band remain available in every `b` grouping.
 
-Per-view previews and the `:` palette are coming in PR 3.
+Every view has a preview beside its list (`P` toggles it; it opens on its own at 140+ columns). `Tab` focuses it: in Sessions keys go to the pane, in Worktrees and Start focus scrolls (`j`/`k`, `Ctrl+D`/`Ctrl+U`, `g`/`G`). `:` opens a fuzzy palette over every action in the current view, including the few with no key (group by a specific mode, copy the session id, open the transcript in `$PAGER`).
+
+The footer now teaches only the everyday keys and ends in `: more`. `N`, `W`, `R`, `d`/`D` and `P` are unchanged as keys and listed in `?` and `:`; `space mark` appears on the Worktrees footer only, and `b group:<mode>` stays, at the lowest rank, as the one place the grouping is named.
