@@ -3356,6 +3356,82 @@ describe("store", () => {
       expect(store.selectedSession()?.id).toBe("b");
     });
 
+    it("follows the waiting session out of the band when its wait ends", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+      expect(store.selectedSession()?.id).toBe("b");
+
+      store.actions.updateSession(
+        createMockSession({ id: "b", project: "beta", status: "idle" }),
+      );
+
+      expect(
+        store
+          .flatItems()
+          .some(
+            (i) => i.type === "header" && i.groupKey === NEEDS_YOU_GROUP_KEY,
+          ),
+      ).toBe(false);
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedFlatItem()).toMatchObject({ type: "session" });
+    });
+
+    it("follows it through a full snapshot too", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "idle" }),
+      ]);
+
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("stays on the session it opened on when another starts waiting", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({
+          id: "b",
+          project: "beta",
+          status: "waiting",
+          statusChangedAt: "2024-01-15T12:00:00Z",
+        }),
+      ]);
+
+      store.actions.addSession(
+        createMockSession({
+          id: "c",
+          project: "gamma",
+          status: "waiting",
+          // Waiting longer, so the band sorts it ahead of "b".
+          statusChangedAt: "2024-01-15T11:00:00Z",
+        }),
+      );
+
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("leaves the top-row fallback unpinned outside the band", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+      ]);
+      store.actions.updateSession(
+        createMockSession({ id: "a", project: "alpha", status: "working" }),
+      );
+
+      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedIndex()).toBe(0);
+    });
+
     it("stays on a band with nobody in it, since the next row is a header", () => {
       const store = createTUIStore({ groupBy: "project" });
       store.actions.setSessions([
