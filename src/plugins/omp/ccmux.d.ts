@@ -13,6 +13,8 @@ export interface MakeExtensionOptions {
 
 export interface OmpExtensionContext {
   cwd: string;
+  agent?: { kind: "main" | "sub" };
+  isIdle?(): boolean;
   sessionManager: {
     getSessionId(): string | undefined;
     getSessionFile(): string | undefined;
