@@ -98,7 +98,7 @@ const openAgentsWindowSpy = mock(
 const resolveLaunchPaneSpy = mock(async (): Promise<string | null> => "%7");
 
 // Spread the real module so other test files reading exports we don't override
-// (e.g. parseRestoreCandidate) still see the real implementation. mock.module
+// (e.g. parseLaunchPane) still see the real implementation. mock.module
 // is process-wide and persistent across files in Bun.
 const realTmux = await import("./utils/tmux");
 

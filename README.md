@@ -228,6 +228,8 @@ ccmux sidebar --resize --width 30       # Snap every existing sidebar pane to <w
 
 The smart toggle fills gaps when some windows are missing sidebars, and kills all sidebars when every window already has one. New windows automatically get a sidebar, and sidebars snap back to their configured width when a window is resized.
 
+Sidebars start without changing the active pane, so you can keep typing while a new window's sidebar initializes.
+
 Configure defaults so `--toggle` uses your preferred layout:
 
 ```bash

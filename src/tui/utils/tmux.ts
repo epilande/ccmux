@@ -1,8 +1,4 @@
-import {
-  getDaemonUrl,
-  isCcmuxPane,
-  SIDEBAR_PANE_TITLE,
-} from "../../lib/config";
+import { getDaemonUrl, isCcmuxPane } from "../../lib/config";
 import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 import { tmuxArgv, tmuxShellPrefix } from "../../lib/tmux-exec";
 import {
@@ -508,66 +504,6 @@ export function notifyActivePane(paneId: string): Promise<void> {
   })
     .then(() => {})
     .catch(() => {});
-}
-
-/**
- * Pick the sibling pane to restore focus to after the sidebar's OpenTUI
- * capability probes drain. Returns null when:
- *  - we're already the active pane (user-launched, no probe leak to fix)
- *  - no other non-sidebar pane exists in our window (lone sidebar)
- *  - self isn't in the output (race: pane was killed mid-query)
- *
- * Expected line format: "#{pane_id}<sep>#{pane_title}<sep>#{pane_active}".
- * `pane_active` is "1" for the window's active pane, "0" otherwise.
- */
-export function parseRestoreCandidate(
-  output: string,
-  selfPane: string,
-): string | null {
-  let active: string | null = null;
-  let selfSeen = false;
-  let selfIsActive = false;
-
-  for (const line of output.split("\n")) {
-    if (!line) continue;
-    const [paneId, title, isActive] = line.split(PANE_FIELD_SEP);
-    if (!paneId) continue;
-    if (paneId === selfPane) {
-      selfSeen = true;
-      selfIsActive = isActive === "1";
-      continue;
-    }
-    if (title === SIDEBAR_PANE_TITLE) continue;
-    if (isActive === "1") active = paneId;
-  }
-
-  if (!selfSeen || selfIsActive) return null;
-  return active;
-}
-
-/**
- * Find the active sibling pane to restore focus to. Returns null when
- * the dance isn't needed (already focused) or when no candidate exists.
- */
-export async function findRestorePane(): Promise<string | null> {
-  const self = process.env.TMUX_PANE;
-  if (!self) return null;
-
-  try {
-    const proc = Bun.spawn(
-      tmuxArgv(
-        "list-panes",
-        "-F",
-        ["#{pane_id}", "#{pane_title}", "#{pane_active}"].join(PANE_FIELD_SEP),
-      ),
-      { stdout: "pipe", stderr: "ignore" },
-    );
-    const output = await new Response(proc.stdout).text();
-    if ((await proc.exited) !== 0) return null;
-    return parseRestoreCandidate(output, self);
-  } catch {
-    return null;
-  }
 }
 
 /**
