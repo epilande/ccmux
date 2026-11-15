@@ -105,7 +105,10 @@ describe("OMP session state through markers and attention", () => {
     await promise;
   }
 
-  function extension(ctx: OmpExtensionContext) {
+  function extension(
+    ctx: OmpExtensionContext,
+    sleep: (ms: number) => Promise<void> = async () => {},
+  ) {
     const handlers = new Map<
       string,
       (event: unknown, ctx: OmpExtensionContext) => void | Promise<void>
@@ -114,6 +117,7 @@ describe("OMP session state through markers and attention", () => {
       markersDir,
       version: "test",
       now: () => 1_700_000_000_000,
+      sleep,
     })({
       on: (event, handler) => {
         handlers.set(event, handler);
@@ -231,6 +235,70 @@ describe("OMP session state through markers and attention", () => {
       attentionState: "unread",
     });
   });
+
+  it("finishes when prompt cleanup outlasts the first event-loop turn", async () => {
+    let idle = false;
+    const parent = extension(
+      { ...context("parent"), isIdle: () => idle },
+      async () => {
+        idle = true;
+      },
+    );
+    await parent("session_start");
+    await parent("agent_start");
+    await parent("agent_end");
+    expect(manager.getSession(id)).toMatchObject({
+      status: "idle",
+      attentionState: "unread",
+    });
+  });
+
+  it("finishes after an earlier agent_start marker write still in the queue", async () => {
+    const parent = extension({ ...context("parent"), isIdle: () => true });
+    await parent("session_start");
+    await Promise.all([parent("agent_start"), parent("agent_end")]);
+    expect(manager.getSession(id)).toMatchObject({
+      status: "idle",
+      attentionState: "unread",
+    });
+  });
+
+  it.each(["agent_start", "tool_approval_requested", "session_shutdown"])(
+    "does not let deferred completion overwrite %s",
+    async (event) => {
+      let idle = false;
+      const waiting = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const parent = extension(
+        { ...context("parent"), isIdle: () => idle },
+        async () => {
+          waiting.resolve();
+          await release.promise;
+        },
+      );
+      await parent("session_start");
+      await parent("agent_start");
+      const ending = parent("agent_end");
+      await Promise.race([
+        waiting.promise,
+        ending.then(() => {
+          throw new Error("Completion abandoned before cleanup settled");
+        }),
+      ]);
+      await parent(event, { toolCallId: "new", toolName: "bash" });
+      idle = true;
+      release.resolve();
+      await ending;
+      if (event === "session_shutdown") {
+        expect(readdirSync(markersDir)).toEqual([]);
+      } else {
+        expect(manager.getSession(id)).toMatchObject({
+          status: event === "agent_start" ? "working" : "waiting",
+          attentionState: null,
+        });
+      }
+    },
+  );
 
   it("does not finish the parent on a todo, tool, or internal turn completion", async () => {
     const parent = extension(context("parent"));

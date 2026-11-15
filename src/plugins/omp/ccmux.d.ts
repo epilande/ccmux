@@ -9,6 +9,7 @@ export interface MakeExtensionOptions {
   markersDir: string;
   version: string;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface OmpExtensionContext {

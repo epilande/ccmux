@@ -16,7 +16,7 @@
 
 import { writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { setImmediate } from "node:timers/promises";
+import { setImmediate, setTimeout } from "node:timers/promises";
 
 /**
  * @typedef {object} MarkerState
@@ -32,6 +32,7 @@ import { setImmediate } from "node:timers/promises";
  * @property {string} markersDir   Absolute path to ccmux marker directory.
  * @property {string} version      ccmux version string (for the sentinel line).
  * @property {() => number} [now]  Injected clock, ms epoch. Defaults to Date.now.
+ * @property {(ms: number) => Promise<void>} [sleep] Injected retry delay.
  */
 
 /**
@@ -49,7 +50,12 @@ import { setImmediate } from "node:timers/promises";
  *
  * @param {MakeExtensionOptions} opts
  */
-export function makeExtension({ markersDir, version, now = Date.now }) {
+export function makeExtension({
+  markersDir,
+  version,
+  now = Date.now,
+  sleep = setTimeout,
+}) {
   const AGENT_TYPE = "omp";
 
   /**
@@ -68,7 +74,7 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
   /**
    * Serialize tmp+rename writes so events firing in the same tick
    * (before_agent_start -> agent_start) can't race on disk.
-   * @type {Promise<void>}
+   * @type {Promise<unknown>}
    */
   let writeChain = Promise.resolve();
 
@@ -229,13 +235,22 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
       if (event?.willContinue === true) return;
-      return queue(async () => {
-        // omp dispatches agent_end before its prompt cleanup settles isIdle().
-        await setImmediate();
-        if (ctx.isIdle?.() === false) return;
-        pendingApprovals.delete(sessionId);
-        return writeMerged(sessionId, { state: "idle", pending_tool: undefined });
-      });
+      const state = await queue(() => sessionState.get(sessionId));
+      await setImmediate();
+      for (let retries = 10; retries >= 0; retries--) {
+        const settled = await queue(async () => {
+          if (sessionState.get(sessionId) !== state) return true;
+          if (ctx.isIdle?.() === false) return false;
+          pendingApprovals.delete(sessionId);
+          await writeMerged(sessionId, {
+            state: "idle",
+            pending_tool: undefined,
+          });
+          return true;
+        });
+        if (settled !== false || retries === 0) return;
+        await sleep(100);
+      }
     });
 
     // omp emits the approval pair only when an approval is actually required,
