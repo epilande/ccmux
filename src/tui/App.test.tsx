@@ -110,7 +110,6 @@ mock.module("./utils/tmux", () => ({
   flashPane: flashPaneSpy,
   flashPaneDetached: flashPaneDetachedSpy,
   isPaneInCurrentWindow: isPaneInCurrentWindowSpy,
-  selectPane: async () => true,
   notifyActivePane: notifyActivePaneSpy,
   openAgentAttachWindow: openAgentAttachWindowSpy,
   openAgentsWindow: openAgentsWindowSpy,

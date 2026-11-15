@@ -170,20 +170,6 @@ export function flashPaneDetached(paneId: string): void {
   );
 }
 
-export async function selectPane(paneId: string): Promise<boolean> {
-  try {
-    const proc = Bun.spawn(tmuxArgv("select-pane", "-t", paneId), {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch {
-    return false;
-  }
-}
-
 /** Window name tagging the shared `claude agents` window for dedupe. */
 export const AGENTS_WINDOW_NAME = "ccmux-agents";
 
