@@ -235,22 +235,26 @@ export function makeExtension({
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
       if (event?.willContinue === true) return;
-      const state = await queue(() => sessionState.get(sessionId));
-      await setImmediate();
-      for (let retries = 10; retries >= 0; retries--) {
-        const settled = await queue(async () => {
-          if (sessionState.get(sessionId) !== state) return true;
-          if (ctx.isIdle?.() === false) return false;
-          pendingApprovals.delete(sessionId);
-          await writeMerged(sessionId, {
-            state: "idle",
-            pending_tool: undefined,
+      void (async () => {
+        const state = await queue(() => sessionState.get(sessionId));
+        await setImmediate();
+        for (let retries = 10; retries >= 0; retries--) {
+          const settled = await queue(async () => {
+            if (sessionState.get(sessionId) !== state) return true;
+            if (ctx.isIdle?.() === false) return false;
+            pendingApprovals.delete(sessionId);
+            await writeMerged(sessionId, {
+              state: "idle",
+              pending_tool: undefined,
+            });
+            return true;
           });
-          return true;
-        });
-        if (settled !== false || retries === 0) return;
-        await sleep(100);
-      }
+          if (settled !== false || retries === 0) return;
+          await sleep(100);
+        }
+      })().catch((err) => {
+        console.error("[ccmux-extension] idle settle failed", err);
+      });
     });
 
     // omp emits the approval pair only when an approval is actually required,

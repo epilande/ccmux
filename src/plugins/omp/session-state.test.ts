@@ -1,3 +1,4 @@
+import { waitForIdleMarker } from "./marker-test-helpers";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -107,7 +108,8 @@ describe("OMP session state through markers and attention", () => {
 
   function extension(
     ctx: OmpExtensionContext,
-    sleep: (ms: number) => Promise<void> = async () => {},
+    sleep?: (ms: number) => Promise<void>,
+    waitForCompletion = true,
   ) {
     const handlers = new Map<
       string,
@@ -117,7 +119,7 @@ describe("OMP session state through markers and attention", () => {
       markersDir,
       version: "test",
       now: () => 1_700_000_000_000,
-      sleep,
+      sleep: sleep ?? (async () => {}),
     })({
       on: (event, handler) => {
         handlers.set(event, handler);
@@ -125,6 +127,26 @@ describe("OMP session state through markers and attention", () => {
     });
     return async (event: string, payload: unknown = {}) => {
       await handlers.get(event)?.(payload, ctx);
+      const settled = Promise.withResolvers<void>();
+      queueMicrotask(settled.resolve);
+      await settled.promise;
+      if (
+        event === "agent_end" &&
+        ctx.agent?.kind !== "sub" &&
+        waitForCompletion &&
+        (sleep || ctx.isIdle?.() !== false)
+      ) {
+        const continuing =
+          payload !== null &&
+          typeof payload === "object" &&
+          "willContinue" in payload &&
+          payload.willContinue === true;
+        if (!continuing)
+          await waitForIdleMarker(
+            markersDir,
+            ctx.sessionManager.getSessionId()!,
+          );
+      }
       await reconcileMarkers();
     };
   }
@@ -254,9 +276,15 @@ describe("OMP session state through markers and attention", () => {
   });
 
   it("finishes after an earlier agent_start marker write still in the queue", async () => {
-    const parent = extension({ ...context("parent"), isIdle: () => true });
+    const parent = extension(
+      { ...context("parent"), isIdle: () => true },
+      undefined,
+      false,
+    );
     await parent("session_start");
     await Promise.all([parent("agent_start"), parent("agent_end")]);
+    await waitForIdleMarker(markersDir, "parent");
+    await reconcileMarkers();
     expect(manager.getSession(id)).toMatchObject({
       status: "idle",
       attentionState: "unread",
@@ -275,16 +303,22 @@ describe("OMP session state through markers and attention", () => {
           waiting.resolve();
           await release.promise;
         },
+        false,
       );
       await parent("session_start");
       await parent("agent_start");
-      const ending = parent("agent_end");
-      await Promise.race([
-        waiting.promise,
-        ending.then(() => {
-          throw new Error("Completion abandoned before cleanup settled");
-        }),
-      ]);
+      let returned = false;
+      const ending = parent("agent_end").then(() => {
+        returned = true;
+      });
+      await waiting.promise;
+      try {
+        expect(returned).toBe(true);
+      } catch (error) {
+        release.resolve();
+        await ending;
+        throw error;
+      }
       await parent(event, { toolCallId: "new", toolName: "bash" });
       idle = true;
       release.resolve();
