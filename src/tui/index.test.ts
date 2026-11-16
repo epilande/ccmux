@@ -1,7 +1,12 @@
 import { expect, it } from "bun:test";
 import { fileURLToPath } from "node:url";
 
-it.each([false, true])("preserves pane selection during sidebar startup (early capabilities: %s)", async (earlyCapabilities) => {
+it.each([
+  { sidebar: true, tmux: "test", early: false },
+  { sidebar: true, tmux: "test", early: true },
+  { sidebar: false, tmux: "test", early: false },
+  { sidebar: true, tmux: "", early: false },
+])("preserves focus and scopes truecolor to tmux sidebars (%j)", async (scenario) => {
   // Module mocks stay in a subprocess because other TUI tests share these modules.
   const proc = Bun.spawn(
     [
@@ -23,10 +28,12 @@ it.each([false, true])("preserves pane selection during sidebar startup (early c
         renderer.destroy = () => {};
         mock.module("@opentui/core", () => ({
           ...core,
-          createCliRenderer: async () => {
+          createCliRenderer: async (config) => {
+            assert.deepEqual(config.environment, ${scenario.sidebar && scenario.tmux ? '{ COLORTERM: "truecolor" }' : 'undefined'});
+            assert.equal(process.env.COLORTERM, undefined, "must not mutate the process environment");
             started.resolve();
             await ready.promise;
-            if (${earlyCapabilities}) renderer.emit(core.CliRenderEvents.CAPABILITIES, {});
+            if (${scenario.early}) renderer.emit(core.CliRenderEvents.CAPABILITIES, {});
             return renderer;
           },
         }));
@@ -39,8 +46,8 @@ it.each([false, true])("preserves pane selection during sidebar startup (early c
 
         // Load after module mocks; a static import would bind the real renderer.
         const { launchTUI } = await import("./src/tui/index");
-        const launched = launchTUI({ sidebar: true });
-        await started.promise;
+        const launched = launchTUI({ sidebar: ${scenario.sidebar} });
+        await Promise.race([started.promise, launched]);
         assert.equal(activePane, "%work", "sidebar setup stole input focus");
         activePane = "%chosen-by-user";
         ready.resolve();
@@ -56,7 +63,7 @@ it.each([false, true])("preserves pane selection during sidebar startup (early c
     ],
     {
       cwd: fileURLToPath(new URL("../..", import.meta.url)),
-      env: { ...process.env, TMUX_PANE: "%sidebar" },
+      env: { ...process.env, COLORTERM: undefined, TMUX: scenario.tmux, TMUX_PANE: "%sidebar" },
       stdout: "pipe",
       stderr: "pipe",
     },

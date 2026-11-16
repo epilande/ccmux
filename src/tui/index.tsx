@@ -49,6 +49,9 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
   const config: CliRendererConfig = {
     useMouse: true,
     gatherStats: PERF_ENABLED,
+    ...(options.sidebar && process.env.TMUX
+      ? { environment: { COLORTERM: "truecolor" } }
+      : {}),
   };
 
   const renderer = await createCliRenderer(config);

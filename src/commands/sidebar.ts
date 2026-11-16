@@ -322,8 +322,8 @@ async function spawnSidebarInWindow(
   // select-pane switches focus cross-window (triggering aggressive-resize
   // layout distortion) and corrupts last-pane history.
   //
-  // OpenTUI 0.8.1 sends probes directly to tmux, which routes replies to
-  // the requesting pane. Keep the sidebar unfocused throughout startup.
+  // Native probes are direct. launchTUI supplies a truecolor hint to skip
+  // palette queries, which use passthrough on tmux older than 3.6.
   const args = ["split-window", splitFlag];
   if (cwd) args.push("-c", cwd);
   args.push("-l", String(width), "-t", target, spawnCmd);
