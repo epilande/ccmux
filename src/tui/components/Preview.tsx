@@ -86,8 +86,15 @@ const SubagentRow: Component<{
  * linked PRs from `children[]`. Read-only on Claude's state; the one action
  * is Enter, which attaches to the agent (`claude attach`), the place a
  * blocked agent can be answered.
+ *
+ * Publishes its scrollbox through `onScrollboxRef` like the pane and group
+ * previews: App's Ctrl+U/D scroll whichever box was published last, so a
+ * peek that stays silent leaves those keys on the previous row's box.
  */
-const BackgroundPeek: Component<{ session: EnrichedSession }> = (props) => {
+const BackgroundPeek: Component<{
+  session: EnrichedSession;
+  onScrollboxRef?: (ref: ScrollBoxRenderable) => void;
+}> = (props) => {
   const prs = () =>
     (props.session.backgroundChildren ?? []).filter((c) => c.kind === "pr");
   const result = () => {
@@ -142,7 +149,13 @@ const BackgroundPeek: Component<{ session: EnrichedSession }> = (props) => {
       : "enter: attach agent";
 
   return (
-    <scrollbox flexGrow={1} stickyScroll={false}>
+    <scrollbox
+      flexGrow={1}
+      stickyScroll={false}
+      ref={(r: ScrollBoxRenderable) => {
+        props.onScrollboxRef?.(r);
+      }}
+    >
       <box flexDirection="column">
         <Show when={props.session.lastPrompt}>
           <Text fg={theme.overlay}>Task</Text>
@@ -566,7 +579,10 @@ export const Preview: Component<PreviewProps> = (props) => {
             when={props.session!.trackingMode === "background"}
             fallback={<Text fg={theme.overlay}>No tmux pane associated</Text>}
           >
-            <BackgroundPeek session={props.session!} />
+            <BackgroundPeek
+              session={props.session!}
+              onScrollboxRef={props.onScrollboxRef}
+            />
           </Show>
         </Show>
       </Show>
