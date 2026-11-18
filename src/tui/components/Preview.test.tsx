@@ -4,7 +4,11 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createSignal } from "solid-js";
 import { testRender } from "@opentui/solid";
-import { RGBA, type CapturedFrame } from "@opentui/core";
+import {
+  RGBA,
+  type CapturedFrame,
+  type ScrollBoxRenderable,
+} from "@opentui/core";
 import { theme } from "../theme";
 import { TickContext } from "../store";
 import {
@@ -713,6 +717,66 @@ describe("Preview pane content color", () => {
 });
 
 describe("BackgroundPeek", () => {
+  // Ctrl+U/D in App.tsx scroll whatever scrollbox the preview last published
+  // through `onScrollboxRef`. The peek used to publish nothing, so the keys
+  // hit the previous row's (now unmounted) scrollbox, or nothing at all,
+  // while the wheel, which the scrollbox handles itself, still worked.
+  it("publishes its scrollbox so Ctrl+U/D can scroll it", async () => {
+    const longResult = Array.from(
+      { length: 30 },
+      (_, i) => `RESULT LINE ${String(i + 1).padStart(2, "0")}`,
+    ).join("\n");
+    const [session, setSession] = createSignal<EnrichedSession>(
+      mockEnrichedSession({ tmuxPane: "%1" }),
+    );
+    let ref: ScrollBoxRenderable | undefined;
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <Preview
+            session={session()}
+            width={40}
+            onScrollboxRef={(r) => (ref = r)}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 15 },
+    );
+    // Let the pane capture land so the terminal preview publishes first:
+    // that is the stale ref the keys used to keep scrolling.
+    for (let i = 0; i < 30 && !ref; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      await setup.renderOnce();
+    }
+    const paneBox = ref;
+    expect(paneBox).toBeDefined();
+
+    setSession(
+      mockBackgroundSession({
+        status: "idle",
+        backgroundDetail: "DETAIL_TOP",
+        backgroundResult: longResult,
+      }),
+    );
+    await setup.renderOnce();
+
+    const boxes = findScrollBoxes(setup.renderer);
+    expect(boxes).toHaveLength(1);
+    expect(ref).not.toBe(paneBox);
+    expect(ref).toBe(boxes[0]);
+
+    // The same half-page step App.tsx takes. Content must overflow, or
+    // scrollTop would stay 0 whatever box the ref pointed at.
+    const box = ref!;
+    expect(box.scrollHeight).toBeGreaterThan(box.viewport.height);
+    expect(setup.captureCharFrame()).toContain("DETAIL_TOP");
+    const halfPage = Math.floor(box.viewport.height / 2);
+    box.scrollTo(box.scrollTop + halfPage);
+    await setup.renderOnce();
+    expect(box.scrollTop).toBe(halfPage);
+    expect(setup.captureCharFrame()).not.toContain("DETAIL_TOP");
+  });
+
   it("shows the ask (intent) above the detail", async () => {
     const frame = await renderPreview(
       mockBackgroundSession({
