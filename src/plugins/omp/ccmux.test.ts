@@ -1,3 +1,4 @@
+import { waitForIdleMarker } from "./marker-test-helpers";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
@@ -50,8 +51,12 @@ function startExtension(now?: () => number): Fire {
   };
   makeExtension({ markersDir, version: "1.0.0", now })(omp);
   const defaultCtx = makeCtx("S1");
-  return (event, payload = null, ctx = defaultCtx) =>
-    handlers.get(event)!(payload, ctx);
+  return async (event, payload = null, ctx = defaultCtx) => {
+    await handlers.get(event)!(payload, ctx);
+    if (event === "agent_end") {
+      await waitForIdleMarker(markersDir, ctx.sessionManager.getSessionId()!);
+    }
+  };
 }
 
 /** The event names the extension subscribes to, for registration guards. */
