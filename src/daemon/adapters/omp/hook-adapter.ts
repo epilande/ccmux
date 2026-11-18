@@ -56,7 +56,7 @@ function inspectInstalledExtension(path: string): {
  * - Install writes a single auto-discovered file
  *   (`~/.omp/agent/extensions/ccmux.js`) with a sentinel first line so we
  *   only ever overwrite/delete a file ccmux wrote.
- * - Marker handling is 1:1 (omp runs one session per process).
+ * - Marker handling is 1:1 (only the main session publishes a marker).
  *   `onMarkerAdded` correlates `marker.pid` -> pane -> session via PID
  *   ancestry and links `nativeSessionId`; subsequent state flips ride the
  *   generic cascade (`genericMarkerSource`) on marker change.

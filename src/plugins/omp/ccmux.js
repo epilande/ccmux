@@ -16,6 +16,7 @@
 
 import { writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { setImmediate, setTimeout } from "node:timers/promises";
 
 /**
  * @typedef {object} MarkerState
@@ -31,14 +32,14 @@ import { join } from "node:path";
  * @property {string} markersDir   Absolute path to ccmux marker directory.
  * @property {string} version      ccmux version string (for the sentinel line).
  * @property {() => number} [now]  Injected clock, ms epoch. Defaults to Date.now.
+ * @property {(ms: number) => Promise<void>} [sleep] Injected retry delay.
  */
 
 /**
  * Build an omp extension bound to the given markers dir.
  *
- * omp runs ONE session per process, so markers (keyed by session id) never
- * overlap and need no OpenCode-style aggregation. We still key all
- * bookkeeping by session id so a re-bound instance can't cross-contaminate.
+ * Only the main session owns the pane marker. In-process subagents load
+ * this extension too, but share the main session's PID and tmux pane.
  *
  * Unlike upstream Pi, a session switch (`/new`, `/resume`) does not emit
  * `session_shutdown` + `session_start`: omp mutates the session in place and
@@ -49,7 +50,12 @@ import { join } from "node:path";
  *
  * @param {MakeExtensionOptions} opts
  */
-export function makeExtension({ markersDir, version, now = Date.now }) {
+export function makeExtension({
+  markersDir,
+  version,
+  now = Date.now,
+  sleep = setTimeout,
+}) {
   const AGENT_TYPE = "omp";
 
   /**
@@ -68,7 +74,7 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
   /**
    * Serialize tmp+rename writes so events firing in the same tick
    * (before_agent_start -> agent_start) can't race on disk.
-   * @type {Promise<void>}
+   * @type {Promise<unknown>}
    */
   let writeChain = Promise.resolve();
 
@@ -163,9 +169,10 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
     return queue(() => writeMerged(sessionId, patch));
   }
 
-  /** Resolve the active session id from the read-only session manager. */
+  /** Resolve the main session id; subagents do not own a pane marker. */
   function sessionIdOf(ctx) {
     try {
+      if (ctx?.agent?.kind === "sub") return null;
       const id = ctx?.sessionManager?.getSessionId();
       return typeof id === "string" && id ? id : null;
     } catch {
@@ -214,10 +221,8 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       );
     });
 
-    // agent_start / agent_end bracket one full user prompt (the whole
-    // agentic loop, including every internal turn/tool call), so they are
-    // the flicker-free working<->idle signal. turn_start/turn_end repeat
-    // within a prompt and would bounce the row to idle mid-response.
+    // Internal turns and tools do not finish a user prompt. Even agent_end
+    // can schedule a continuation or arrive after the next prompt starts.
     omp.on("agent_start", async (_event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
@@ -226,16 +231,30 @@ export function makeExtension({ markersDir, version, now = Date.now }) {
       );
     });
 
-    omp.on("agent_end", async (_event, ctx) => {
+    omp.on("agent_end", async (event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
-      // Defensive clear: an aborted turn (Ctrl-C, session abort) can end the
-      // loop while a prompt is still open, and a leaked id would pin every
-      // later turn's resolve to "still waiting".
-      pendingApprovals.delete(sessionId);
-      return queue(() =>
-        writeMerged(sessionId, { state: "idle", pending_tool: undefined }),
-      );
+      if (event?.willContinue === true) return;
+      void (async () => {
+        const state = await queue(() => sessionState.get(sessionId));
+        await setImmediate();
+        for (let retries = 10; retries >= 0; retries--) {
+          const settled = await queue(async () => {
+            if (sessionState.get(sessionId) !== state) return true;
+            if (ctx.isIdle?.() === false) return false;
+            pendingApprovals.delete(sessionId);
+            await writeMerged(sessionId, {
+              state: "idle",
+              pending_tool: undefined,
+            });
+            return true;
+          });
+          if (settled !== false || retries === 0) return;
+          await sleep(100);
+        }
+      })().catch((err) => {
+        console.error("[ccmux-extension] idle settle failed", err);
+      });
     });
 
     // omp emits the approval pair only when an approval is actually required,
