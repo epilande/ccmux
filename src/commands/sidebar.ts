@@ -322,13 +322,8 @@ async function spawnSidebarInWindow(
   // select-pane switches focus cross-window (triggering aggressive-resize
   // layout distortion) and corrupts last-pane history.
   //
-  // The sidebar boots into an unfocused pane (`-d`), then briefly steals
-  // focus to itself, lets OpenTUI's terminal-capability probes drain, and
-  // hands focus back. Without that dance, tmux routes passthrough probe
-  // replies to whichever pane is focused (i.e., the user's shell), and
-  // the replies leak as gibberish. The sidebar self-discovers the pane to
-  // restore focus to (see findRestorePane in src/tui/index.tsx) since
-  // tmux doesn't expand `#{pane_id}` inside `-e VAR=...`.
+  // Native probes are direct. launchTUI supplies a truecolor hint to skip
+  // palette queries, which use passthrough on tmux older than 3.6.
   const args = ["split-window", splitFlag];
   if (cwd) args.push("-c", cwd);
   args.push("-l", String(width), "-t", target, spawnCmd);
