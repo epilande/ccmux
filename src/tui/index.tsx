@@ -1,10 +1,5 @@
 import { render } from "@opentui/solid";
-import {
-  CliRenderEvents,
-  createCliRenderer,
-  type CliRenderer,
-  type CliRendererConfig,
-} from "@opentui/core";
+import { createCliRenderer, type CliRendererConfig } from "@opentui/core";
 import { App } from "./App";
 import type { IconStyle } from "../lib/icons";
 import type {
@@ -18,7 +13,6 @@ import type {
 import { applyTheme } from "./theme";
 import type { GroupBy } from "./utils/grouping";
 import { PERF_ENABLED } from "./utils/perf";
-import { findRestorePane, selectPane } from "./utils/tmux";
 import { markStartup } from "../lib/startup-timing";
 
 interface TUIOptions {
@@ -47,50 +41,6 @@ interface TUIOptions {
   forkableAgents?: string[];
 }
 
-/** Quiet-period after the last CAPABILITIES event before we restore focus.
- * Probe replies trickle in over a few ms; a single CAPABILITIES event isn't
- * enough. Debouncing on the last one ensures all replies have been consumed
- * before we hand focus back. */
-const CAPABILITY_QUIET_MS = 250;
-/** Hard ceiling: if probe replies never settle (terminal dropped them),
- * restore focus anyway so we don't leave the user stranded in the sidebar. */
-const CAPABILITY_HARD_CAP_MS = 5000;
-
-/**
- * When the sidebar spawns into an unfocused pane (via `--toggle` or the
- * `after-new-window` hook's `split-window -d`), OpenTUI's terminal-
- * capability probes get sent through tmux DCS passthrough, but tmux routes
- * the replies to the focused pane (i.e. the user's shell), where they
- * echo as gibberish.
- *
- * Dance: steal focus to ourselves before probes fire, let OpenTUI consume
- * the replies, then restore focus once CAPABILITIES events quiesce.
- */
-function arrangeSidebarFocusDance(
-  renderer: CliRenderer,
-  restoreTarget: string,
-): void {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let restored = false;
-  const restore = () => {
-    if (restored) return;
-    restored = true;
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
-    void selectPane(restoreTarget);
-  };
-
-  renderer.on(CliRenderEvents.CAPABILITIES, () => {
-    if (restored) return;
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(restore, CAPABILITY_QUIET_MS);
-  });
-
-  setTimeout(restore, CAPABILITY_HARD_CAP_MS);
-}
-
 export async function launchTUI(options: TUIOptions = {}): Promise<void> {
   markStartup("render_start");
 
@@ -101,25 +51,12 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
   const config: CliRendererConfig = {
     useMouse: true,
     gatherStats: PERF_ENABLED,
+    ...(options.sidebar && process.env.TMUX
+      ? { environment: { COLORTERM: "truecolor" } }
+      : {}),
   };
 
-  // Sidebar spawned via -d into an unfocused pane needs the focus dance
-  // to keep terminal capability probe replies from leaking into the
-  // user's shell. Focus must be stolen before the renderer exists, since
-  // creating it fires the probes. Picker/non-sidebar TUIs run in the
-  // user's own focused pane, so the dance is a no-op there.
-  let restoreTarget: string | null = null;
-  if (options.sidebar && process.env.TMUX_PANE) {
-    restoreTarget = await findRestorePane();
-    if (restoreTarget) {
-      await selectPane(process.env.TMUX_PANE);
-    }
-  }
-
   const renderer = await createCliRenderer(config);
-  if (restoreTarget) {
-    arrangeSidebarFocusDance(renderer, restoreTarget);
-  }
 
   // Quit paths exit via process.exit(), which skips OpenTUI's `beforeExit`
   // cleanup (its signal handlers do fire, but `process.exit` emits only

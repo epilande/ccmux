@@ -9,10 +9,13 @@ export interface MakeExtensionOptions {
   markersDir: string;
   version: string;
   now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface OmpExtensionContext {
   cwd: string;
+  agent?: { kind: "main" | "sub" };
+  isIdle?(): boolean;
   sessionManager: {
     getSessionId(): string | undefined;
     getSessionFile(): string | undefined;
