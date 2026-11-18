@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
   parseLaunchPane,
-  parseRestoreCandidate,
   parseWindowIdByName,
   agentAttachWindowName,
   isSafeAgentShortId,
@@ -25,77 +24,7 @@ const { openAgentsWindow, notifyActivePane } = (await import(
 // throw-on-failure contract is covered indirectly via Preview's failure fold;
 // the real safety net is the `.catch()` at each call site.
 
-// Format: "#{pane_id}<sep>#{pane_title}<sep>#{pane_active}"
-// pane_active: "1" for the window's active pane, "0" otherwise.
 const row = (...fields: string[]) => fields.join(PANE_FIELD_SEP);
-
-describe("parseRestoreCandidate", () => {
-  it("returns null when only the sidebar (self) is in the window", () => {
-    const output = row("%1", "ccmux-sidebar", "1");
-    expect(parseRestoreCandidate(output, "%1")).toBe(null);
-  });
-
-  it("returns null when self is the active pane (user-launched)", () => {
-    // No probe leak to fix: the user typed `ccmux sidebar` in their own
-    // focused pane, so probe replies route correctly.
-    const output = [
-      row("%1", "zsh", "0"),
-      row("%2", "ccmux-sidebar", "1"),
-    ].join("\n");
-    expect(parseRestoreCandidate(output, "%2")).toBe(null);
-  });
-
-  it("returns the active sibling when self is unfocused", () => {
-    // Hook/toggle spawn: sidebar is non-active, the user's shell is.
-    const output = [
-      row("%1", "zsh", "1"),
-      row("%2", "ccmux-sidebar", "0"),
-    ].join("\n");
-    expect(parseRestoreCandidate(output, "%2")).toBe("%1");
-  });
-
-  it("picks the active sibling when there are multiple non-sidebar panes", () => {
-    const output = [
-      row("%1", "nvim", "0"),
-      row("%2", "ccmux-sidebar", "0"),
-      row("%3", "zsh", "1"),
-      row("%4", "htop", "0"),
-    ].join("\n");
-    expect(parseRestoreCandidate(output, "%2")).toBe("%3");
-  });
-
-  it("skips other ccmux-sidebar panes when picking the candidate", () => {
-    // Defensive: if a stray sibling sidebar is somehow active, we'd rather
-    // restore to a real shell pane than to another sidebar.
-    const output = [
-      row("%1", "ccmux-sidebar", "1"),
-      row("%2", "ccmux-sidebar", "0"),
-      row("%3", "zsh", "0"),
-    ].join("\n");
-    expect(parseRestoreCandidate(output, "%2")).toBe(null);
-  });
-
-  it("returns null when self is not in the output (mid-query race)", () => {
-    // The window listing can come back without us if the pane was killed
-    // between launch and the list-panes call. Bail safely.
-    const output = row("%1", "zsh", "1");
-    expect(parseRestoreCandidate(output, "%99")).toBe(null);
-  });
-
-  it("returns null for empty output", () => {
-    expect(parseRestoreCandidate("", "%2")).toBe(null);
-  });
-
-  it("returns null when no sibling is active", () => {
-    // Pathological: tmux always has an active pane per window, but be
-    // defensive about it rather than handing focus to a non-active pane.
-    const output = [
-      row("%1", "zsh", "0"),
-      row("%2", "ccmux-sidebar", "0"),
-    ].join("\n");
-    expect(parseRestoreCandidate(output, "%2")).toBe(null);
-  });
-});
 
 // Format: "#{window_id}<sep>#{window_name}"
 describe("parseWindowIdByName", () => {
