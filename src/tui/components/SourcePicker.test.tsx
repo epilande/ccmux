@@ -1574,6 +1574,39 @@ it("preserves branch, draft, review, checks and every label at picker width", as
   expect(lines[title]).toContain("feature/metadata");
 });
 
+// The fixed cells are sized for the whole list, so one approved PR with
+// checks would spend the default sidebar's room on cells and leave every
+// row's title (number included) a lone ellipsis.
+for (const width of [30, 26]) {
+  it(`keeps every PR's number and title at a ${width}-column compact Start`, async () => {
+    const day = 86_400_000;
+    const h = await mountSettled({
+      width,
+      compact: true,
+      prs: [
+        openPR({
+          number: 201,
+          ciStatus: "passing",
+          reviewDecision: "APPROVED",
+          createdAt: new Date(Date.now() - 12 * day).toISOString(),
+        }),
+        openPR({
+          number: 202,
+          createdAt: new Date(Date.now() - 3 * day).toISOString(),
+        }),
+      ],
+      issues: [],
+    });
+    const frame = await h.frame();
+    for (const number of ["#201", "#202"]) {
+      const line = frame.split("\n").find((l) => l.includes(number));
+      expect(line).toBeDefined();
+      // The number and the start of the title, not just the number.
+      expect(line).toContain(`${number} p`);
+    }
+  });
+}
+
 it("keeps failing checks ahead of a long author and branch in compact Start", async () => {
   const h = await mountSettled({
     width: 30,

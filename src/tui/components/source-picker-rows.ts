@@ -567,6 +567,31 @@ export function sourceCellWidths(cells: SourceRowCells[]): {
   };
 }
 
+/** The title keeps at least this much: its marker, number and a word or so,
+ *  which is what tells two rows apart. */
+const TITLE_MIN = 10;
+
+/**
+ * Drop fixed cells, least telling first (review, then age, then CI), while
+ * they would leave the title fewer than {@link TITLE_MIN} of `room` columns.
+ * The widths are list-wide, so without this one approved PR with checks
+ * empties every row's title in a narrow sidebar.
+ */
+export function fitSourceCellWidths(
+  widths: { ci: number; review: number; age: number },
+  room: number,
+): { ci: number; review: number; age: number } {
+  const fitted = { ...widths };
+  const used = () =>
+    [fitted.ci, fitted.review, fitted.age].reduce(
+      (n, w) => n + (w ? w + 1 : 0),
+      0,
+    );
+  for (const cell of ["review", "age", "ci"] as const)
+    if (room - used() < TITLE_MIN) fitted[cell] = 0;
+  return fitted;
+}
+
 /** Columns between the title and the middle, and between middle phrases. */
 const MIDDLE_GAP = 2;
 const MIDDLE_SEP = " · ";

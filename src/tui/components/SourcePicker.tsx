@@ -37,6 +37,7 @@ import {
   checkedOutPathFor,
   emptyStateText,
   filterRepos,
+  fitSourceCellWidths,
   fitSourceRow,
   hasRows,
   isIssueRowKey,
@@ -901,16 +902,22 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       />
     </Show>
   );
-  /** One width per fixed right cell across every visible row. */
+  /** One width per fixed right cell across every visible row, minus the
+   *  cells the title cannot spare at this width. */
   const cellWidths = createMemo(() =>
-    sourceCellWidths(
-      rows().map((row) =>
-        sourceRowCells(
-          row,
-          sourceAge(row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt),
-          false,
+    fitSourceCellWidths(
+      sourceCellWidths(
+        rows().map((row) =>
+          sourceRowCells(
+            row,
+            sourceAge(
+              row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt,
+            ),
+            false,
+          ),
         ),
       ),
+      listWidth() - 6,
     ),
   );
   const fixedCellsWidth = () => {
