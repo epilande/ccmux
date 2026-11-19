@@ -412,13 +412,15 @@ async function unregisterAutoOpenHook(): Promise<void> {
  *
  * `run-shell -b` ran asynchronously after `switch-client` had already drawn
  * frame #1 at a proportionally rescaled sidebar width, causing a second
- * SIGWINCH full-screen redraw ~45ms later. `run-shell -C -t "#{hook_window}"`
- * expands `#{P:...}` over the window's panes directly inside tmux with zero
- * subprocesses before the switched client renders.
+ * SIGWINCH full-screen redraw ~45ms later. `window-resized` already sets the
+ * hook's format context to the resized window, so `run-shell -C` expands
+ * `#{P:...}` over that window's panes directly inside tmux with zero
+ * subprocesses before the switched client renders. (Avoid `-t "#{hook_window}"`
+ * on `run-shell`: `-t` expects a target-pane without format-expanding its arg.)
  */
 export function resizeHookCommand(width: number): string {
   const inner = `#{P:#{?#{==:#{pane_title},${SIDEBAR_PANE_TITLE}},resize-pane -t #{pane_id} -x ${width} ; ,}}`;
-  return `run-shell -C -t "#{hook_window}" '${inner}'`;
+  return `run-shell -C '${inner}'`;
 }
 
 async function registerResizeHook(width: number): Promise<void> {

@@ -3727,6 +3727,61 @@ describe("store", () => {
         globalThis.fetch = origFetch;
       }
     });
+
+    it("rejects stale or duplicate versions from the same peer senderId", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "none" });
+      expect(store.isSidebarVersionNewer(4, "peer-a")).toBe(true);
+      expect(store.isSidebarVersionNewer(4, "peer-a")).toBe(false);
+      expect(store.isSidebarVersionNewer(3, "peer-a")).toBe(false);
+      expect(store.isSidebarVersionNewer(5, "peer-a")).toBe(true);
+      // Independent peer starts at version 1 and is still accepted
+      expect(store.isSidebarVersionNewer(1, "peer-b")).toBe(true);
+      expect(store.isSidebarVersionNewer(1, "peer-b")).toBe(false);
+    });
+
+    it("omits scrollTop in picker mode, when search narrows the list, or after group collapse", async () => {
+      const fetchCalls: Array<Record<string, unknown>> = [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (
+        _input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        fetchCalls.push(init?.body ? JSON.parse(String(init.body)) : {});
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch;
+
+      try {
+        // Non-sidebar picker never broadcasts or applies scrollTop
+        const picker = createTUIStore({ sidebar: false, groupBy: "none" });
+        picker.actions.setSessions([createMockSession({ id: "s1" })]);
+        picker.actions.applySidebarSelection("s1", null, 12);
+        expect(picker.scrollSync()).toBeNull();
+        await picker.flushSidebarStateNow(12);
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+
+        // Sidebar with active search query omits scrollTop and ignores incoming scrollTop
+        const sidebar = createTUIStore({ sidebar: true, groupBy: "project" });
+        sidebar.actions.setSessions([
+          createMockSession({ id: "s1", project: "alpha" }),
+          createMockSession({ id: "s2", project: "beta" }),
+        ]);
+        sidebar.actions.setLocalScrollTop(10);
+        sidebar.actions.setSearchQuery("alpha");
+        sidebar.actions.applySidebarSelection("s1", null, 22);
+        expect(sidebar.scrollSync()).toBeNull();
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+
+        // Clearing search and collapsing a group clears stale localScrollTop
+        sidebar.actions.setSearchQuery("");
+        sidebar.actions.setLocalScrollTop(15);
+        sidebar.actions.toggleGroupCollapse("alpha");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
   });
 
   describe("new session dialog", () => {

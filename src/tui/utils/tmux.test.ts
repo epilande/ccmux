@@ -15,9 +15,8 @@ import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 // reaches this file. A distinct cache entry always gets the implementation,
 // the same trick client-switch.test.ts uses.
 const REAL_TMUX_SPECIFIER = "./tmux" + "?real";
-const { openAgentsWindow, notifyActivePane } = (await import(
-  REAL_TMUX_SPECIFIER
-)) as typeof import("./tmux");
+const { openAgentsWindow, notifyActivePane, flashPane, flashPaneDetached } =
+  (await import(REAL_TMUX_SPECIFIER)) as typeof import("./tmux");
 
 // Note: capturePane isn't unit-tested here. Preview/App tests call
 // `mock.module("../utils/tmux")`, which is process-wide in Bun, so capturePane
@@ -806,5 +805,89 @@ describe("hasMultipleMainPanesInList", () => {
 
   it("returns false on empty output", () => {
     expect(hasMultipleMainPanesInList("")).toBe(false);
+  });
+});
+
+describe("flashPane and flashPaneDetached single-main-pane gating", () => {
+  it("skips set-option in flashPaneDetached when window has only one main pane", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: [row("%1", "ccmux-sidebar"), row("%2", "claude")].join("\n") },
+    ]);
+    try {
+      await flashPaneDetached("%2");
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-panes"]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("spawns set-option and detached reset in flashPaneDetached when two main panes exist", async () => {
+    const stubs = withTmuxStubs([
+      {
+        stdout: [
+          row("%1", "ccmux-sidebar"),
+          row("%2", "claude"),
+          row("%3", "zsh"),
+        ].join("\n"),
+      },
+      {},
+      {},
+    ]);
+    try {
+      await flashPaneDetached("%2");
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-panes",
+        "set-option",
+        "run-shell",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("skips set-option in flashPane for 1 main pane and flashes + resets for 2 main panes", async () => {
+    const origSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void) => {
+      if (typeof fn === "function") scheduled.push(() => fn());
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    const stubs = withTmuxStubs([
+      { stdout: [row("%1", "ccmux-sidebar"), row("%2", "claude")].join("\n") },
+      {
+        stdout: [
+          row("%1", "ccmux-sidebar"),
+          row("%2", "claude"),
+          row("%3", "zsh"),
+        ].join("\n"),
+      },
+      {},
+      {},
+    ]);
+    try {
+      flashPane("%2");
+      await new Promise((r) => origSetTimeout(r, 0));
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-panes"]);
+
+      flashPane("%2");
+      await new Promise((r) => origSetTimeout(r, 0));
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-panes",
+        "list-panes",
+        "set-option",
+      ]);
+      // Drain the 500ms reset timer inside the stub scope so no timer leaks
+      for (const fn of scheduled) fn();
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-panes",
+        "list-panes",
+        "set-option",
+        "set-option",
+      ]);
+    } finally {
+      globalThis.setTimeout = origSetTimeout;
+      stubs.restore();
+    }
   });
 });

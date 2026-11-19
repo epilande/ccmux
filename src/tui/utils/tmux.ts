@@ -196,12 +196,15 @@ export function flashPane(paneId: string): void {
 }
 
 /**
- * Spawn a detached flash that self-resets after 500ms.
+ * Spawn a detached flash that self-resets after 500ms when disambiguating
+ * among multiple non-ccmux panes in the target window. Single-pane windows
+ * skip the full-screen strobe.
  * Use when the calling process is about to exit (e.g. picker in a tmux popup).
  * Uses `tmux run-shell -b` so the reset runs in tmux's own process context
  * and survives popup teardown, which kills the entire child process group.
  */
-export function flashPaneDetached(paneId: string): void {
+export async function flashPaneDetached(paneId: string): Promise<void> {
+  if (!(await hasMultipleMainPanes(paneId))) return;
   Bun.spawn(
     tmuxArgv("set-option", "-p", "-t", paneId, "window-style", flashBg()),
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" },

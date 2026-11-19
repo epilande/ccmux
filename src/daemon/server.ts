@@ -649,11 +649,13 @@ export class DaemonServer {
    * client can say "unreachable at <path>" instead of "no sessions".
    */
   private socketError: TmuxSocketError | null = null;
+  private static readonly MAX_SIDEBAR_SENDERS = 128;
   private lastSidebarState: {
     selectedSessionId: string | null;
     selectedHeaderKey: string | null;
     scrollTop?: number;
   } = { selectedSessionId: null, selectedHeaderKey: null };
+  private sidebarSenderVersions = new Map<string, number>();
   private attentionTracker: AttentionTracker;
   private invocationManager: InvocationManager;
   private getHookAdapter: (agentName: string) => HookAdapter | null;
@@ -1299,11 +1301,11 @@ export class DaemonServer {
    * so switching tmux sessions (`switch-client`) updates focus too.
    */
   private installPaneFocusHook(): void {
-    // Trailing `|| true` keeps the shell exit status 0 when the daemon isn't
-    // listening (curl exit 7). Without it, tmux surfaces the non-zero exit
-    // from `run-shell -b` as a status-line message on every pane switch
-    // whenever a stale hook outlives the daemon.
-    const hookCmd = `run-shell -b '[ -z "#{session_attached}" ] || [ "#{session_attached}" = "0" ] || curl -s -m 2 -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
+    // Require an attached session AND active window + active pane so programmatic
+    // select-pane/select-window calls in detached sessions or background windows
+    // cannot steal active-pane focus. Trailing `|| true` keeps exit status 0
+    // when short-circuited or when the daemon isn't listening (curl exit 7).
+    const hookCmd = `run-shell -b '[ -n "#{session_attached}" ] && [ "#{session_attached}" != "0" ] && [ "#{window_active}" = "1" ] && [ "#{pane_active}" = "1" ] && curl -s -m 2 -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
     for (const hook of DaemonServer.ACTIVE_PANE_HOOKS) {
       Bun.spawn(tmuxArgv("set-hook", "-g", hook, hookCmd), {
         stdout: "ignore",
@@ -2594,6 +2596,19 @@ export class DaemonServer {
       typeof body.scrollTop === "number" && Number.isFinite(body.scrollTop)
         ? body.scrollTop
         : undefined;
+
+    if (senderId !== undefined && version !== undefined) {
+      const prevVersion = this.sidebarSenderVersions.get(senderId) ?? 0;
+      if (version <= prevVersion) {
+        return Response.json({ success: true, ignored: true }, { headers });
+      }
+      this.sidebarSenderVersions.delete(senderId);
+      this.sidebarSenderVersions.set(senderId, version);
+      if (this.sidebarSenderVersions.size > DaemonServer.MAX_SIDEBAR_SENDERS) {
+        const oldest = this.sidebarSenderVersions.keys().next().value;
+        if (oldest !== undefined) this.sidebarSenderVersions.delete(oldest);
+      }
+    }
 
     this.lastSidebarState = {
       selectedSessionId,

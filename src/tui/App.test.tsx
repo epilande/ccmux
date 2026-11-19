@@ -603,6 +603,55 @@ describe("App", () => {
     }
   });
 
+  it("sidebar hydration resolving BEFORE onInit is preserved across initial init and reconnect without flashing", async () => {
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: "s1",
+      selectedHeaderKey: null,
+    });
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      flashPaneSpy.mockClear();
+      const sessions = [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%10",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%20",
+        }),
+      ];
+      // Initial onInit arrives AFTER hydration resolved: activePane is s2 (%20),
+      // but hydrated selection s1 (alpha) must stay selected and not flash on mount.
+      sseCallbacks!.onInit(sessions, "%20");
+      await setup.renderOnce();
+      expect(flashPaneSpy).not.toHaveBeenCalled();
+
+      // SSE reconnect delivers another onInit: selection s1 must still be preserved.
+      sseCallbacks!.onInit(sessions, "%20");
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Kill Session?");
+      expect(frame).toContain("alpha");
+    } finally {
+      restore();
+    }
+  });
+
   it("falls back to first item when active pane has no matching session", async () => {
     await renderApp(120, 20, { groupBy: "none" });
     sseCallbacks!.onInit(

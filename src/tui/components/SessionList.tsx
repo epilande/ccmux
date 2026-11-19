@@ -465,7 +465,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
     const onActivate = props.onActivate
       ? () => {
           suppressSelectionScroll = true;
-          props.onActivate!(item, index());
+          try {
+            props.onActivate!(item, index());
+          } finally {
+            suppressSelectionScroll = false;
+          }
         }
       : undefined;
     const onContextMenu = props.onContextMenu

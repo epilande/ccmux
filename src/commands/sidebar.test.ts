@@ -178,7 +178,7 @@ describe("resizeHookCommand", () => {
   // sidebar, a sidebar-less window is a no-op, and no ccmux process is started.
   it("emits the exact synchronous tmux command hook body", () => {
     expect(resizeHookCommand(30)).toBe(
-      `run-shell -C -t "#{hook_window}" '#{P:#{?#{==:#{pane_title},ccmux-sidebar},resize-pane -t #{pane_id} -x 30 ; ,}}'`,
+      `run-shell -C '#{P:#{?#{==:#{pane_title},ccmux-sidebar},resize-pane -t #{pane_id} -x 30 ; ,}}'`,
     );
   });
 
@@ -191,7 +191,10 @@ describe("resizeHookCommand", () => {
 
   it("scopes the work to the resized window synchronously in-process", () => {
     const cmd = resizeHookCommand(42);
-    expect(cmd).toContain('run-shell -C -t "#{hook_window}"');
+    expect(cmd).toStartWith("run-shell -C '");
+    // Must NOT pass -t "#{hook_window}" to run-shell (run-shell -t expects a
+    // target-pane without format-expanding its flag, which silently fails).
+    expect(cmd).not.toContain("hook_window");
     // No background shell (`run-shell -b`) or global `list-panes -a`.
     expect(cmd).not.toContain("run-shell -b");
     expect(cmd).not.toContain("list-panes -a");
@@ -207,10 +210,7 @@ describe("resizeHookCommand", () => {
   it("bakes the width in and stays free of single quotes inside body", () => {
     expect(resizeHookCommand(77)).toContain("-x 77");
     // The body is single-quoted at the tmux layer, which cannot escape a quote.
-    const body = resizeHookCommand(77).replace(
-      /^run-shell -C -t "#\{hook_window\}" '/,
-      "",
-    );
+    const body = resizeHookCommand(77).replace(/^run-shell -C '/, "");
     expect(body.slice(0, -1)).not.toContain("'");
   });
 });

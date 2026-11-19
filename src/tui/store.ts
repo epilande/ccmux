@@ -917,31 +917,59 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    *  from the daemon can be detected and ignored, while peer sidebars
    *  with independent counters are identified via sidebarInstanceId. */
   const SIDEBAR_STATE_TIMEOUT_MS = 500;
+  const MAX_TRACKED_SENDERS = 128;
   const sidebarInstanceId = crypto.randomUUID();
   let sidebarVersion = 0;
   let sidebarBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  let sidebarInflightAbort: AbortController | null = null;
+  const lastVersionBySender = new Map<string, number>();
   let localScrollTop: number | undefined;
   const [scrollSync, setScrollSync] = createSignal<{
     top: number;
     generation: number;
   } | null>(null);
 
+  function canSyncScrollTop(): boolean {
+    return Boolean(options.sidebar) && state.searchQuery.trim().length === 0;
+  }
+
+  function recordSenderVersion(senderId: string, version: number) {
+    lastVersionBySender.delete(senderId);
+    lastVersionBySender.set(senderId, version);
+    if (lastVersionBySender.size > MAX_TRACKED_SENDERS) {
+      const oldest = lastVersionBySender.keys().next().value;
+      if (oldest !== undefined) lastVersionBySender.delete(oldest);
+    }
+  }
+
   function buildSidebarStatePayload() {
     return {
       selectedSessionId: state.selectedSessionId,
       selectedHeaderKey: selectedHeaderKey(),
-      ...(localScrollTop !== undefined ? { scrollTop: localScrollTop } : {}),
+      ...(canSyncScrollTop() && localScrollTop !== undefined
+        ? { scrollTop: localScrollTop }
+        : {}),
       version: sidebarVersion,
       senderId: sidebarInstanceId,
     };
   }
 
   function postSidebarState(): Promise<Response> {
+    sidebarInflightAbort?.abort();
+    const controller = new AbortController();
+    sidebarInflightAbort = controller;
     return fetch(`${getDaemonUrl()}/sidebar-state`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(buildSidebarStatePayload()),
-      signal: AbortSignal.timeout(SIDEBAR_STATE_TIMEOUT_MS),
+      signal: AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(SIDEBAR_STATE_TIMEOUT_MS),
+      ]),
+    }).finally(() => {
+      if (sidebarInflightAbort === controller) {
+        sidebarInflightAbort = null;
+      }
     });
   }
 
@@ -981,8 +1009,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   ): boolean {
     if (incomingSenderId !== undefined) {
       if (incomingSenderId === sidebarInstanceId) return false;
-      if (incomingVersion !== undefined && incomingVersion > sidebarVersion) {
-        sidebarVersion = incomingVersion;
+      if (incomingVersion !== undefined) {
+        const lastSeen = lastVersionBySender.get(incomingSenderId) ?? 0;
+        if (incomingVersion <= lastSeen) return false;
+        recordSenderVersion(incomingSenderId, incomingVersion);
+        if (incomingVersion > sidebarVersion) {
+          sidebarVersion = incomingVersion;
+        }
       }
       return true;
     }
@@ -993,6 +1026,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   onCleanup(() => {
     if (statePersistTimer) clearTimeout(statePersistTimer);
     if (sidebarBroadcastTimer) clearTimeout(sidebarBroadcastTimer);
+    if (sidebarInflightAbort) {
+      sidebarInflightAbort.abort();
+      sidebarInflightAbort = null;
+    }
     if (toastTimer) clearTimeout(toastTimer);
     for (const timer of invokeRemovalTimers.values()) clearTimeout(timer);
     invokeRemovalTimers.clear();
@@ -2720,7 +2757,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     syncSidebarScroll(scrollTop: number) {
       if (!Number.isFinite(scrollTop)) return;
       localScrollTop = scrollTop;
-      if (options.sidebar) broadcastSidebarState();
+      if (canSyncScrollTop()) broadcastSidebarState();
     },
 
     /** Apply a full sidebar selection received from another instance */
@@ -2736,7 +2773,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       batch(() => {
         setState("selectedSessionId", sessionId);
         setSelectedHeaderKey(headerKey);
-        if (typeof scrollTop === "number" && Number.isFinite(scrollTop)) {
+        if (
+          canSyncScrollTop() &&
+          typeof scrollTop === "number" &&
+          Number.isFinite(scrollTop)
+        ) {
           localScrollTop = scrollTop;
           setScrollSync((prev) => ({
             top: scrollTop,
@@ -2802,6 +2843,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     toggleGroupCollapse(groupKey: string) {
       if (isSyntheticGroupKey(groupKey)) return;
+      localScrollTop = undefined;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
         if (next.has(groupKey)) {
@@ -2829,6 +2871,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     collapseAll() {
+      localScrollTop = undefined;
       const items = flatItems();
       const keys = activeGroupKeys();
       setCollapsedGroups(keys);
@@ -2847,6 +2890,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     expandAll() {
+      localScrollTop = undefined;
       setCollapsedGroups(new Set<string>());
       persistUIState({ collapsedGroups: [] });
     },
@@ -2860,6 +2904,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (inBand(session)) return;
       const groupKey = getGroupKey(session, state.groupBy);
       if (state.groupBy === "none" || !groupKey) return;
+      localScrollTop = undefined;
       setState("selectedSessionId", null);
       setSelectedHeaderKey(groupKey);
       setCollapsedGroups((prev) => {
@@ -2873,6 +2918,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     expandGroup(groupKey: string) {
       setCollapsedGroups((prev) => {
         if (!prev.has(groupKey)) return prev;
+        localScrollTop = undefined;
         const next = new Set(prev);
         next.delete(groupKey);
         persistCollapsedGroups(next);

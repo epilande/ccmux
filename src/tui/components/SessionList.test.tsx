@@ -891,6 +891,51 @@ describe("SessionList", () => {
     expect(userScrolls).toEqual([]);
   });
 
+  it("clears suppressSelectionScroll after clicking an already-selected row so subsequent keyboard navigation scrolls", async () => {
+    const items: FlatItem[] = [
+      makeHeader("proj", 14),
+      ...Array.from({ length: 14 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: `/code/item-${i}`,
+          lastPrompt: `prompt ${i}`,
+        }),
+      ),
+    ];
+    const [selectedIndex, setSelectedIndex] = createSignal(1);
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={selectedIndex()}
+            previewWidth={30}
+            promptDisplay="row2"
+            onActivate={(_item, idx) => {
+              // Clicking row 1 when selectedIndex is already 1 is a reactive no-op
+              setSelectedIndex(idx);
+            }}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 10 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+
+    // Click already-selected row 1 (y=1 right below header)
+    await setup.mockMouse.click(3, 1);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+
+    // Next programmatic/keyboard jump to off-screen row 13 MUST scroll into view
+    setSelectedIndex(13);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBeGreaterThan(0);
+  });
+
   it("routes clicks to onActivate with the right item and index", async () => {
     const items: FlatItem[] = [
       makeHeader("proj", 2),

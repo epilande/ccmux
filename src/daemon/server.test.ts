@@ -2517,11 +2517,36 @@ describe("DaemonServer", () => {
       expect(session.attentionState).toBeNull();
     });
 
-    it("includes client-session-changed[50] in ACTIVE_PANE_HOOKS", () => {
+    it("includes client-session-changed[50] in ACTIVE_PANE_HOOKS and guards focus hook with positive invariants", () => {
       expect(
         (DaemonServer as unknown as { ACTIVE_PANE_HOOKS: readonly string[] })
           .ACTIVE_PANE_HOOKS,
       ).toContain("client-session-changed[50]");
+
+      const { internals } = createServer();
+      const origSpawn = Bun.spawn;
+      const calls: string[][] = [];
+      Bun.spawn = ((argv: string[]) => {
+        calls.push([...argv]);
+        return { exited: Promise.resolve(0) };
+      }) as unknown as typeof Bun.spawn;
+      try {
+        (
+          internals as unknown as { installPaneFocusHook: () => void }
+        ).installPaneFocusHook();
+      } finally {
+        Bun.spawn = origSpawn;
+      }
+
+      expect(calls).toHaveLength(3);
+      for (const argv of calls) {
+        const hookCmd = argv.at(-1) ?? "";
+        expect(hookCmd).toContain('[ -n "#{session_attached}" ]');
+        expect(hookCmd).toContain('[ "#{session_attached}" != "0" ]');
+        expect(hookCmd).toContain('[ "#{window_active}" = "1" ]');
+        expect(hookCmd).toContain('[ "#{pane_active}" = "1" ]');
+        expect(hookCmd).toEndWith("|| true'");
+      }
     });
 
     it("updates lastSidebarState when active pane resolves to a session", async () => {
@@ -2712,6 +2737,61 @@ describe("DaemonServer", () => {
       await internals.handleSidebarStateUpdate(req, {});
 
       expect(internals.lastSidebarState.selectedHeaderKey).toBeNull();
+    });
+
+    it("ignores out-of-order lower versions from the same senderId while accepting independent senders", async () => {
+      const { internals } = createServer();
+      const broadcastEvents: unknown[] = [];
+      (
+        internals as unknown as { broadcastEvent: (e: unknown) => void }
+      ).broadcastEvent = (e) => broadcastEvents.push(e);
+
+      const post = (body: Record<string, unknown>) =>
+        internals.handleSidebarStateUpdate(
+          new Request("http://localhost/sidebar-state", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+          {},
+        );
+
+      await post({
+        selectedSessionId: "s2",
+        selectedHeaderKey: null,
+        scrollTop: 12,
+        version: 5,
+        senderId: "sidebar-a",
+      });
+      // Delayed older request from same sender arrives out of order -> ignored
+      await post({
+        selectedSessionId: "s1",
+        selectedHeaderKey: null,
+        scrollTop: 0,
+        version: 4,
+        senderId: "sidebar-a",
+      });
+      expect(internals.lastSidebarState).toEqual({
+        selectedSessionId: "s2",
+        selectedHeaderKey: null,
+        scrollTop: 12,
+      });
+      expect(broadcastEvents).toHaveLength(1);
+
+      // Independent sender with lower version counter is still accepted
+      await post({
+        selectedSessionId: "s3",
+        selectedHeaderKey: null,
+        scrollTop: 6,
+        version: 1,
+        senderId: "sidebar-b",
+      });
+      expect(internals.lastSidebarState).toEqual({
+        selectedSessionId: "s3",
+        selectedHeaderKey: null,
+        scrollTop: 6,
+      });
+      expect(broadcastEvents).toHaveLength(2);
     });
   });
 
