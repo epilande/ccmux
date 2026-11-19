@@ -331,6 +331,14 @@ export function App(props: AppProps) {
   markStartup("store_created");
   let readSidebarScrollTop: (() => number) | null = null;
   let suppressFlashOnce = false;
+  function withoutPaneFlash(fn: () => void): void {
+    suppressFlashOnce = true;
+    try {
+      fn();
+    } finally {
+      suppressFlashOnce = false;
+    }
+  }
 
   /** Guard a tmux-targeting action: toast and return false when the pane is on
    *  a different server, so we refuse rather than hit the wrong pane. Reads the
@@ -1175,12 +1183,7 @@ export function App(props: AppProps) {
       store.actions.hideGroupContextMenu();
       return;
     }
-    suppressFlashOnce = true;
-    try {
-      store.actions.selectFlatItem(item, index);
-    } finally {
-      suppressFlashOnce = false;
-    }
+    withoutPaneFlash(() => store.actions.selectFlatItem(item, index));
     // A click while aiming a handoff picks that row, the same as Enter on it.
     // The alternative is the ordinary activation, which in the one-shot picker
     // switches panes and EXITS, losing both the pick and the surface it was
@@ -3371,12 +3374,9 @@ export function App(props: AppProps) {
           sessionId &&
           store.state.selectedSessionId !== sessionId
         ) {
-          suppressFlashOnce = true;
-          try {
-            store.actions.applySidebarSelection(sessionId, null);
-          } finally {
-            suppressFlashOnce = false;
-          }
+          withoutPaneFlash(() =>
+            store.actions.applySidebarSelection(sessionId, null),
+          );
         }
         // The daemon broadcasts this on every pane/window switch, which is
         // also every moment a sidebar can become visible or hidden. Debounced
@@ -3392,16 +3392,13 @@ export function App(props: AppProps) {
       ) => {
         // Ignore echo-back of our own broadcasts (stale version)
         if (!store.isSidebarVersionNewer(version, senderId)) return;
-        suppressFlashOnce = true;
-        try {
+        withoutPaneFlash(() =>
           store.actions.applySidebarSelection(
             selectedSessionId,
             selectedHeaderKey,
             scrollTop,
-          );
-        } finally {
-          suppressFlashOnce = false;
-        }
+          ),
+        );
       },
       onError: (error) => {
         store.actions.setError(error);
@@ -3417,9 +3414,14 @@ export function App(props: AppProps) {
     // Hydrate sidebar selection from daemon so new instances sync with existing ones.
     // Skip if the daemon has nothing to share so we don't clobber the active-pane default.
     if (props.sidebar) {
-      fetch(`${getDaemonUrl()}/sidebar-state`)
-        .then((r) => r.json() as Promise<Record<string, unknown>>)
+      fetch(`${getDaemonUrl()}/sidebar-state`, {
+        signal: AbortSignal.timeout(500),
+      })
+        .then((r) =>
+          r.ok ? (r.json() as Promise<Record<string, unknown>>) : null,
+        )
         .then((data) => {
+          if (!data) return;
           const sessionId =
             typeof data.selectedSessionId === "string"
               ? data.selectedSessionId
@@ -3429,7 +3431,10 @@ export function App(props: AppProps) {
               ? data.selectedHeaderKey
               : null;
           const scrollTop =
-            typeof data.scrollTop === "number" ? data.scrollTop : undefined;
+            typeof data.scrollTop === "number" &&
+            Number.isFinite(data.scrollTop)
+              ? data.scrollTop
+              : undefined;
           if (
             sessionId === null &&
             headerKey === null &&
@@ -3437,16 +3442,13 @@ export function App(props: AppProps) {
           ) {
             return;
           }
-          suppressFlashOnce = true;
-          try {
+          withoutPaneFlash(() =>
             store.actions.applySidebarSelection(
               sessionId,
               headerKey,
               scrollTop,
-            );
-          } finally {
-            suppressFlashOnce = false;
-          }
+            ),
+          );
         })
         .catch(() => {});
     }

@@ -50,6 +50,7 @@ import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
   buildFlatItems,
+  flatItemIdentity,
   isSyntheticGroupKey,
   getGroupKey,
   groupSessions,
@@ -915,6 +916,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    *  Incremented on every local selection change so echo-back events
    *  from the daemon can be detected and ignored, while peer sidebars
    *  with independent counters are identified via sidebarInstanceId. */
+  const SIDEBAR_STATE_TIMEOUT_MS = 500;
   const sidebarInstanceId = crypto.randomUUID();
   let sidebarVersion = 0;
   let sidebarBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -934,6 +936,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     };
   }
 
+  function postSidebarState(): Promise<Response> {
+    return fetch(`${getDaemonUrl()}/sidebar-state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSidebarStatePayload()),
+      signal: AbortSignal.timeout(SIDEBAR_STATE_TIMEOUT_MS),
+    });
+  }
+
   /** Broadcast sidebar selection to all instances via daemon SSE.
    *  Debounced to coalesce rapid navigation into a single broadcast. */
   function broadcastSidebarState() {
@@ -941,11 +952,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     if (sidebarBroadcastTimer) clearTimeout(sidebarBroadcastTimer);
     sidebarBroadcastTimer = setTimeout(() => {
       sidebarBroadcastTimer = null;
-      fetch(`${getDaemonUrl()}/sidebar-state`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildSidebarStatePayload()),
-      }).catch(() => {});
+      postSidebarState().catch(() => {});
     }, 100);
   }
 
@@ -961,11 +968,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       sidebarBroadcastTimer = null;
     }
     try {
-      await fetch(`${getDaemonUrl()}/sidebar-state`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildSidebarStatePayload()),
-      });
+      await postSidebarState();
     } catch {
       // Best-effort sync
     }
@@ -977,9 +980,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     incomingSenderId?: string,
   ): boolean {
     if (incomingSenderId !== undefined) {
-      if (incomingSenderId === sidebarInstanceId) {
-        return incomingVersion !== undefined && incomingVersion > sidebarVersion;
-      }
+      if (incomingSenderId === sidebarInstanceId) return false;
       if (incomingVersion !== undefined && incomingVersion > sidebarVersion) {
         sidebarVersion = incomingVersion;
       }
@@ -1549,14 +1550,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     const header = selectedGroupHeader();
     return header?.members.map((fs) => fs.session) ?? [];
   });
-
-  /** Stable identity for a flat row. Used to find a pre-kill predecessor in
-   *  the post-rebuild list after headers for emptied groups disappear. */
-  function flatItemIdentity(item: FlatItem): string {
-    return item.type === "header"
-      ? `header:${item.groupKey}`
-      : `session:${item.filteredSession.session.id}`;
-  }
 
   /** Select an item in the flat list by index.
    *  Batched to prevent transient states where selectedIndex() falls back to 0. */

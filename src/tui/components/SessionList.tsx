@@ -27,6 +27,7 @@ import {
   type FlatItem,
   type FilteredSession,
   type GroupBy,
+  flatItemIdentity,
   groupSessions,
   groupRepoRoot,
   NEEDS_YOU_GROUP_KEY,
@@ -345,13 +346,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
   let suppressSelectionScroll = false;
   let programmaticScrolling = false;
 
-  const itemIdentityKey = (item: FlatItem | undefined): string | null => {
-    if (!item) return null;
-    return item.type === "header"
-      ? `header:${item.groupKey}`
-      : `session:${item.filteredSession.session.id}`;
-  };
-
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
     // The scrollbox mounts in the same update that delivers the first
@@ -369,7 +363,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (viewportHeight <= 0 || contentHeight <= 0) return;
 
     const validIndex = index >= 0 && index < items.length;
-    const selectedKey = validIndex ? itemIdentityKey(items[index]) : null;
+    const selectedKey = validIndex ? flatItemIdentity(items[index]!) : null;
 
     if (sync && sync.generation !== prevSyncGeneration) {
       prevSyncGeneration = sync.generation;
@@ -578,7 +572,6 @@ export const SessionList: Component<SessionListProps> = (props) => {
             autoScrollFields.autoScrollThresholdHorizontal = -1;
             initialScrollDone = false;
             prevViewportHeight = 0;
-            prevSyncGeneration = 0;
             // Handed up here rather than on mount: with no rows there is no
             // scrollbox at all (see the fallback above), and a resolver
             // published before it existed would answer null for the list's

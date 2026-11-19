@@ -106,6 +106,7 @@ function flashBg(): string {
 
 let flashTimer: Timer | null = null;
 let flashingPaneId: string | null = null;
+let flashRequestSeq = 0;
 
 function resetPaneStyle(paneId: string): void {
   Bun.spawn(tmuxArgv("set-option", "-p", "-u", "-t", paneId, "window-style"), {
@@ -155,9 +156,10 @@ async function hasMultipleMainPanes(paneId: string): Promise<boolean> {
  */
 export function flashPane(paneId: string): void {
   if (flashingPaneId === paneId && flashTimer) return;
+  const seq = ++flashRequestSeq;
 
   void hasMultipleMainPanes(paneId).then((shouldFlash) => {
-    if (!shouldFlash) return;
+    if (seq !== flashRequestSeq || !shouldFlash) return;
     if (flashingPaneId === paneId && flashTimer) return;
 
     if (flashTimer) {
