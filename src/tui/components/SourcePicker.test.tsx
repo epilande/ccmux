@@ -1652,6 +1652,39 @@ for (const width of [30, 26]) {
   });
 }
 
+// A checked-out source carries a `→ name` suffix as well, and the suffix
+// used to take half the title's room, cutting #156 to `#1…`. The number is the
+// row's identity, so it is reserved whole and the metadata gives way instead.
+for (const width of [23, 30, 40]) {
+  it(`keeps a checked-out PR's whole number and its checkout at ${width} columns`, async () => {
+    const day = 86_400_000;
+    const h = await mountSettled({
+      width,
+      compact: true,
+      prs: [
+        openPR({
+          ciStatus: "passing",
+          reviewDecision: "APPROVED",
+          createdAt: new Date(Date.now() - 12 * day).toISOString(),
+        }),
+        openPR({
+          number: 2047,
+          headRefOid: "sha-2047",
+          createdAt: new Date(Date.now() - 3 * day).toISOString(),
+        }),
+      ],
+      issues: [],
+      worktrees: [worktreeRow({ name: "parking", tip: "sha-156" })],
+    });
+    const lines = (await h.frame()).split("\n");
+    const checkedOut = lines.find((l) => l.includes("#156"));
+    expect(checkedOut).toBeDefined();
+    expect(checkedOut).toMatch(/#156 \S/);
+    expect(checkedOut).toContain("→ p");
+    expect(lines.find((l) => l.includes("#2047"))).toMatch(/#2047 \S/);
+  });
+}
+
 it("keeps failing checks ahead of a long author and branch in compact Start", async () => {
   const h = await mountSettled({
     width: 30,

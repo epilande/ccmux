@@ -567,19 +567,41 @@ export function sourceCellWidths(cells: SourceRowCells[]): {
   };
 }
 
-/** The title keeps at least this much: its marker, number and a word or so,
- *  which is what tells two rows apart. */
-const TITLE_MIN = 10;
+/** Title text kept beside the number: a space, a character, the ellipsis. */
+const TITLE_TEXT_MIN = 3;
+/** The narrowest checkout suffix that still names its checkout: ` → p…`. */
+const CHECKOUT_MIN = 5;
+
+/** A row's identity: its marker and its whole number (`⊙ #156`). */
+function sourceRowIdentity(row: SourceRow): string {
+  const number = row.kind === "pr" ? row.pr.number : row.issue.number;
+  return `${sourceRowMarker(row)} #${number}`;
+}
+
+/**
+ * The columns a row's label needs before any metadata: the marker and the
+ * WHOLE number (the row's identity), a little title, and, for a checked-out
+ * source, a checkout suffix short enough to still name the checkout.
+ */
+export function sourceLabelMin(row: SourceRow): number {
+  return (
+    displayWidth(sourceRowIdentity(row)) +
+    TITLE_TEXT_MIN +
+    (row.checkedOutName ? CHECKOUT_MIN : 0)
+  );
+}
 
 /**
  * Drop fixed cells, least telling first (review, then age, then CI), while
- * they would leave the title fewer than {@link TITLE_MIN} of `room` columns.
- * The widths are list-wide, so without this one approved PR with checks
- * empties every row's title in a narrow sidebar.
+ * they would leave the label fewer than `labelMin` of `room` columns (the
+ * widest {@link sourceLabelMin} in view). The widths are list-wide, so
+ * without this one approved PR with checks empties every row's title in a
+ * narrow sidebar.
  */
 export function fitSourceCellWidths(
   widths: { ci: number; review: number; age: number },
   room: number,
+  labelMin: number,
 ): { ci: number; review: number; age: number } {
   const fitted = { ...widths };
   const used = () =>
@@ -588,8 +610,38 @@ export function fitSourceCellWidths(
       0,
     );
   for (const cell of ["review", "age", "ci"] as const)
-    if (room - used() < TITLE_MIN) fitted[cell] = 0;
+    if (room - used() < labelMin) fitted[cell] = 0;
   return fitted;
+}
+
+/**
+ * Split a row's `room` between its title (which starts with its identity)
+ * and its checkout suffix. The suffix changes what Enter does, so it keeps up
+ * to half the room, but never the identity's columns: the number is what
+ * tells two rows apart, and `#1… → park…` names neither. Where the title
+ * fragment and the suffix cannot both fit, the fragment goes first
+ * (`⊙ #156 → pa…`); only below that does the suffix drop.
+ */
+export function fitSourceLabel(
+  row: SourceRow,
+  title: string,
+  checkout: string,
+  room: number,
+): string {
+  const identity = sourceRowIdentity(row);
+  const identityWidth = displayWidth(identity);
+  const suffixMin = Math.min(CHECKOUT_MIN, displayWidth(checkout));
+  const suffixRoom = Math.min(
+    Math.floor(room / 2),
+    room - identityWidth - TITLE_TEXT_MIN,
+  );
+  if (checkout && suffixRoom < suffixMin && room - identityWidth >= suffixMin)
+    return identity + truncateText(checkout, room - identityWidth);
+  const suffix =
+    checkout && suffixRoom >= suffixMin
+      ? truncateText(checkout, suffixRoom)
+      : "";
+  return truncateText(title, Math.max(1, room - displayWidth(suffix))) + suffix;
 }
 
 /** Columns between the title and the middle, and between middle phrases. */

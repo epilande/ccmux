@@ -4,7 +4,6 @@ import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
 import type { PanelEffects } from "./WorktreesPanel";
 import { useRenderer } from "@opentui/solid";
-import { displayWidth } from "../utils/format";
 import type { Component } from "solid-js";
 import {
   For,
@@ -38,11 +37,13 @@ import {
   emptyStateText,
   filterRepos,
   fitSourceCellWidths,
+  fitSourceLabel,
   fitSourceRow,
   hasRows,
   isIssueRowKey,
   pickerRows,
   sourceCellWidths,
+  sourceLabelMin,
   sourceRowCells,
   sourceRowDim,
   sourceRowLabel,
@@ -918,6 +919,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         ),
       ),
       listWidth() - 6,
+      rows().reduce((n, row) => Math.max(n, sourceLabelMin(row)), 0),
     ),
   );
   const fixedCellsWidth = () => {
@@ -971,17 +973,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         cells().middle,
         Math.max(1, listWidth() - 6 - fixedCellsWidth()),
       );
-      // The checkout suffix changes what Enter does, so it keeps up to half
-      // the title's room and the title truncates before it.
-      const suffix = checkout
-        ? truncateText(checkout, Math.floor(fit.titleRoom / 2))
-        : "";
       return {
-        label:
-          truncateText(
-            title,
-            Math.max(1, fit.titleRoom - displayWidth(suffix)),
-          ) + suffix,
+        label: fitSourceLabel(row, title, checkout, fit.titleRoom),
         middle: fit.middle,
       };
     });
