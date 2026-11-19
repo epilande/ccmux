@@ -768,6 +768,58 @@ describe("Worktrees read and effect regressions", () => {
     await h.keys.pressKey("x");
     expect(await h.frame()).toContain("Delete alpha");
   });
+  // `a` marks what classification says can go, so without an answer it has
+  // nothing to mark from and must leave the marks it would replace alone.
+  for (const outcome of ["pending", "failed"] as const) {
+    it(`keeps existing marks when a is pressed while classification is ${outcome}`, async () => {
+      const beta = row({ path: "/repo/wt/beta", name: "beta", branch: "b" });
+      const both = {
+        candidates: [
+          candidate(),
+          candidate({ path: beta.path, name: "beta", branch: "b" }),
+        ],
+        skipped: [],
+      };
+      let next: (() => Promise<ScanResponse>) | null = null;
+      const h = await mount({
+        rows: [mainRow(), row(), beta],
+        cursor: row().path,
+        scan: () => (next ? next() : Promise.resolve(both)),
+      });
+      // Mark alpha, leave the cursor on beta.
+      await h.keys.pressKey(" ");
+      await h.keys.pressKey("j");
+      let finish!: (scan: ScanResponse) => void;
+      next =
+        outcome === "pending"
+          ? () =>
+              new Promise((done) => {
+                finish = done;
+              })
+          : async () => {
+              throw new Error("classification unavailable");
+            };
+      await h.keys.pressKey("R");
+      await h.frame();
+      await h.keys.pressKey("a");
+      expect(await h.frame()).toContain(
+        outcome === "pending"
+          ? "Waiting for removal classification"
+          : "Removal scan failed; R retries",
+      );
+      if (outcome === "pending") finish(both);
+      else {
+        next = null;
+        await h.keys.pressKey("R");
+      }
+      await h.frame();
+      // The removal is still the marked alpha, not the cursor's beta.
+      await h.keys.pressKey("x");
+      const frame = await h.frame();
+      expect(frame).toContain("Delete alpha");
+      expect(frame).not.toContain("beta?");
+    });
+  }
   for (const status of [404, 500]) {
     it(`surfaces a local ${status} failure and recovers on R`, async () => {
       let fail = true;

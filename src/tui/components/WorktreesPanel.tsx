@@ -1160,6 +1160,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           setMarks(new Set<string>());
           break;
         }
+        // Until classification answers there is nothing to mark from, and
+        // trading the marks for that nothing would drop a selection `x` still
+        // acts on. Say why instead; A remains the way to clear them.
+        if (scanState() !== "done") {
+          flash(markAllNote([], scanState()));
+          break;
+        }
         setMarks(
           new Set(
             rows()
