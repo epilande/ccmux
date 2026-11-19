@@ -396,6 +396,18 @@ export function App(props: AppProps) {
   function activateItem(item: FlatItem) {
     if (item.type === "header") {
       store.actions.toggleGroupCollapse(item.groupKey);
+      if (props.sidebar) {
+        void store.flushSidebarStateNow(readSidebarScrollTop?.());
+      }
+      return;
+    }
+    if (props.sidebar) {
+      // Flush selection + current scrollTop to the daemon BEFORE switching
+      // windows so the destination sidebar renders the exact same viewport
+      // offset without a post-switch jump.
+      void store
+        .flushSidebarStateNow(readSidebarScrollTop?.())
+        .finally(() => activateSession(item.filteredSession.session));
       return;
     }
     activateSession(item.filteredSession.session);
@@ -1191,18 +1203,6 @@ export function App(props: AppProps) {
     if (store.state.handoffPick) {
       commitHandoffPick();
       return;
-    }
-    if (props.sidebar && item.type === "session") {
-      // Flush selection + current scrollTop to the daemon BEFORE switching
-      // windows so the destination sidebar renders the exact same viewport
-      // offset without a post-switch jump.
-      void store
-        .flushSidebarStateNow(readSidebarScrollTop?.())
-        .finally(() => activateItem(item));
-      return;
-    }
-    if (props.sidebar) {
-      void store.flushSidebarStateNow(readSidebarScrollTop?.());
     }
     activateItem(item);
   }

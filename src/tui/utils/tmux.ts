@@ -115,6 +115,23 @@ function resetPaneStyle(paneId: string): void {
   });
 }
 
+/**
+ * Pure check over `list-panes -F "#{pane_id}<sep>#{pane_title}"` output:
+ * true only when the window holds at least two non-ccmux panes.
+ */
+export function hasMultipleMainPanesInList(output: string): boolean {
+  let mainPanes = 0;
+  for (const line of output.split("\n")) {
+    if (!line) continue;
+    const [id, title = ""] = line.split(PANE_FIELD_SEP);
+    if (id && !isCcmuxPane(title)) {
+      mainPanes++;
+      if (mainPanes >= 2) return true;
+    }
+  }
+  return false;
+}
+
 async function hasMultipleMainPanes(paneId: string): Promise<boolean> {
   try {
     const proc = Bun.spawn(
@@ -132,16 +149,7 @@ async function hasMultipleMainPanes(paneId: string): Promise<boolean> {
       proc.exited,
     ]);
     if (exitCode !== 0) return false;
-    let mainPanes = 0;
-    for (const line of output.split("\n")) {
-      if (!line) continue;
-      const [id, title = ""] = line.split(PANE_FIELD_SEP);
-      if (id && !isCcmuxPane(title)) {
-        mainPanes++;
-        if (mainPanes >= 2) return true;
-      }
-    }
-    return false;
+    return hasMultipleMainPanesInList(output);
   } catch {
     return false;
   }

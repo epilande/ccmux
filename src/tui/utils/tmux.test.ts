@@ -4,6 +4,7 @@ import {
   parseWindowIdByName,
   agentAttachWindowName,
   isSafeAgentShortId,
+  hasMultipleMainPanesInList,
   AGENTS_WINDOW_NAME,
 } from "./tmux";
 import { setPinnedTmuxClientTty } from "../../lib/tmux-client";
@@ -101,10 +102,7 @@ describe("parseLaunchPane", () => {
   });
 
   it("returns the active pane for a popup picker, which is not a pane", () => {
-    const output = [
-      row("%1", "zsh", "0"),
-      row("%2", "nvim", "1"),
-    ].join("\n");
+    const output = [row("%1", "zsh", "0"), row("%2", "nvim", "1")].join("\n");
     expect(parseLaunchPane(output, null)).toBe("%2");
   });
 
@@ -112,10 +110,7 @@ describe("parseLaunchPane", () => {
     // The inline picker vacates its pane on spawn, so that pane is exactly
     // where the split belongs. Excluding it halves the neighbour instead —
     // someone's editor — which is what shipped before this was surfaced.
-    const output = [
-      row("%1", "nvim", "0"),
-      row("%2", "bun", "1"),
-    ].join("\n");
+    const output = [row("%1", "nvim", "0"), row("%2", "bun", "1")].join("\n");
     expect(parseLaunchPane(output, "%2")).toBe("%2");
   });
 
@@ -126,10 +121,9 @@ describe("parseLaunchPane", () => {
   });
 
   it("still skips a titled persistent picker, which does not vacate", () => {
-    const output = [
-      row("%1", "zsh", "0"),
-      row("%2", "ccmux-picker", "1"),
-    ].join("\n");
+    const output = [row("%1", "zsh", "0"), row("%2", "ccmux-picker", "1")].join(
+      "\n",
+    );
     expect(parseLaunchPane(output, "%2")).toBe("%1");
   });
 
@@ -190,8 +184,7 @@ function withTmuxStubs(responses: SpawnResponse[]): {
   };
 }
 
-const windowRow = (id: string, name: string) =>
-  [id, name].join(PANE_FIELD_SEP);
+const windowRow = (id: string, name: string) => [id, name].join(PANE_FIELD_SEP);
 
 /** A `list-clients` listing in the launcher's own `-F` shape. The decoy comes
  *  first and sits on a different session, so a match by anything other than the
@@ -784,5 +777,34 @@ describe("notifyActivePane", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("hasMultipleMainPanesInList", () => {
+  it("returns false for a single main pane alongside a sidebar", () => {
+    const output = [row("%1", "ccmux-sidebar"), row("%2", "claude")].join("\n");
+    expect(hasMultipleMainPanesInList(output)).toBe(false);
+  });
+
+  it("returns false when remaining panes are ccmux surfaces", () => {
+    const output = [
+      row("%1", "ccmux-sidebar"),
+      row("%2", "ccmux-picker"),
+      row("%3", "zsh"),
+    ].join("\n");
+    expect(hasMultipleMainPanesInList(output)).toBe(false);
+  });
+
+  it("returns true when two or more non-ccmux panes share the window", () => {
+    const output = [
+      row("%1", "ccmux-sidebar"),
+      row("%2", "claude"),
+      row("%3", ""),
+    ].join("\n");
+    expect(hasMultipleMainPanesInList(output)).toBe(true);
+  });
+
+  it("returns false on empty output", () => {
+    expect(hasMultipleMainPanesInList("")).toBe(false);
   });
 });
