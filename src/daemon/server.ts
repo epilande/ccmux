@@ -652,6 +652,7 @@ export class DaemonServer {
   private lastSidebarState: {
     selectedSessionId: string | null;
     selectedHeaderKey: string | null;
+    scrollTop?: number;
   } = { selectedSessionId: null, selectedHeaderKey: null };
   private attentionTracker: AttentionTracker;
   private invocationManager: InvocationManager;
@@ -2423,9 +2424,15 @@ export class DaemonServer {
     const sessionId = session?.id ?? null;
 
     if (sessionId !== null) {
+      const keepScrollTop =
+        this.lastSidebarState.selectedSessionId === sessionId &&
+        this.lastSidebarState.scrollTop !== undefined;
       this.lastSidebarState = {
         selectedSessionId: sessionId,
         selectedHeaderKey: null,
+        ...(keepScrollTop
+          ? { scrollTop: this.lastSidebarState.scrollTop }
+          : {}),
       };
     }
 
@@ -2583,10 +2590,15 @@ export class DaemonServer {
     const version = typeof body.version === "number" ? body.version : undefined;
     const senderId =
       typeof body.senderId === "string" ? body.senderId : undefined;
+    const scrollTop =
+      typeof body.scrollTop === "number" && Number.isFinite(body.scrollTop)
+        ? body.scrollTop
+        : undefined;
 
     this.lastSidebarState = {
       selectedSessionId,
       selectedHeaderKey,
+      ...(scrollTop !== undefined ? { scrollTop } : {}),
     };
 
     this.broadcastEvent({
@@ -2594,6 +2606,7 @@ export class DaemonServer {
       timestamp: new Date().toISOString(),
       selectedSessionId,
       selectedHeaderKey,
+      ...(scrollTop !== undefined ? { scrollTop } : {}),
       version,
       senderId,
     });

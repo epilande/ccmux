@@ -3679,6 +3679,46 @@ describe("store", () => {
       store.actions.selectFlatItem(staleItem, 1);
       expect(store.state.selectedSessionId).toBe("s2");
     });
+
+    it("tracks scrollSync on applySidebarSelection and flushes scrollTop immediately via flushSidebarStateNow", async () => {
+      const fetchCalls: Array<{ url: string; body: Record<string, unknown> }> =
+        [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        fetchCalls.push({
+          url: String(input),
+          body: init?.body ? JSON.parse(String(init.body)) : {},
+        });
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch;
+
+      try {
+        const store = createTUIStore({ sidebar: true, groupBy: "none" });
+        store.actions.setSessions([
+          createMockSession({ id: "s1" }),
+          createMockSession({ id: "s2" }),
+        ]);
+
+        expect(store.scrollSync()).toBeNull();
+        store.actions.applySidebarSelection("s2", null, 14);
+        expect(store.scrollSync()).toEqual({ top: 14, generation: 1 });
+
+        store.actions.setSelectedIndex(0);
+        await store.flushSidebarStateNow(9);
+        expect(fetchCalls).toHaveLength(1);
+        expect(fetchCalls[0]!.url).toContain("/sidebar-state");
+        expect(fetchCalls[0]!.body).toMatchObject({
+          selectedSessionId: "s1",
+          selectedHeaderKey: null,
+          scrollTop: 9,
+        });
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
   });
 
   describe("new session dialog", () => {

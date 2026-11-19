@@ -840,6 +840,57 @@ describe("SessionList", () => {
     expect(calls).toEqual([{ id: "s1", index: 1 }]);
   });
 
+  it("applies synced scrollTop verbatim and disables drag auto-scroll on scrollbox", async () => {
+    const items: FlatItem[] = [
+      makeHeader("proj", 20),
+      ...Array.from({ length: 20 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: `/code/item-${i}`,
+          lastPrompt: `prompt ${i}`,
+        }),
+      ),
+    ];
+    const [scrollSync, setScrollSync] = createSignal<{
+      top: number;
+      generation: number;
+    } | null>({ top: 7, generation: 1 });
+    const userScrolls: number[] = [];
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={5}
+            previewWidth={30}
+            promptDisplay="row2"
+            scrollSync={scrollSync()}
+            onUserScroll={(top) => userScrolls.push(top)}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    // Exact scrollTop=7 applied instead of scrollTarget's minimum scroll
+    expect(box!.scrollTop).toBe(7);
+    // Drag auto-scroll disabled so mid-click window switches cannot runaway scroll
+    expect(
+      (box as unknown as { autoScrollThresholdVertical: number })
+        .autoScrollThresholdVertical,
+    ).toBe(-1);
+    // Programmatic sync must not echo back through onUserScroll
+    expect(userScrolls).toEqual([]);
+
+    // Updating scrollSync generation moves scrollTop verbatim again
+    setScrollSync({ top: 3, generation: 2 });
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(3);
+    expect(userScrolls).toEqual([]);
+  });
+
   it("routes clicks to onActivate with the right item and index", async () => {
     const items: FlatItem[] = [
       makeHeader("proj", 2),

@@ -41,6 +41,7 @@ export interface SSECallbacks {
     selectedHeaderKey: string | null,
     version: number | undefined,
     senderId?: string,
+    scrollTop?: number,
   ) => void;
   onInvocationStarted?: (event: InvocationStartedEvent) => void;
   onInvocationFinished?: (event: InvocationFinishedEvent) => void;
@@ -93,6 +94,7 @@ export function dispatchSSEEvent(
         event.selectedHeaderKey ?? null,
         event.version,
         event.senderId,
+        event.scrollTop,
       );
       break;
     case "invocation_started":

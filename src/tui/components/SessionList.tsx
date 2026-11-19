@@ -109,6 +109,14 @@ interface SessionListProps {
    * scroll offset and the viewport's own position all live here.
    */
   onRowAnchor?: (resolve: RowAnchor) => void;
+  /** Cross-sidebar vertical scroll synchronization signal */
+  scrollSync?: { top: number; generation: number } | null;
+  /** Fired only on user-initiated scroll (mouse wheel / scrollbar) */
+  onUserScroll?: (scrollTop: number) => void;
+  /** Fired whenever scrollTop changes (user or programmatic) */
+  onScrollMoved?: (scrollTop: number) => void;
+  /** Hands parent a synchronous reader for the live scrollTop */
+  onScrollTopReader?: (read: () => number) => void;
 }
 
 /** Where a flat-item row is on screen right now, or null when it is not
@@ -333,6 +341,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
   let prevItems: FlatItem[] | undefined;
   let prevSelectedIndex = -1;
   let prevSelectedKey: string | null = null;
+  let prevSyncGeneration = 0;
+  let suppressSelectionScroll = false;
+  let programmaticScrolling = false;
 
   const itemIdentityKey = (item: FlatItem | undefined): string | null => {
     if (!item) return null;
@@ -350,13 +361,45 @@ export const SessionList: Component<SessionListProps> = (props) => {
     void scrollboxLayout();
     const items = props.items;
     const index = props.selectedIndex;
-    if (!scrollboxRef || index < 0 || index >= items.length) return;
+    const sync = props.scrollSync ?? null;
+    if (!scrollboxRef || items.length === 0) return;
 
     const viewportHeight = scrollboxRef.viewport?.height ?? 0;
     const contentHeight = scrollboxRef.content?.height ?? 0;
     if (viewportHeight <= 0 || contentHeight <= 0) return;
 
-    const selectedKey = itemIdentityKey(items[index]);
+    const validIndex = index >= 0 && index < items.length;
+    const selectedKey = validIndex ? itemIdentityKey(items[index]) : null;
+
+    if (sync && sync.generation !== prevSyncGeneration) {
+      prevSyncGeneration = sync.generation;
+      initialScrollDone = true;
+      prevViewportHeight = viewportHeight;
+      prevItems = items;
+      prevSelectedIndex = index;
+      prevSelectedKey = selectedKey;
+      suppressSelectionScroll = false;
+      programmaticScrolling = true;
+      try {
+        scrollboxRef.scrollTo(sync.top);
+      } finally {
+        programmaticScrolling = false;
+      }
+      return;
+    }
+
+    if (!validIndex) return;
+
+    if (suppressSelectionScroll) {
+      suppressSelectionScroll = false;
+      initialScrollDone = true;
+      prevViewportHeight = viewportHeight;
+      prevItems = items;
+      prevSelectedIndex = index;
+      prevSelectedKey = selectedKey;
+      return;
+    }
+
     const isInitialLayout = !initialScrollDone;
     const viewportResized =
       !isInitialLayout && viewportHeight !== prevViewportHeight;
@@ -384,7 +427,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
       sessionLines,
     );
     if (target !== null) {
-      scrollboxRef.scrollTo(target);
+      programmaticScrolling = true;
+      try {
+        scrollboxRef.scrollTo(target);
+      } finally {
+        programmaticScrolling = false;
+      }
     }
   });
 
@@ -421,7 +469,10 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
   const renderItem = (item: FlatItem, index: Accessor<number>) => {
     const onActivate = props.onActivate
-      ? () => props.onActivate!(item, index())
+      ? () => {
+          suppressSelectionScroll = true;
+          props.onActivate!(item, index());
+        }
       : undefined;
     const onContextMenu = props.onContextMenu
       ? (event: MouseEvent) => props.onContextMenu!(item, index(), event)
@@ -516,13 +567,30 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <scrollbox
           ref={(r: ScrollBoxRenderable) => {
             scrollboxRef = r;
+            // Disable drag-edge auto-scrolling so a mid-click tmux window switch
+            // (which steals focus before MouseUp reaches this pane) can never
+            // leave an 80-Hz runaway scroll timer running to the bottom.
+            const autoScrollFields = r as unknown as {
+              autoScrollThresholdVertical: number;
+              autoScrollThresholdHorizontal: number;
+            };
+            autoScrollFields.autoScrollThresholdVertical = -1;
+            autoScrollFields.autoScrollThresholdHorizontal = -1;
             initialScrollDone = false;
             prevViewportHeight = 0;
+            prevSyncGeneration = 0;
             // Handed up here rather than on mount: with no rows there is no
             // scrollbox at all (see the fallback above), and a resolver
             // published before it existed would answer null for the list's
             // whole life.
             props.onRowAnchor?.(rowAnchor);
+            props.onScrollTopReader?.(() => r.scrollTop);
+            r.verticalScrollBar.on("change", () => {
+              props.onScrollMoved?.(r.scrollTop);
+              if (!programmaticScrolling) {
+                props.onUserScroll?.(r.scrollTop);
+              }
+            });
             // The root's resize fires before its children are measured, so
             // listen on the two nodes whose sizes the scroll effect reads.
             const bump = () => setScrollboxLayout((v) => v + 1);

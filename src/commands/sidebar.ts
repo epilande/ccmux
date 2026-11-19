@@ -408,30 +408,17 @@ async function unregisterAutoOpenHook(): Promise<void> {
 
 /**
  * The `window-resized` hook body: re-pin the resized window's sidebar to the
- * baked width, in pure shell.
+ * baked width synchronously in-process via `run-shell -C`.
  *
- * This runs on *every* window that changes size, and a client attach or a
- * session switch with `window-size=latest` resizes them all at once. Booting
- * `ccmux sidebar --resize` here cost ~120ms of CLI startup per firing and then
- * re-pinned every sidebar on the server (`list-panes -a`), so N windows meant
- * N boots x N resize-panes. Pure shell scoped to `#{hook_window}` makes each
- * firing two short-lived tmux clients and touches only its own window.
- *
- * Format escaping is load-bearing (verified live on tmux 3.6a):
- *   - `#{socket_path}` / `#{hook_window}` expand when `run-shell` fires, so the
- *     body already names the right server and window before /bin/sh sees it.
- *   - `##{pane_id}` / `##{pane_title}` must survive that expansion as literal
- *     `#{...}` for the inner `list-panes` to interpret, hence the doubled `#`.
- * The body is single-quoted at the tmux layer, which cannot escape a quote of
- * its own, so it deliberately contains no `'`.
+ * `run-shell -b` ran asynchronously after `switch-client` had already drawn
+ * frame #1 at a proportionally rescaled sidebar width, causing a second
+ * SIGWINCH full-screen redraw ~45ms later. `run-shell -C -t "#{hook_window}"`
+ * expands `#{P:...}` over the window's panes directly inside tmux with zero
+ * subprocesses before the switched client renders.
  */
 export function resizeHookCommand(width: number): string {
-  const inner = [
-    `tmux -S "#{socket_path}" list-panes -t "#{hook_window}"`,
-    `-F "##{pane_id}" -f "##{==:##{pane_title},${SIDEBAR_PANE_TITLE}}" 2>/dev/null`,
-    `| while read -r p; do tmux -S "#{socket_path}" resize-pane -t "$p" -x ${width} 2>/dev/null; done`,
-  ].join(" ");
-  return `run-shell -b '${inner}'`;
+  const inner = `#{P:#{?#{==:#{pane_title},${SIDEBAR_PANE_TITLE}},resize-pane -t #{pane_id} -x ${width} ; ,}}`;
+  return `run-shell -C -t "#{hook_window}" '${inner}'`;
 }
 
 async function registerResizeHook(width: number): Promise<void> {

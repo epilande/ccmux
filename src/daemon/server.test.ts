@@ -111,6 +111,7 @@ type ServerInternals = {
   lastSidebarState: {
     selectedSessionId: string | null;
     selectedHeaderKey: string | null;
+    scrollTop?: number;
   };
   handleGetSessions(
     url: URL,
@@ -2568,6 +2569,39 @@ describe("DaemonServer", () => {
         selectedHeaderKey: null,
         version: 2,
         senderId: "sidebar-instance-abc",
+      });
+    });
+
+    it("caches and broadcasts numeric scrollTop when provided", async () => {
+      const { internals } = createServer();
+      const broadcastEvents: unknown[] = [];
+      (
+        internals as unknown as { broadcastEvent: (e: unknown) => void }
+      ).broadcastEvent = (e) => broadcastEvents.push(e);
+
+      const req = new Request("http://localhost/sidebar-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selectedSessionId: "s1",
+          selectedHeaderKey: null,
+          scrollTop: 18,
+          version: 3,
+          senderId: "sidebar-1",
+        }),
+      });
+
+      await internals.handleSidebarStateUpdate(req, {});
+
+      expect(internals.lastSidebarState).toEqual({
+        selectedSessionId: "s1",
+        selectedHeaderKey: null,
+        scrollTop: 18,
+      });
+      expect(broadcastEvents[0]).toMatchObject({
+        type: "sidebar_state",
+        selectedSessionId: "s1",
+        scrollTop: 18,
       });
     });
     it("should cache state and return success", async () => {

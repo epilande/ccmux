@@ -918,6 +918,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   const sidebarInstanceId = crypto.randomUUID();
   let sidebarVersion = 0;
   let sidebarBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  let localScrollTop: number | undefined;
+  const [scrollSync, setScrollSync] = createSignal<{
+    top: number;
+    generation: number;
+  } | null>(null);
+
+  function buildSidebarStatePayload() {
+    return {
+      selectedSessionId: state.selectedSessionId,
+      selectedHeaderKey: selectedHeaderKey(),
+      ...(localScrollTop !== undefined ? { scrollTop: localScrollTop } : {}),
+      version: sidebarVersion,
+      senderId: sidebarInstanceId,
+    };
+  }
 
   /** Broadcast sidebar selection to all instances via daemon SSE.
    *  Debounced to coalesce rapid navigation into a single broadcast. */
@@ -929,14 +944,31 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       fetch(`${getDaemonUrl()}/sidebar-state`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          selectedSessionId: state.selectedSessionId,
-          selectedHeaderKey: selectedHeaderKey(),
-          version: sidebarVersion,
-          senderId: sidebarInstanceId,
-        }),
+        body: JSON.stringify(buildSidebarStatePayload()),
       }).catch(() => {});
     }, 100);
+  }
+
+  /** Immediately flush sidebar state to the daemon without debounce so
+   *  peer sidebars receive selection + scrollTop before tmux switches windows. */
+  async function flushSidebarStateNow(scrollTop?: number): Promise<void> {
+    if (typeof scrollTop === "number" && Number.isFinite(scrollTop)) {
+      localScrollTop = scrollTop;
+    }
+    sidebarVersion++;
+    if (sidebarBroadcastTimer) {
+      clearTimeout(sidebarBroadcastTimer);
+      sidebarBroadcastTimer = null;
+    }
+    try {
+      await fetch(`${getDaemonUrl()}/sidebar-state`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildSidebarStatePayload()),
+      });
+    } catch {
+      // Best-effort sync
+    }
   }
 
   /** Check if an incoming sidebar state event should be applied locally */
@@ -2684,8 +2716,26 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("selectedSessionId", sessionId);
     },
 
+    /** Record local scroll offset without triggering a broadcast */
+    setLocalScrollTop(scrollTop: number) {
+      if (Number.isFinite(scrollTop)) {
+        localScrollTop = scrollTop;
+      }
+    },
+
+    /** Record user-initiated scroll offset and debounce-sync to peer sidebars */
+    syncSidebarScroll(scrollTop: number) {
+      if (!Number.isFinite(scrollTop)) return;
+      localScrollTop = scrollTop;
+      if (options.sidebar) broadcastSidebarState();
+    },
+
     /** Apply a full sidebar selection received from another instance */
-    applySidebarSelection(sessionId: string | null, headerKey: string | null) {
+    applySidebarSelection(
+      sessionId: string | null,
+      headerKey: string | null,
+      scrollTop?: number,
+    ) {
       if (sidebarBroadcastTimer) {
         clearTimeout(sidebarBroadcastTimer);
         sidebarBroadcastTimer = null;
@@ -2693,6 +2743,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       batch(() => {
         setState("selectedSessionId", sessionId);
         setSelectedHeaderKey(headerKey);
+        if (typeof scrollTop === "number" && Number.isFinite(scrollTop)) {
+          localScrollTop = scrollTop;
+          setScrollSync((prev) => ({
+            top: scrollTop,
+            generation: (prev?.generation ?? 0) + 1,
+          }));
+        }
       });
     },
 
@@ -2918,6 +2975,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     tick,
     bumpTick: () => setTick((t) => t + 1),
     isSidebarVersionNewer,
+    scrollSync,
+    flushSidebarStateNow,
   };
 }
 

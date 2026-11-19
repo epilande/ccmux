@@ -118,6 +118,8 @@ export interface SidebarStateEvent extends BaseSSEEvent {
   selectedSessionId: string | null;
   /** Group header key when a header row is selected */
   selectedHeaderKey?: string | null;
+  /** Vertical scroll offset of the originating sidebar so peers stay aligned */
+  scrollTop?: number;
   /** Monotonic version counter for stale echo detection */
   version?: number;
   /** Originating sidebar instance UUID so peer sidebars never drop lower local counters */

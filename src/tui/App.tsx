@@ -329,6 +329,8 @@ export function App(props: AppProps) {
     lastSpawnAgent: props.lastSpawnAgent,
   });
   markStartup("store_created");
+  let readSidebarScrollTop: (() => number) | null = null;
+  let suppressFlashOnce = false;
 
   /** Guard a tmux-targeting action: toast and return false when the pane is on
    *  a different server, so we refuse rather than hit the wrong pane. Reads the
@@ -1173,7 +1175,12 @@ export function App(props: AppProps) {
       store.actions.hideGroupContextMenu();
       return;
     }
-    store.actions.selectFlatItem(item, index);
+    suppressFlashOnce = true;
+    try {
+      store.actions.selectFlatItem(item, index);
+    } finally {
+      suppressFlashOnce = false;
+    }
     // A click while aiming a handoff picks that row, the same as Enter on it.
     // The alternative is the ordinary activation, which in the one-shot picker
     // switches panes and EXITS, losing both the pick and the surface it was
@@ -1181,6 +1188,18 @@ export function App(props: AppProps) {
     if (store.state.handoffPick) {
       commitHandoffPick();
       return;
+    }
+    if (props.sidebar && item.type === "session") {
+      // Flush selection + current scrollTop to the daemon BEFORE switching
+      // windows so the destination sidebar renders the exact same viewport
+      // offset without a post-switch jump.
+      void store
+        .flushSidebarStateNow(readSidebarScrollTop?.())
+        .finally(() => activateItem(item));
+      return;
+    }
+    if (props.sidebar) {
+      void store.flushSidebarStateNow(readSidebarScrollTop?.());
     }
     activateItem(item);
   }
@@ -3345,9 +3364,19 @@ export function App(props: AppProps) {
         store.actions.setActiveSessionId(sessionId);
         // Sync off-screen sidebars' cursor to the newly focused session so
         // switching tmux sessions/windows highlights and scrolls to the active
-        // session on arrival, while leaving a visible sidebar's cursor alone.
-        if (wasHidden && sessionId) {
-          store.actions.applySidebarSelection(sessionId, null);
+        // session on arrival, while leaving a visible sidebar's cursor (or an
+        // already click-synced selection + scrollTop) alone.
+        if (
+          wasHidden &&
+          sessionId &&
+          store.state.selectedSessionId !== sessionId
+        ) {
+          suppressFlashOnce = true;
+          try {
+            store.actions.applySidebarSelection(sessionId, null);
+          } finally {
+            suppressFlashOnce = false;
+          }
         }
         // The daemon broadcasts this on every pane/window switch, which is
         // also every moment a sidebar can become visible or hidden. Debounced
@@ -3359,13 +3388,20 @@ export function App(props: AppProps) {
         selectedHeaderKey,
         version,
         senderId,
+        scrollTop,
       ) => {
         // Ignore echo-back of our own broadcasts (stale version)
         if (!store.isSidebarVersionNewer(version, senderId)) return;
-        store.actions.applySidebarSelection(
-          selectedSessionId,
-          selectedHeaderKey,
-        );
+        suppressFlashOnce = true;
+        try {
+          store.actions.applySidebarSelection(
+            selectedSessionId,
+            selectedHeaderKey,
+            scrollTop,
+          );
+        } finally {
+          suppressFlashOnce = false;
+        }
       },
       onError: (error) => {
         store.actions.setError(error);
@@ -3392,8 +3428,25 @@ export function App(props: AppProps) {
             typeof data.selectedHeaderKey === "string"
               ? data.selectedHeaderKey
               : null;
-          if (sessionId === null && headerKey === null) return;
-          store.actions.applySidebarSelection(sessionId, headerKey);
+          const scrollTop =
+            typeof data.scrollTop === "number" ? data.scrollTop : undefined;
+          if (
+            sessionId === null &&
+            headerKey === null &&
+            scrollTop === undefined
+          ) {
+            return;
+          }
+          suppressFlashOnce = true;
+          try {
+            store.actions.applySidebarSelection(
+              sessionId,
+              headerKey,
+              scrollTop,
+            );
+          } finally {
+            suppressFlashOnce = false;
+          }
         })
         .catch(() => {});
     }
@@ -3416,7 +3469,7 @@ export function App(props: AppProps) {
     });
     createEffect(() => {
       const pane = selectedPaneId();
-      if (!pane) return;
+      if (!pane || suppressFlashOnce) return;
       flasher.schedule(pane);
     });
     onCleanup(() => flasher.cancel());
@@ -4221,6 +4274,16 @@ export function App(props: AppProps) {
             onActivate={handleRowActivate}
             onContextMenu={handleRowContextMenu}
             onRowAnchor={(resolve) => (rowAnchor = resolve)}
+            scrollSync={store.scrollSync()}
+            onScrollMoved={(top) => store.actions.setLocalScrollTop(top)}
+            onUserScroll={
+              props.sidebar
+                ? (top) => store.actions.syncSidebarScroll(top)
+                : undefined
+            }
+            onScrollTopReader={(fn) => {
+              readSidebarScrollTop = fn;
+            }}
           />
           <Show when={!props.sidebar && store.state.showPreview}>
             <Show

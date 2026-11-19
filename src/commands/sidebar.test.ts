@@ -176,11 +176,9 @@ describe("parseSidebarPaneIds", () => {
 describe("resizeHookCommand", () => {
   // Verified live on tmux 3.6a: resizing one window re-pins only that window's
   // sidebar, a sidebar-less window is a no-op, and no ccmux process is started.
-  it("emits the exact pure-shell hook body", () => {
+  it("emits the exact synchronous tmux command hook body", () => {
     expect(resizeHookCommand(30)).toBe(
-      `run-shell -b 'tmux -S "#{socket_path}" list-panes -t "#{hook_window}" ` +
-        `-F "##{pane_id}" -f "##{==:##{pane_title},ccmux-sidebar}" 2>/dev/null ` +
-        `| while read -r p; do tmux -S "#{socket_path}" resize-pane -t "$p" -x 30 2>/dev/null; done'`,
+      `run-shell -C -t "#{hook_window}" '#{P:#{?#{==:#{pane_title},ccmux-sidebar},resize-pane -t #{pane_id} -x 30 ; ,}}'`,
     );
   });
 
@@ -191,28 +189,28 @@ describe("resizeHookCommand", () => {
     expect(resizeHookCommand(42)).not.toContain("ccmux ");
   });
 
-  it("scopes the work to the resized window", () => {
+  it("scopes the work to the resized window synchronously in-process", () => {
     const cmd = resizeHookCommand(42);
-    expect(cmd).toContain('list-panes -t "#{hook_window}"');
-    // A global `list-panes -a` here is what re-pinned every sidebar per firing.
+    expect(cmd).toContain('run-shell -C -t "#{hook_window}"');
+    // No background shell (`run-shell -b`) or global `list-panes -a`.
+    expect(cmd).not.toContain("run-shell -b");
     expect(cmd).not.toContain("list-panes -a");
   });
 
-  it("escapes inner formats so only the outer ones expand at fire time", () => {
+  it("uses native tmux #{P:...} pane loop matching sidebar title", () => {
     const cmd = resizeHookCommand(42);
-    // `#{hook_window}` / `#{socket_path}` expand when run-shell fires...
-    expect(cmd).toContain('"#{socket_path}"');
-    // ...while `##{pane_id}` / `##{pane_title}` must reach the inner list-panes
-    // as literal `#{...}`.
-    expect(cmd).toContain('-F "##{pane_id}"');
-    expect(cmd).toContain("##{pane_title}");
-    expect(cmd).not.toContain('-F "#{pane_id}"');
+    expect(cmd).toContain("#{P:");
+    expect(cmd).toContain("ccmux-sidebar");
+    expect(cmd).toContain("resize-pane -t #{pane_id} -x 42");
   });
 
-  it("bakes the width in and stays free of single quotes", () => {
+  it("bakes the width in and stays free of single quotes inside body", () => {
     expect(resizeHookCommand(77)).toContain("-x 77");
     // The body is single-quoted at the tmux layer, which cannot escape a quote.
-    const body = resizeHookCommand(77).replace(/^run-shell -b '/, "");
+    const body = resizeHookCommand(77).replace(
+      /^run-shell -C -t "#\{hook_window\}" '/,
+      "",
+    );
     expect(body.slice(0, -1)).not.toContain("'");
   });
 });
