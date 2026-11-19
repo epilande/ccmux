@@ -22,6 +22,7 @@ import {
   sourceRowHeight,
 } from "./SourcePicker";
 import { buildSourceRepos } from "./source-picker-rows";
+import { displayWidth } from "../utils/format";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -1652,36 +1653,72 @@ for (const width of [30, 26]) {
   });
 }
 
-// A checked-out source carries a `→ name` suffix as well, and the suffix
-// used to take half the title's room, cutting #156 to `#1…`. The number is the
-// row's identity, so it is reserved whole and the metadata gives way instead.
-for (const width of [23, 30, 40]) {
-  it(`keeps a checked-out PR's whole number and its checkout at ${width} columns`, async () => {
-    const day = 86_400_000;
-    const h = await mountSettled({
-      width,
-      compact: true,
-      prs: [
-        openPR({
-          ciStatus: "passing",
-          reviewDecision: "APPROVED",
-          createdAt: new Date(Date.now() - 12 * day).toISOString(),
-        }),
-        openPR({
-          number: 2047,
-          headRefOid: "sha-2047",
-          createdAt: new Date(Date.now() - 3 * day).toISOString(),
-        }),
-      ],
-      issues: [],
-      worktrees: [worktreeRow({ name: "parking", tip: "sha-156" })],
-    });
-    const lines = (await h.frame()).split("\n");
-    const checkedOut = lines.find((l) => l.includes("#156"));
-    expect(checkedOut).toBeDefined();
-    expect(checkedOut).toMatch(/#156 \S/);
-    expect(checkedOut).toContain("→ p");
-    expect(lines.find((l) => l.includes("#2047"))).toMatch(/#2047 \S/);
+// A checked-out source carries a `→ name` suffix as well. It used to take
+// half the title's room (#156 cut to `#1…`), and then, with the number
+// reserved, it still took the title down to `f…`. The number is the row's
+// identity and the title is what it says, so both outrank the checkout's
+// name: at a narrow width the suffix collapses to a bare `→` first.
+const TITLE = "fix(tui): Address the redesign review findings";
+/** The title text a row draws after its number, without the checkout. */
+const titleAfter = (line: string, number: number) =>
+  line
+    .slice(line.indexOf(`#${number} `) + `#${number} `.length)
+    .split(" →")[0]!
+    .split("  ")[0]!
+    .trim();
+async function checkedOutBesideUnchecked(width: number) {
+  const day = 86_400_000;
+  const h = await mountSettled({
+    width,
+    compact: true,
+    prs: [
+      openPR({
+        number: 259,
+        title: TITLE,
+        headRefOid: "sha-259",
+        ciStatus: "passing",
+        reviewDecision: "APPROVED",
+        createdAt: new Date(Date.now() - 12 * day).toISOString(),
+      }),
+      openPR({
+        number: 258,
+        title: TITLE,
+        headRefOid: "sha-258",
+        ciStatus: "passing",
+        reviewDecision: "APPROVED",
+        createdAt: new Date(Date.now() - 12 * day).toISOString(),
+      }),
+    ],
+    issues: [],
+    worktrees: [worktreeRow({ name: "parking", tip: "sha-259" })],
+  });
+  const lines = (await h.frame()).split("\n");
+  return {
+    checkedOut: lines.find((l) => l.includes("#259"))!,
+    unchecked: lines.find((l) => l.includes("#258"))!,
+  };
+}
+
+it("gives a checked-out PR's title all but the marker's columns at 30", async () => {
+  const { checkedOut, unchecked } = await checkedOutBesideUnchecked(30);
+  expect(checkedOut).toMatch(/#259 \S/);
+  expect(checkedOut).toContain("→");
+  const mine = displayWidth(titleAfter(checkedOut, 259));
+  const theirs = displayWidth(titleAfter(unchecked, 258));
+  expect(mine).toBeGreaterThanOrEqual(theirs - 2);
+  // And readable, not the `f…` stub this replaced.
+  expect(titleAfter(checkedOut, 259)).toMatch(/^fix\(t/);
+});
+
+for (const width of [23, 40]) {
+  it(`keeps a checked-out PR's whole number, title and marker at ${width} columns`, async () => {
+    const { checkedOut, unchecked } = await checkedOutBesideUnchecked(width);
+    expect(checkedOut).toMatch(/#259 \S/);
+    expect(checkedOut).toContain("→");
+    expect(unchecked).toMatch(/#258 \S/);
+    expect(displayWidth(titleAfter(checkedOut, 259))).toBeGreaterThanOrEqual(
+      Math.min(4, displayWidth(titleAfter(unchecked, 258))),
+    );
   });
 }
 

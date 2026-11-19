@@ -567,10 +567,14 @@ export function sourceCellWidths(cells: SourceRowCells[]): {
   };
 }
 
-/** Title text kept beside the number: a space, a character, the ellipsis. */
-const TITLE_TEXT_MIN = 3;
-/** The narrowest checkout suffix that still names its checkout: ` → p…`. */
-const CHECKOUT_MIN = 5;
+/** Title text a label keeps beside the number before anything else gets
+ *  room: a space, five characters, the ellipsis (`⊙ #259 fix(t…`). Narrower
+ *  reads as a stub; wider would drop CI from a default sidebar's list. */
+const TITLE_TEXT_MIN = 7;
+/** What says a source is checked out once its name has no room. */
+const CHECKOUT_MARKER = " →";
+/** The narrowest checkout name worth drawing beside the marker: ` p…`. */
+const CHECKOUT_NAME_MIN = 3;
 
 /** A row's identity: its marker and its whole number (`⊙ #156`). */
 function sourceRowIdentity(row: SourceRow): string {
@@ -578,16 +582,31 @@ function sourceRowIdentity(row: SourceRow): string {
   return `${sourceRowMarker(row)} #${number}`;
 }
 
+/** What follows the marker on a checked-out row: ` parking`, and for an
+ *  issue checked out more than once, ` parking (+1 more)`. */
+function checkoutName(row: SourceRow): string {
+  if (!row.checkedOutName) return "";
+  const more =
+    row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : "";
+  return ` ${row.checkedOutName}${more}`;
+}
+
+/** A checked-out row's whole suffix, `→ name` and all. */
+export function sourceCheckoutSuffix(row: SourceRow): string {
+  return row.checkedOutName ? CHECKOUT_MARKER + checkoutName(row) : "";
+}
+
 /**
  * The columns a row's label needs before any metadata: the marker and the
- * WHOLE number (the row's identity), a little title, and, for a checked-out
- * source, a checkout suffix short enough to still name the checkout.
+ * WHOLE number (the row's identity), the title's readable minimum, and, for
+ * a checked-out source, the bare `→`. The checkout's name is not counted:
+ * it is the first thing a narrow label gives up.
  */
 export function sourceLabelMin(row: SourceRow): number {
   return (
     displayWidth(sourceRowIdentity(row)) +
     TITLE_TEXT_MIN +
-    (row.checkedOutName ? CHECKOUT_MIN : 0)
+    (row.checkedOutName ? displayWidth(CHECKOUT_MARKER) : 0)
   );
 }
 
@@ -615,33 +634,39 @@ export function fitSourceCellWidths(
 }
 
 /**
- * Split a row's `room` between its title (which starts with its identity)
- * and its checkout suffix. The suffix changes what Enter does, so it keeps up
- * to half the room, but never the identity's columns: the number is what
- * tells two rows apart, and `#1… → park…` names neither. Where the title
- * fragment and the suffix cannot both fit, the fragment goes first
- * (`⊙ #156 → pa…`); only below that does the suffix drop.
+ * Fit a row's label (`title` starts with its identity) into `room`. The
+ * claims, in order: the whole number, since it is what tells two rows apart;
+ * the bare `→` on a checked-out row, since it changes what Enter does; the
+ * title up to its readable minimum; and only then the checkout's name, up to
+ * half the room, dropped whole when it would be cut below ` p…`. Past all of
+ * that the title takes the rest.
  */
 export function fitSourceLabel(
   row: SourceRow,
   title: string,
-  checkout: string,
   room: number,
 ): string {
-  const identity = sourceRowIdentity(row);
-  const identityWidth = displayWidth(identity);
-  const suffixMin = Math.min(CHECKOUT_MIN, displayWidth(checkout));
-  const suffixRoom = Math.min(
-    Math.floor(room / 2),
-    room - identityWidth - TITLE_TEXT_MIN,
+  const identityWidth = displayWidth(sourceRowIdentity(row));
+  const marker = row.checkedOutName ? CHECKOUT_MARKER : "";
+  const name = checkoutName(row);
+  const titleWidth = displayWidth(title);
+  const markerWidth = displayWidth(marker);
+  // What the title and the name share once the number and marker are paid.
+  const shared = Math.max(0, room - identityWidth - markerWidth);
+  const titleFloor = Math.min(titleWidth - identityWidth, TITLE_TEXT_MIN);
+  let nameRoom = Math.min(
+    displayWidth(name),
+    Math.floor(room / 2) - markerWidth,
+    shared - titleFloor,
   );
-  if (checkout && suffixRoom < suffixMin && room - identityWidth >= suffixMin)
-    return identity + truncateText(checkout, room - identityWidth);
-  const suffix =
-    checkout && suffixRoom >= suffixMin
-      ? truncateText(checkout, suffixRoom)
-      : "";
-  return truncateText(title, Math.max(1, room - displayWidth(suffix))) + suffix;
+  if (nameRoom < Math.min(CHECKOUT_NAME_MIN, displayWidth(name))) nameRoom = 0;
+  const fittedTitle = truncateText(
+    title,
+    Math.max(identityWidth, identityWidth + shared - nameRoom),
+  );
+  return (
+    fittedTitle + marker + (nameRoom > 0 ? truncateText(name, nameRoom) : "")
+  );
 }
 
 /** Columns between the title and the middle, and between middle phrases. */

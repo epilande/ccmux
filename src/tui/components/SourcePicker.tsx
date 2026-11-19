@@ -43,6 +43,7 @@ import {
   isIssueRowKey,
   pickerRows,
   sourceCellWidths,
+  sourceCheckoutSuffix,
   sourceLabelMin,
   sourceRowCells,
   sourceRowDim,
@@ -158,6 +159,9 @@ export interface SourcePickerProps {
 
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
+/** Columns a row spends before its label: the active bar, the index and its
+ *  space, and the status glyph and its space. */
+const ROW_PREFIX = 5;
 /** The column between the list and the preview's border, so a row's
  *  right-aligned age cell does not touch it. */
 const PREVIEW_GAP = 1;
@@ -918,7 +922,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
           ),
         ),
       ),
-      listWidth() - 6,
+      listWidth() - ROW_PREFIX,
       rows().reduce((n, row) => Math.max(n, sourceLabelMin(row)), 0),
     ),
   );
@@ -964,17 +968,14 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     // session list's right-side columns; labels, branch and author are the
     // flexible middle and yield first (`fitSourceRow`), before the title.
     const fitted = createMemo(() => {
-      const checkout = row.checkedOutName
-        ? ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`
-        : "";
       const title = `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`;
       const fit = fitSourceRow(
-        title + checkout,
+        title + sourceCheckoutSuffix(row),
         cells().middle,
-        Math.max(1, listWidth() - 6 - fixedCellsWidth()),
+        Math.max(1, listWidth() - ROW_PREFIX - fixedCellsWidth()),
       );
       return {
-        label: fitSourceLabel(row, title, checkout, fit.titleRoom),
+        label: fitSourceLabel(row, title, fit.titleRoom),
         middle: fit.middle,
       };
     });
