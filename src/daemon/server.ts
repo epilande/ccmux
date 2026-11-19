@@ -1302,7 +1302,7 @@ export class DaemonServer {
     // listening (curl exit 7). Without it, tmux surfaces the non-zero exit
     // from `run-shell -b` as a status-line message on every pane switch
     // whenever a stale hook outlives the daemon.
-    const hookCmd = `run-shell -b 'curl -s -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
+    const hookCmd = `run-shell -b '[ "#{session_attached}" = "0" ] || curl -s -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
     for (const hook of DaemonServer.ACTIVE_PANE_HOOKS) {
       Bun.spawn(tmuxArgv("set-hook", "-g", hook, hookCmd), {
         stdout: "ignore",
