@@ -3304,6 +3304,7 @@ export function App(props: AppProps) {
   const isVisible = (): boolean => visibility?.visible() ?? true;
 
   let sseClient: SSEClient | null = null;
+  let hydrationAbort: AbortController | null = null;
   let previewScrollbox: ScrollBoxRenderable | undefined;
   let helpScrollbox: ScrollBoxRenderable | undefined;
   const [previewRefreshKey, setPreviewRefreshKey] = createSignal(0);
@@ -3328,6 +3329,7 @@ export function App(props: AppProps) {
             active &&
             !initialInitHandled &&
             !hydratedFromSidebarState &&
+            !store.hasLocalSidebarActivity() &&
             store.state.selectedSessionId === null &&
             store.selectedHeaderKey() === null
           ) {
@@ -3385,6 +3387,7 @@ export function App(props: AppProps) {
           sessionId &&
           store.state.selectedSessionId !== sessionId
         ) {
+          hydratedFromSidebarState = true;
           withoutPaneFlash(() =>
             store.actions.applySidebarSelection(sessionId, null),
           );
@@ -3426,14 +3429,16 @@ export function App(props: AppProps) {
     // Hydrate sidebar selection from daemon so new instances sync with existing ones.
     // Skip if the daemon has nothing to share so we don't clobber the active-pane default.
     if (props.sidebar) {
+      hydrationAbort = new AbortController();
+      const abortSignal = hydrationAbort.signal;
       fetch(`${getDaemonUrl()}/sidebar-state`, {
-        signal: AbortSignal.timeout(500),
+        signal: AbortSignal.any([abortSignal, AbortSignal.timeout(500)]),
       })
         .then((r) =>
           r.ok ? (r.json() as Promise<Record<string, unknown>>) : null,
         )
         .then((data) => {
-          if (!data) return;
+          if (!data || abortSignal.aborted) return;
           const sessionId =
             typeof data.selectedSessionId === "string"
               ? data.selectedSessionId
@@ -3454,7 +3459,9 @@ export function App(props: AppProps) {
           ) {
             return;
           }
-          if (hydratedFromSidebarState) return;
+          if (hydratedFromSidebarState || store.hasLocalSidebarActivity()) {
+            return;
+          }
           hydratedFromSidebarState = true;
           withoutPaneFlash(() =>
             store.actions.applySidebarSelection(
@@ -3625,6 +3632,7 @@ export function App(props: AppProps) {
   }
 
   onCleanup(() => {
+    hydrationAbort?.abort();
     sseClient?.disconnect();
     if (tickTimerId) untrackInterval(tickTimerId);
     stopPerfReporter();

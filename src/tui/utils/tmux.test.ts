@@ -879,7 +879,7 @@ describe("flashPane and flashPaneDetached single-main-pane gating", () => {
         "set-option",
       ]);
       // Drain the 500ms reset timer inside the stub scope so no timer leaks
-      for (const fn of scheduled) fn();
+      for (const fn of scheduled.splice(0)) fn();
       expect(stubs.calls.map((argv) => argv[1])).toEqual([
         "list-panes",
         "list-panes",
@@ -887,6 +887,7 @@ describe("flashPane and flashPaneDetached single-main-pane gating", () => {
         "set-option",
       ]);
     } finally {
+      for (const fn of scheduled.splice(0)) fn();
       globalThis.setTimeout = origSetTimeout;
       stubs.restore();
     }
@@ -938,10 +939,8 @@ describe("flashPane and flashPaneDetached single-main-pane gating", () => {
         .filter((argv) => argv[1] === "set-option")
         .map((argv) => argv[argv.indexOf("-t") + 1]);
       expect(setOptionTargets).toEqual(["%2"]);
-
-      // Clean up active %2 flash timer
-      for (const fn of scheduled) fn();
     } finally {
+      for (const fn of scheduled.splice(0)) fn();
       globalThis.setTimeout = origSetTimeout;
       stubs.restore();
     }

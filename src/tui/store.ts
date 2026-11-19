@@ -920,6 +920,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   const MAX_TRACKED_SENDERS = 128;
   const sidebarInstanceId = crypto.randomUUID();
   let sidebarVersion = 0;
+  let localSidebarTouched = false;
   let sidebarBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
   let sidebarInflightAbort: AbortController | null = null;
   const lastVersionBySender = new Map<string, number>();
@@ -976,6 +977,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   /** Broadcast sidebar selection to all instances via daemon SSE.
    *  Debounced to coalesce rapid navigation into a single broadcast. */
   function broadcastSidebarState() {
+    localSidebarTouched = true;
     sidebarVersion++;
     if (sidebarBroadcastTimer) clearTimeout(sidebarBroadcastTimer);
     sidebarBroadcastTimer = setTimeout(() => {
@@ -987,6 +989,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   /** Immediately flush sidebar state to the daemon without debounce so
    *  peer sidebars receive selection + scrollTop before tmux switches windows. */
   async function flushSidebarStateNow(scrollTop?: number): Promise<void> {
+    localSidebarTouched = true;
     if (typeof scrollTop === "number" && Number.isFinite(scrollTop)) {
       localScrollTop = scrollTop;
     }
@@ -2743,6 +2746,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setSelectedSessionId(sessionId: string | null) {
+      localSidebarTouched = true;
       setState("selectedSessionId", sessionId);
     },
 
@@ -2756,6 +2760,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     /** Record user-initiated scroll offset and debounce-sync to peer sidebars */
     syncSidebarScroll(scrollTop: number) {
       if (!Number.isFinite(scrollTop)) return;
+      localSidebarTouched = true;
       localScrollTop = scrollTop;
       if (canSyncScrollTop()) broadcastSidebarState();
     },
@@ -3014,6 +3019,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     tick,
     bumpTick: () => setTick((t) => t + 1),
     isSidebarVersionNewer,
+    hasLocalSidebarActivity: () => localSidebarTouched,
     scrollSync,
     flushSidebarStateNow,
   };
