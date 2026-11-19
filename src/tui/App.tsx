@@ -2592,9 +2592,11 @@ export function App(props: AppProps) {
       {
         id: "kill-group",
         label: "Kill group",
-        // A hint names the key the list answers to, and there `X` kills every
-        // session in view while `x` on a header kills this group.
+        // Menu-local (`key`): on the list `x` kills the marked sessions when
+        // any are marked, which may sit in another group, so the fall-through
+        // could disagree with clicking this item. (`X` kills all in view.)
         hint: "x",
+        key: "x",
         color: theme.red,
         action: groupContextMenuKill,
       },

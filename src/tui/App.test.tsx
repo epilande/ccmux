@@ -1976,6 +1976,40 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
+  it("kills the menu's group on its x, whatever is marked elsewhere", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", tmuxPane: "%1" }),
+          mockEnrichedSession({ id: "b", project: "beta", tmuxPane: "%2" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // alpha header, a, beta header, b: mark b, then open alpha's menu.
+      for (const key of ["g", "g", "j", "j", "j", " ", "g", "g", "m"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).toMatch(/Kill group\s+x/);
+      // The advertised key does what clicking the item does: this group.
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("alpha");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => c.url.split("/sessions/")[1]),
+      ).toEqual(["a/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
   it("keeps the flat list's sessions header inert: x, the menu, and Enter reach no group action", async () => {
     const { calls, restore } = captureFetch();
     try {
