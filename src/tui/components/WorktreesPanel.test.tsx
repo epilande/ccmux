@@ -1278,6 +1278,41 @@ describe("table layout", () => {
     expect(end(short, "Claude")).toBe(end(long, "1 waiting"));
   });
 
+  // The default sidebar is 30 columns. The name and the agent count are what
+  // a row is for; a branch squeezed to a few columns says nothing, so it is
+  // what gives way, and the gaps beside it count against the row too.
+  for (const [width, count] of [
+    [30, 12],
+    [26, 2],
+  ] as const) {
+    it(`keeps the name and the whole agent count in a ${width}-column sidebar`, async () => {
+      const sessions = Array.from({ length: count }, (_, i) =>
+        session({ id: `s${i}`, status: "waiting" }),
+      );
+      const h = await mount({
+        width,
+        rows: [
+          mainRow(),
+          row({
+            path: "/repo/wt/a-very-long-worktree-name-here",
+            name: "a-very-long-worktree-name-here",
+            branch: "feat/some-distinct-branch",
+            sessions,
+          }),
+          row({ path: "/repo/wt/short", name: "short", branch: "fix/other" }),
+        ],
+        scan: async () => ({ candidates: [], skipped: [] }),
+      });
+      await h.frame();
+      const line = (await h.frame())
+        .split("\n")
+        .find((l) => l.includes("a-very"));
+      expect(line).toBeDefined();
+      expect(line).toContain(`${count} (${count}■)`);
+      expect(line).toMatch(/a-very\S*…/);
+    });
+  }
+
   it("leaves the main + N worktrees facts off the group header", async () => {
     const h = await mount({
       width: 120,

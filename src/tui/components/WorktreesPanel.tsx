@@ -340,6 +340,11 @@ const ROW_PREFIX = 6;
 /** Widest the name and branch columns grow; longer cells truncate. */
 const NAME_COLUMN_MAX = 28;
 const BRANCH_COLUMN_MAX = 32;
+/** A branch cut below this says nothing, so its column drops instead. */
+const BRANCH_COLUMN_MIN = 6;
+/** The gap before the branch column, and the spacer before the facts. */
+const BRANCH_GAP = 2;
+const FACTS_GAP = 2;
 
 /** A row's name cell, worktree marker included: `name+`, attached the way
  *  the session list attaches it to a worktree's branch. */
@@ -1316,18 +1321,30 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         texts.reduce((n, t) => Math.max(n, displayWidth(t)), 0),
       );
     const agents = widest(visible.map(agentsText), Math.floor(listWidth() / 3));
-    const room = Math.max(
-      0,
-      listWidth() - ROW_PREFIX - (agents ? agents + 1 : 0),
+    // What the name and branch share: the row less its prefix, the spacer
+    // before the facts, and the agents cell. A row that overruns this is
+    // squeezed by flex, which clips the prefix and the agent count first.
+    const room = Math.max(0, listWidth() - ROW_PREFIX - FACTS_GAP - agents);
+    const name = Math.min(
+      room,
+      widest(
+        visible.map(nameText),
+        Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
+      ),
     );
-    const name = widest(
-      visible.map(nameText),
-      Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
-    );
-    const branch = widest(
-      visible.map(branchText),
+    const branches = visible.map(branchText);
+    let branch = widest(
+      branches,
       Math.min(BRANCH_COLUMN_MAX, Math.floor(room * 0.3)),
     );
+    // The branch gives way before the name or the count: it drops when it
+    // does not fit beside the name with its gap, or when the cap cuts it
+    // below what still reads as a branch.
+    if (
+      name + BRANCH_GAP + branch > room ||
+      branch < Math.min(BRANCH_COLUMN_MIN, widest(branches, Infinity))
+    )
+      branch = 0;
     return { name, branch, agents, room };
   });
   /** The preview's facts line for a row: what the list says beside the
@@ -1454,13 +1471,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           </Text>
         </box>
         <Show when={columns().branch}>
-          <box width={columns().branch + 2} flexShrink={0} paddingLeft={2}>
+          <box
+            width={columns().branch + BRANCH_GAP}
+            flexShrink={0}
+            paddingLeft={BRANCH_GAP}
+          >
             <Text fg={theme.subtext}>
               {truncateText(branchText(entry), columns().branch)}
             </Text>
           </box>
         </Show>
-        <box width={2} flexShrink={0} />
+        <box width={FACTS_GAP} flexShrink={0} />
         <For each={facts()}>
           {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
         </For>
