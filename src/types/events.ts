@@ -120,6 +120,8 @@ export interface SidebarStateEvent extends BaseSSEEvent {
   selectedHeaderKey?: string | null;
   /** Monotonic version counter for stale echo detection */
   version?: number;
+  /** Originating sidebar instance UUID so peer sidebars never drop lower local counters */
+  senderId?: string;
 }
 
 /**

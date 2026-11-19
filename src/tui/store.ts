@@ -913,7 +913,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
   /** Monotonic version counter for sidebar state sync.
    *  Incremented on every local selection change so echo-back events
-   *  from the daemon can be detected and ignored. */
+   *  from the daemon can be detected and ignored, while peer sidebars
+   *  with independent counters are identified via sidebarInstanceId. */
+  const sidebarInstanceId = crypto.randomUUID();
   let sidebarVersion = 0;
   let sidebarBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -931,13 +933,26 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           selectedSessionId: state.selectedSessionId,
           selectedHeaderKey: selectedHeaderKey(),
           version: sidebarVersion,
+          senderId: sidebarInstanceId,
         }),
       }).catch(() => {});
     }, 100);
   }
 
-  /** Check if an incoming sidebar state version is newer than our local state */
-  function isSidebarVersionNewer(incomingVersion: number | undefined): boolean {
+  /** Check if an incoming sidebar state event should be applied locally */
+  function isSidebarVersionNewer(
+    incomingVersion: number | undefined,
+    incomingSenderId?: string,
+  ): boolean {
+    if (incomingSenderId !== undefined) {
+      if (incomingSenderId === sidebarInstanceId) {
+        return incomingVersion !== undefined && incomingVersion > sidebarVersion;
+      }
+      if (incomingVersion !== undefined && incomingVersion > sidebarVersion) {
+        sidebarVersion = incomingVersion;
+      }
+      return true;
+    }
     if (incomingVersion === undefined) return true; // legacy event without version
     return incomingVersion > sidebarVersion;
   }
@@ -1397,9 +1412,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return rows;
   });
 
+  let previousSessionItems = new Map<
+    string,
+    Extract<FlatItem, { type: "session" }>
+  >();
+
   const flatItems = trackedMemo("flatItems", () => {
     const isSearching = state.searchQuery.trim().length > 0;
-    return buildFlatItems(
+    const rawItems = buildFlatItems(
       filteredSessions(),
       state.groupBy,
       collapsedGroups(),
@@ -1407,6 +1427,36 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       pinnedGroups(),
       attentionBand,
     );
+    const nextSessionItems = new Map<
+      string,
+      Extract<FlatItem, { type: "session" }>
+    >();
+    const stabilized = rawItems.map((item) => {
+      if (item.type !== "session") return item;
+      const cacheKey = `${item.groupKey}\0${item.filteredSession.session.id}`;
+      const prev = previousSessionItems.get(cacheKey);
+      if (
+        prev &&
+        prev.groupKey === item.groupKey &&
+        prev.sharedTmuxSession === item.sharedTmuxSession &&
+        prev.filteredSession.session === item.filteredSession.session &&
+        prev.filteredSession.highlights === item.filteredSession.highlights &&
+        prev.filteredSession.paneMatch === item.filteredSession.paneMatch &&
+        prev.filteredSession.transcriptMatch ===
+          item.filteredSession.transcriptMatch &&
+        prev.filteredSession.transcriptSnippet ===
+          item.filteredSession.transcriptSnippet &&
+        prev.filteredSession.primarySource ===
+          item.filteredSession.primarySource
+      ) {
+        nextSessionItems.set(cacheKey, prev);
+        return prev;
+      }
+      nextSessionItems.set(cacheKey, item);
+      return item;
+    });
+    previousSessionItems = nextSessionItems;
+    return stabilized;
   });
 
   const selectedIndex = trackedMemo("selectedIndex", () => {
@@ -1973,6 +2023,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setSelectedIndex(index: number) {
       selectItemAt(index);
+    },
+
+    selectFlatItem(item: FlatItem, fallbackIndex?: number) {
+      const items = flatItems();
+      const targetIdentity = flatItemIdentity(item);
+      const resolvedIndex = items.findIndex(
+        (candidate) => flatItemIdentity(candidate) === targetIdentity,
+      );
+      if (resolvedIndex !== -1) {
+        selectItemAt(resolvedIndex);
+      } else if (fallbackIndex !== undefined) {
+        selectItemAt(fallbackIndex);
+      }
     },
 
     setSearchQuery(query: string) {
@@ -2623,6 +2686,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     /** Apply a full sidebar selection received from another instance */
     applySidebarSelection(sessionId: string | null, headerKey: string | null) {
+      if (sidebarBroadcastTimer) {
+        clearTimeout(sidebarBroadcastTimer);
+        sidebarBroadcastTimer = null;
+      }
       batch(() => {
         setState("selectedSessionId", sessionId);
         setSelectedHeaderKey(headerKey);

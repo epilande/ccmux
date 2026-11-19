@@ -3597,6 +3597,88 @@ describe("store", () => {
       expect(store.isSidebarVersionNewer(1)).toBe(false);
       expect(store.isSidebarVersionNewer(2)).toBe(true);
     });
+
+    it("accepts updates from another sidebar instance even when its local counter is lower", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "s1" }),
+        createMockSession({ id: "s2" }),
+        createMockSession({ id: "s3" }),
+      ]);
+
+      // Navigate locally 3 times so local version reaches 3
+      store.actions.moveSelection(1);
+      store.actions.moveSelection(1);
+      store.actions.moveSelection(-1);
+
+      // Another window's sidebar (different senderId) clicks for the first time (version 1)
+      expect(store.isSidebarVersionNewer(1, "other-sidebar-uuid")).toBe(true);
+    });
+
+    it("preserves FlatItem object identity for unchanged session rows when another row reorders", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "alpha",
+          status: "idle",
+          statusChangedAt: "2026-11-19T09:00:00.000Z",
+        }),
+        createMockSession({
+          id: "s2",
+          project: "beta",
+          status: "idle",
+          statusChangedAt: "2026-11-19T09:01:00.000Z",
+        }),
+        createMockSession({
+          id: "s3",
+          project: "beta",
+          status: "idle",
+          statusChangedAt: "2026-11-19T09:02:00.000Z",
+        }),
+      ]);
+
+      const before = store.flatItems();
+      const s1ItemBefore = before.find(
+        (i) => i.type === "session" && i.filteredSession.session.id === "s1",
+      );
+      expect(s1ItemBefore).toBeDefined();
+
+      // s2 transitions to newer statusChangedAt, reordering beta's rows
+      store.actions.updateSession(
+        createMockSession({
+          id: "s2",
+          project: "beta",
+          status: "working",
+          statusChangedAt: "2026-11-19T09:05:00.000Z",
+        }),
+      );
+
+      const after = store.flatItems();
+      const s1ItemAfter = after.find(
+        (i) => i.type === "session" && i.filteredSession.session.id === "s1",
+      );
+      expect(s1ItemAfter).toBe(s1ItemBefore);
+    });
+
+    it("selectFlatItem selects by item identity even if list indices shifted", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "s1", status: "idle" }),
+        createMockSession({ id: "s2", status: "idle" }),
+      ]);
+
+      const staleItem = store.flatItems()[1]!; // s2 was at index 1
+      // Now s0 is added at the front (waiting) so s2 shifts to index 2
+      store.actions.setSessions([
+        createMockSession({ id: "s0", status: "waiting" }),
+        createMockSession({ id: "s1", status: "idle" }),
+        createMockSession({ id: "s2", status: "idle" }),
+      ]);
+
+      store.actions.selectFlatItem(staleItem, 1);
+      expect(store.state.selectedSessionId).toBe("s2");
+    });
   });
 
   describe("new session dialog", () => {

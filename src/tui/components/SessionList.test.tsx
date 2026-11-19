@@ -755,6 +755,91 @@ describe("SessionList", () => {
     expect(frame).not.toContain("filler-0");
   });
 
+  it("preserves manual wheel scroll across SSE item updates when selected session does not change", async () => {
+    const buildItems = (promptSuffix: string): FlatItem[] => [
+      makeHeader("proj", 12),
+      ...Array.from({ length: 12 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: i === 11 ? "/code/target-end" : `/code/filler-${i}`,
+          lastPrompt: `prompt ${i} ${promptSuffix}`,
+        }),
+      ),
+    ];
+    const [items, setItems] = createSignal(buildItems("v1"));
+    const [selectedIndex, setSelectedIndex] = createSignal(12);
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items()}
+            selectedIndex={selectedIndex()}
+            previewWidth={30}
+            promptDisplay="row2"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBeGreaterThan(0);
+
+    // User scrolls up to the top with mouse wheel while s11 remains selected
+    box!.scrollTo(0);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("filler-0");
+
+    // SSE session_updated arrives (new items array, same selected session s11)
+    setItems(buildItems("v2"));
+    await setup.renderOnce();
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("filler-0");
+
+    // Explicit selection change to s10 DOES scroll it into view
+    setSelectedIndex(11);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("updates index-dependent props reactively when an earlier item is inserted without recreating existing FlatItems", async () => {
+    const s1 = makeSessionItem("s1", "proj", { cwd: "/code/one" });
+    const s2 = makeSessionItem("s2", "proj", { cwd: "/code/two" });
+    const [items, setItems] = createSignal<FlatItem[]>([s1, s2]);
+    const calls: Array<{ id: string; index: number }> = [];
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items()}
+            selectedIndex={0}
+            previewWidth={30}
+            onActivate={(item, index) => {
+              if (item.type === "session") {
+                calls.push({ id: item.filteredSession.session.id, index });
+              }
+            }}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 20 },
+    );
+    await setup.renderOnce();
+
+    // Insert s0 before s1 while keeping s1 and s2 FlatItem references intact
+    const s0 = makeSessionItem("s0", "proj", { cwd: "/code/zero" });
+    setItems([s0, s1, s2]);
+    await setup.renderOnce();
+
+    // Click s1 (now at row 1): index passed to onActivate must be 1, not stale 0
+    await setup.mockMouse.click(3, 1);
+    expect(calls).toEqual([{ id: "s1", index: 1 }]);
+  });
+
   it("routes clicks to onActivate with the right item and index", async () => {
     const items: FlatItem[] = [
       makeHeader("proj", 2),

@@ -1289,11 +1289,13 @@ export class DaemonServer {
   private static readonly ACTIVE_PANE_HOOKS = [
     "after-select-pane[50]",
     "after-select-window[50]",
+    "client-session-changed[50]",
   ] as const;
 
   /**
    * Install tmux hooks to notify daemon of pane focus changes.
-   * Uses after-select-pane and after-select-window (compatible with tmux 3.x).
+   * Uses after-select-pane, after-select-window, and client-session-changed
+   * so switching tmux sessions (`switch-client`) updates focus too.
    */
   private installPaneFocusHook(): void {
     // Trailing `|| true` keeps the shell exit status 0 when the daemon isn't
@@ -2420,6 +2422,13 @@ export class DaemonServer {
     const session = this.resolveSession(paneId);
     const sessionId = session?.id ?? null;
 
+    if (sessionId !== null) {
+      this.lastSidebarState = {
+        selectedSessionId: sessionId,
+        selectedHeaderKey: null,
+      };
+    }
+
     // Mark session as seen when user switches to its pane
     if (session?.attentionState) {
       this.attentionTracker.markSeen(session.id, false);
@@ -2572,6 +2581,8 @@ export class DaemonServer {
         ? body.selectedHeaderKey
         : null;
     const version = typeof body.version === "number" ? body.version : undefined;
+    const senderId =
+      typeof body.senderId === "string" ? body.senderId : undefined;
 
     this.lastSidebarState = {
       selectedSessionId,
@@ -2584,6 +2595,7 @@ export class DaemonServer {
       selectedSessionId,
       selectedHeaderKey,
       version,
+      senderId,
     });
 
     return Response.json({ success: true }, { headers });

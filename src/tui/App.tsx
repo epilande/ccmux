@@ -1173,7 +1173,7 @@ export function App(props: AppProps) {
       store.actions.hideGroupContextMenu();
       return;
     }
-    store.actions.setSelectedIndex(index);
+    store.actions.selectFlatItem(item, index);
     // A click while aiming a handoff picks that row, the same as Enter on it.
     // The alternative is the ordinary activation, which in the one-shot picker
     // switches panes and EXITS, losing both the pick and the surface it was
@@ -1264,7 +1264,7 @@ export function App(props: AppProps) {
     if (modalOverlayOpen() || store.state.handoffPick) {
       return;
     }
-    store.actions.setSelectedIndex(index);
+    store.actions.selectFlatItem(item, index);
     openRowMenu(item, event.x, event.y, false);
   }
 
@@ -3340,16 +3340,28 @@ export function App(props: AppProps) {
         if (state === "connected") refreshServerInfo();
       },
       onActivePane: (sessionId, paneId) => {
+        const wasHidden = visibility ? !visibility.visible() : false;
         store.actions.setActivePaneId(paneId);
         store.actions.setActiveSessionId(sessionId);
+        // Sync off-screen sidebars' cursor to the newly focused session so
+        // switching tmux sessions/windows highlights and scrolls to the active
+        // session on arrival, while leaving a visible sidebar's cursor alone.
+        if (wasHidden && sessionId) {
+          store.actions.applySidebarSelection(sessionId, null);
+        }
         // The daemon broadcasts this on every pane/window switch, which is
         // also every moment a sidebar can become visible or hidden. Debounced
         // inside the primitive.
         visibility?.refresh();
       },
-      onSidebarState: (selectedSessionId, selectedHeaderKey, version) => {
+      onSidebarState: (
+        selectedSessionId,
+        selectedHeaderKey,
+        version,
+        senderId,
+      ) => {
         // Ignore echo-back of our own broadcasts (stale version)
-        if (!store.isSidebarVersionNewer(version)) return;
+        if (!store.isSidebarVersionNewer(version, senderId)) return;
         store.actions.applySidebarSelection(
           selectedSessionId,
           selectedHeaderKey,

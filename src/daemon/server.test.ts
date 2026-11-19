@@ -2515,9 +2515,61 @@ describe("DaemonServer", () => {
       const session = manager.getSession("s1")!;
       expect(session.attentionState).toBeNull();
     });
+
+    it("includes client-session-changed[50] in ACTIVE_PANE_HOOKS", () => {
+      expect(
+        (DaemonServer as unknown as { ACTIVE_PANE_HOOKS: readonly string[] })
+          .ACTIVE_PANE_HOOKS,
+      ).toContain("client-session-changed[50]");
+    });
+
+    it("updates lastSidebarState when active pane resolves to a session", async () => {
+      const { manager, internals } = createServer();
+      manager.createSession(
+        "s1",
+        "/Users/test/.claude/projects/-Users-test-proj/s1.jsonl",
+      );
+      manager.setTmuxPane("s1", "%10");
+
+      await postActivePane(internals, "%10");
+
+      expect(internals.lastSidebarState).toEqual({
+        selectedSessionId: "s1",
+        selectedHeaderKey: null,
+      });
+    });
   });
 
   describe("handleSidebarStateUpdate", () => {
+    it("relays senderId and version in broadcastEvent", async () => {
+      const { internals } = createServer();
+      const broadcastEvents: unknown[] = [];
+      (
+        internals as unknown as { broadcastEvent: (e: unknown) => void }
+      ).broadcastEvent = (e) => broadcastEvents.push(e);
+
+      const req = new Request("http://localhost/sidebar-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selectedSessionId: "s1",
+          selectedHeaderKey: null,
+          version: 2,
+          senderId: "sidebar-instance-abc",
+        }),
+      });
+
+      await internals.handleSidebarStateUpdate(req, {});
+
+      expect(broadcastEvents).toHaveLength(1);
+      expect(broadcastEvents[0]).toMatchObject({
+        type: "sidebar_state",
+        selectedSessionId: "s1",
+        selectedHeaderKey: null,
+        version: 2,
+        senderId: "sidebar-instance-abc",
+      });
+    });
     it("should cache state and return success", async () => {
       const { internals } = createServer();
       const req = new Request("http://localhost/sidebar-state", {
