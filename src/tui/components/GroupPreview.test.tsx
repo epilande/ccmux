@@ -405,6 +405,37 @@ describe("GroupPreview repository facts", () => {
     expect(inventoryEntries(facts, sessions, false)[1]!.prs).toEqual([]);
   });
 
+  // Branch names are user data: one named after an Object.prototype member
+  // must read as "no PR yet" when the cache lacks it, and as its own entry
+  // when present, never as the inherited member.
+  for (const branch of ["constructor", "toString", "__proto__"]) {
+    it(`reads a branch named ${branch} as an own cache entry only`, () => {
+      const tree = (b: string) => ({
+        ...facts,
+        worktrees: {
+          ...facts.worktrees,
+          value: {
+            ...facts.worktrees.value,
+            worktrees: [{ path: "/code/wt/odd", branch: b, isMain: false }],
+          },
+        },
+      });
+      expect(inventoryEntries(tree(branch), [])[0]!.prs).toEqual([]);
+      // Parsed, as the wire delivers it: JSON.parse makes an OWN key even
+      // for __proto__, where a plain object literal would set the prototype.
+      const present = {
+        ...tree(branch),
+        branchPRs: JSON.parse(
+          `{${JSON.stringify(branch)}:${JSON.stringify(facts.branchPRs["feat/previews"])}}`,
+        ),
+      };
+      expect(Object.hasOwn(present.branchPRs, branch)).toBe(true);
+      expect(inventoryEntries(present, [])[0]!.prs.map((p) => p.id)).toEqual([
+        "206",
+      ]);
+    });
+  }
+
   it("draws the Repository block and the inventory for a repo header", async () => {
     const [tick] = createSignal(0);
     setup = await testRender(
