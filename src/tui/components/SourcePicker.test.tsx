@@ -1576,7 +1576,7 @@ describe("Start key convergence", () => {
   });
 });
 
-it("keeps the PR number and checkout arrow readable in a compact overlay", async () => {
+it("keeps the PR number, title and checkout arrow in a compact overlay", async () => {
   const h = await mountSettled({
     width: 30,
     height: 30,
@@ -1584,9 +1584,13 @@ it("keeps the PR number and checkout arrow readable in a compact overlay", async
     prs: [openPR()],
     worktrees: [worktreeRow({ tip: "sha-156" })],
   });
-  const frame = await h.frame();
-  expect(frame).toContain("#156");
-  expect(frame).toContain("→ a");
+  const line = (await h.frame()).split("\n").find((l) => l.includes("#156"));
+  expect(line).toBeDefined();
+  // The checkout's name gives way to the title at this width; the arrow,
+  // which changes what Enter does, stays.
+  expect(line).toContain("#156 park the");
+  expect(line).toContain("→");
+  expect(line).not.toContain("→ a");
 });
 
 it("preserves branch, draft, review, checks and every label at picker width", async () => {
@@ -1699,28 +1703,31 @@ async function checkedOutBesideUnchecked(width: number) {
   };
 }
 
-it("gives a checked-out PR's title all but the marker's columns at 30", async () => {
-  const { checkedOut, unchecked } = await checkedOutBesideUnchecked(30);
-  expect(checkedOut).toMatch(/#259 \S/);
-  expect(checkedOut).toContain("→");
-  const mine = displayWidth(titleAfter(checkedOut, 259));
-  const theirs = displayWidth(titleAfter(unchecked, 258));
-  expect(mine).toBeGreaterThanOrEqual(theirs - 2);
-  // And readable, not the `f…` stub this replaced.
-  expect(titleAfter(checkedOut, 259)).toMatch(/^fix\(t/);
-});
-
-for (const width of [23, 40]) {
-  it(`keeps a checked-out PR's whole number, title and marker at ${width} columns`, async () => {
+// Up to mid widths the checkout's name waits until the title has twice its
+// readable minimum, so a checked-out title is only the marker's two columns
+// short of its neighbour's.
+for (const width of [23, 30, 40]) {
+  it(`gives a checked-out PR's title all but the marker's columns at ${width}`, async () => {
     const { checkedOut, unchecked } = await checkedOutBesideUnchecked(width);
     expect(checkedOut).toMatch(/#259 \S/);
     expect(checkedOut).toContain("→");
+    expect(checkedOut).not.toContain("→ p");
     expect(unchecked).toMatch(/#258 \S/);
-    expect(displayWidth(titleAfter(checkedOut, 259))).toBeGreaterThanOrEqual(
-      Math.min(4, displayWidth(titleAfter(unchecked, 258))),
-    );
+    const mine = displayWidth(titleAfter(checkedOut, 259));
+    const theirs = displayWidth(titleAfter(unchecked, 258));
+    expect(mine).toBeGreaterThanOrEqual(theirs - 2);
+    expect(titleAfter(checkedOut, 259)).toMatch(/^fix/);
   });
 }
+
+// Wide enough for both, the name shows, beside a title still at least twice
+// its readable minimum (`fix(tui): Add…`).
+it("shows a checked-out PR's checkout name at 60 columns", async () => {
+  const { checkedOut } = await checkedOutBesideUnchecked(60);
+  expect(checkedOut).toMatch(/#259 \S/);
+  expect(checkedOut).toContain("→ park");
+  expect(displayWidth(titleAfter(checkedOut, 259))).toBeGreaterThanOrEqual(13);
+});
 
 it("keeps failing checks ahead of a long author and branch in compact Start", async () => {
   const h = await mountSettled({

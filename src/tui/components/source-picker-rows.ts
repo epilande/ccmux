@@ -637,9 +637,11 @@ export function fitSourceCellWidths(
  * Fit a row's label (`title` starts with its identity) into `room`. The
  * claims, in order: the whole number, since it is what tells two rows apart;
  * the bare `→` on a checked-out row, since it changes what Enter does; the
- * title up to its readable minimum; and only then the checkout's name, up to
- * half the room, dropped whole when it would be cut below ` p…`. Past all of
- * that the title takes the rest.
+ * title, to twice its readable minimum (or whole, if shorter); and only then
+ * the checkout's name, up to half the room, dropped whole when it would be
+ * cut below ` p…`. Past all of that the title takes the rest. Until a row is
+ * wide enough for both, a checked-out title is just the marker's columns
+ * short of an unchecked neighbour's (`⊙ #259 fix(tui): A… →`).
  */
 export function fitSourceLabel(
   row: SourceRow,
@@ -653,11 +655,11 @@ export function fitSourceLabel(
   const markerWidth = displayWidth(marker);
   // What the title and the name share once the number and marker are paid.
   const shared = Math.max(0, room - identityWidth - markerWidth);
-  const titleFloor = Math.min(titleWidth - identityWidth, TITLE_TEXT_MIN);
+  const titleFirst = Math.min(titleWidth - identityWidth, 2 * TITLE_TEXT_MIN);
   let nameRoom = Math.min(
     displayWidth(name),
     Math.floor(room / 2) - markerWidth,
-    shared - titleFloor,
+    shared - titleFirst,
   );
   if (nameRoom < Math.min(CHECKOUT_NAME_MIN, displayWidth(name))) nameRoom = 0;
   const fittedTitle = truncateText(
