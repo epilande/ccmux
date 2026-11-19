@@ -537,7 +537,12 @@ const CONFIRM_CHROME = 6;
 
 const RemovalConfirm: Component<{
   headline: string;
+  /** Lines naming the targets: the first text to give way to a short panel. */
+  targets?: string[];
+  /** Consequences, kept whole while anything else can give. */
   details: string[];
+  /** `details` with the names left out, for a panel too short for them. */
+  compactDetails?: string[];
   destructive: boolean;
   confirmLabel?: string;
   cancelLabel?: string;
@@ -549,24 +554,41 @@ const RemovalConfirm: Component<{
 }> = (props) => {
   const boxWidth = () => Math.max(24, Math.min(56, props.width));
   /**
-   * The headline and details, wrapped, then cut to the rows the panel has
+   * The headline, targets and consequences, fitted to the rows the panel has
    * left after the frame, the title, the two spacers and the Y/N row: a box
-   * taller than the panel loses its title and its buttons off the edges. The
-   * last line kept says, with an ellipsis, that more was cut.
+   * taller than the panel loses its title and its buttons off the edges.
+   * Names give way first, since a consequence (ignored files going, agents
+   * ending) may be disclosed nowhere else: the consequences drop the names
+   * they repeat from the target list, then that list shrinks to one row,
+   * then it goes. Only a panel too short even for that cuts the tail, the
+   * last line kept ending in an ellipsis.
    */
   const body = createMemo(() => {
     const width = boxWidth() - 2;
-    const lines = [
-      ...wrapText(props.headline, width).map((text) => ({ text, head: true })),
-      ...props.details.flatMap((line) =>
-        wrapText(line, width).map((text) => ({ text, head: false })),
-      ),
-    ];
     const room = Math.max(1, props.height - CONFIRM_CHROME);
-    if (lines.length <= room) return lines;
-    const kept = lines.slice(0, room);
+    const wrapped = (lines: string[]) =>
+      lines.flatMap((line) => wrapText(line, width));
+    const unwrapped = (lines: string[]) =>
+      lines.map((line) => truncateText(line, width));
+    const targets = props.targets ?? [];
+    const compact = props.compactDetails ?? props.details;
+    const headline = wrapped([props.headline]);
+    const tagged = (head: string[], rest: string[]) => [
+      ...head.map((text) => ({ text, head: true })),
+      ...rest.map((text) => ({ text, head: false })),
+    ];
+    for (const rest of [
+      [...wrapped(targets), ...wrapped(props.details)],
+      [...wrapped(targets), ...wrapped(compact)],
+      [...unwrapped(targets), ...wrapped(compact)],
+      wrapped(compact),
+    ])
+      if (headline.length + rest.length <= room) return tagged(headline, rest);
+    const tight = tagged(unwrapped([props.headline]), unwrapped(compact));
+    if (tight.length <= room) return tight;
+    const kept = tight.slice(0, room);
     const last = kept[room - 1]!;
-    kept[room - 1] = { ...last, text: truncateText(`${last.text}…`, width) };
+    last.text = truncateText(`${last.text}…`, width);
     return kept;
   });
   const boxHeight = () => CONFIRM_CHROME + body().length;
@@ -1333,6 +1355,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     props.embedded
       ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
       : dims().height - 2;
+  /** What the final confirmation discloses about the chosen worktrees. */
+  const removalSummary = (): Parameters<typeof removalDetails>[0] => ({
+    includedDirty: dirtyOk().size,
+    blockedDirty: declinedDirty(),
+    ignoredFiles: chosen().reduce((n, c) => n + c.ignoredFiles.length, 0),
+    endingSessions: chosen().reduce((n, c) => n + c.sessions.length, 0),
+    endingIn: chosen()
+      .filter(endsSessions)
+      .map((c) => c.name),
+  });
   const footerNote = () =>
     note() || scanError() || (!scan() ? "scanning…" : undefined);
   /** The agents cell's text for a row, at this width. */
@@ -1758,24 +1790,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               .length,
             chosen()[0]?.name,
           )}
-          details={[
-            ...removalTargets(chosen().map((c) => c.name)),
-            ...removalDetails({
-              includedDirty: dirtyOk().size,
-              blockedDirty: declinedDirty(),
-              ignoredFiles: chosen().reduce(
-                (n, c) => n + c.ignoredFiles.length,
-                0,
-              ),
-              endingSessions: chosen().reduce(
-                (n, c) => n + c.sessions.length,
-                0,
-              ),
-              endingIn: chosen()
-                .filter(endsSessions)
-                .map((c) => c.name),
-            }),
-          ]}
+          targets={removalTargets(chosen().map((c) => c.name))}
+          details={removalDetails(removalSummary())}
+          compactDetails={removalDetails({
+            ...removalSummary(),
+            endingIn: undefined,
+          })}
           destructive={dirtyOk().size > 0}
           width={width()}
           height={confirmHeight()}
