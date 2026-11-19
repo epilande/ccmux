@@ -3454,6 +3454,7 @@ export function App(props: AppProps) {
           ) {
             return;
           }
+          if (hydratedFromSidebarState) return;
           hydratedFromSidebarState = true;
           withoutPaneFlash(() =>
             store.actions.applySidebarSelection(

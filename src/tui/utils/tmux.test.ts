@@ -148,6 +148,7 @@ describe("parseLaunchPane", () => {
 interface SpawnResponse {
   stdout?: string;
   exitCode?: number;
+  exited?: Promise<number>;
 }
 
 /** Stubs the three process spawns the window launcher makes: `Bun.which`
@@ -169,7 +170,7 @@ function withTmuxStubs(responses: SpawnResponse[]): {
     return {
       stdout: new Blob([response.stdout ?? ""]).stream(),
       stderr: new Blob([""]).stream(),
-      exited: Promise.resolve(response.exitCode ?? 0),
+      exited: response.exited ?? Promise.resolve(response.exitCode ?? 0),
     };
   }) as unknown as typeof Bun.spawn;
   return {
@@ -885,6 +886,61 @@ describe("flashPane and flashPaneDetached single-main-pane gating", () => {
         "set-option",
         "set-option",
       ]);
+    } finally {
+      globalThis.setTimeout = origSetTimeout;
+      stubs.restore();
+    }
+  });
+
+  it("invalidates an in-flight flashPane(B) check when returning to already-flashing pane A", async () => {
+    const origSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void) => {
+      if (typeof fn === "function") scheduled.push(() => fn());
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    let resolvePaneB!: (code: number) => void;
+    const paneBExited = new Promise<number>((r) => {
+      resolvePaneB = r;
+    });
+    const multiPaneList = [
+      row("%1", "ccmux-sidebar"),
+      row("%2", "claude"),
+      row("%3", "zsh"),
+    ].join("\n");
+
+    const stubs = withTmuxStubs([
+      { stdout: multiPaneList },
+      {},
+      { stdout: multiPaneList, exited: paneBExited },
+      {},
+      {},
+    ]);
+    try {
+      // 1. Start flashing %2 (A)
+      flashPane("%2");
+      await new Promise((r) => origSetTimeout(r, 0));
+      expect(
+        stubs.calls.filter((argv) => argv[1] === "set-option"),
+      ).toHaveLength(1);
+
+      // 2. Request flash on %3 (B) — list-panes stays in flight
+      flashPane("%3");
+      // 3. User returns to %2 (A) while %2 is still flashing and %3 is pending
+      flashPane("%2");
+
+      // 4. %3's list-panes now resolves: it must NOT flash %3 over %2
+      resolvePaneB(0);
+      await new Promise((r) => origSetTimeout(r, 0));
+
+      const setOptionTargets = stubs.calls
+        .filter((argv) => argv[1] === "set-option")
+        .map((argv) => argv[argv.indexOf("-t") + 1]);
+      expect(setOptionTargets).toEqual(["%2"]);
+
+      // Clean up active %2 flash timer
+      for (const fn of scheduled) fn();
     } finally {
       globalThis.setTimeout = origSetTimeout;
       stubs.restore();

@@ -298,10 +298,14 @@ async function renderApp(
  * installed, so callers of this helper don't inherit ambient fetch state
  * from another test.
  */
-function mockSidebarStateFetch(payload: Record<string, unknown>) {
+function mockSidebarStateFetch(
+  payload: Record<string, unknown>,
+  options: { ok?: boolean; gate?: Promise<void> } = {},
+) {
+  const { ok = true, gate } = options;
   const originalFetch = globalThis.fetch;
   let hydrationFetchPromise:
-    | Promise<{ json: () => Promise<unknown> }>
+    | Promise<{ ok: boolean; json: () => Promise<unknown> }>
     | undefined;
   globalThis.fetch = ((input: string | URL | Request) => {
     const url =
@@ -309,11 +313,14 @@ function mockSidebarStateFetch(payload: Record<string, unknown>) {
         ? input.toString()
         : input.url;
     if (url.includes("/sidebar-state")) {
-      const promise = (async () => ({ json: async () => payload }))();
+      const promise = (async () => {
+        if (gate) await gate;
+        return { ok, json: async () => payload };
+      })();
       hydrationFetchPromise = promise;
       return promise;
     }
-    return (async () => ({ json: async () => ({}) }))();
+    return (async () => ({ ok: true, json: async () => ({}) }))();
   }) as unknown as typeof fetch;
   return {
     getPromise: () => hydrationFetchPromise,
@@ -596,8 +603,8 @@ describe("App", () => {
       setup.mockInput.pressKey("x");
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Kill Session?");
-      expect(frame).toContain("alpha");
+      expect(frame).toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
     } finally {
       restore();
     }
@@ -645,10 +652,102 @@ describe("App", () => {
       setup.mockInput.pressKey("x");
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Kill Session?");
-      expect(frame).toContain("alpha");
+      expect(frame).toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
     } finally {
       restore();
+    }
+  });
+
+  it("sidebar hydration skips non-OK response and does not overwrite newer SSE sidebar_state", async () => {
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // Newer SSE sidebar_state arrives before the startup GET resolves.
+      sseCallbacks!.onSidebarState!("s2", null, 3, "peer-sidebar", 5);
+      await setup.renderOnce();
+
+      // Now let the stale startup GET /sidebar-state resolve with s1.
+      releaseHydration();
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+
+    const nonOk = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null },
+      { ok: false },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%20",
+      );
+      await nonOk.getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      nonOk.restore();
     }
   });
 

@@ -1034,6 +1034,47 @@ describe("SessionList", () => {
     expect(separatorLine).toBeGreaterThan(group1Line);
     expect(group2Line).toBeGreaterThan(separatorLine);
   });
+
+  it("recalculates scroll target when row layout grows so selected row stays in view", async () => {
+    const items: FlatItem[] = Array.from({ length: 10 }, (_, i) =>
+      makeSessionItem(`s${i}`, "g", {
+        cwd: `/Users/test/Code/proj-${i}`,
+        lastPrompt: `prompt-${i}`,
+      }),
+    );
+    const [promptDisplay, setPromptDisplay] = createSignal<"off" | "row2">(
+      "off",
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items}
+            selectedIndex={9}
+            previewWidth={0}
+            promptDisplay={promptDisplay()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("proj-9");
+
+    // Enabling row2 doubles each session row height (10 -> 20 lines in a 12-line
+    // viewport), pushing selected row 9 below the fold unless scroll recalculates.
+    setPromptDisplay("row2");
+    await setup.renderOnce();
+    await setup.renderOnce();
+
+    expect(box!.scrollTop).toBe(8);
+    expect(setup.captureCharFrame()).toContain("proj-9");
+    expect(setup.captureCharFrame()).toContain("prompt-9");
+  });
 });
 
 describe("isActivePaneRow", () => {

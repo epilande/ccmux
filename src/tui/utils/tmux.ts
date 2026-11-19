@@ -163,8 +163,8 @@ async function hasMultipleMainPanes(paneId: string): Promise<boolean> {
  * previous pane, guarded against A->B->A races.
  */
 export function flashPane(paneId: string): void {
-  if (flashingPaneId === paneId && flashTimer) return;
   const seq = ++flashRequestSeq;
+  if (flashingPaneId === paneId && flashTimer) return;
 
   void hasMultipleMainPanes(paneId).then((shouldFlash) => {
     if (seq !== flashRequestSeq || !shouldFlash) return;

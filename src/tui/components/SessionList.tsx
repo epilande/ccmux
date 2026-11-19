@@ -339,10 +339,13 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
   let initialScrollDone = false;
   let prevViewportHeight = 0;
+  let prevLayout: ResolvedColumns | undefined;
+  let prevBlockKey = "";
   let prevItems: FlatItem[] | undefined;
   let prevSelectedIndex = -1;
   let prevSelectedKey: string | null = null;
   let prevSyncGeneration = 0;
+  let pendingLayoutScroll = false;
   let suppressSelectionScroll = false;
   let programmaticScrolling = false;
 
@@ -356,6 +359,10 @@ export const SessionList: Component<SessionListProps> = (props) => {
     const items = props.items;
     const index = props.selectedIndex;
     const sync = props.scrollSync ?? null;
+    const currentLayout = layout();
+    const currentBlockKey = blockActive()
+      ? `${props.promptLines ?? 0}:${promptBlockWidth(effectiveWidth())}`
+      : "off";
     if (!scrollboxRef || items.length === 0) return;
 
     const viewportHeight = scrollboxRef.viewport?.height ?? 0;
@@ -369,9 +376,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
       prevSyncGeneration = sync.generation;
       initialScrollDone = true;
       prevViewportHeight = viewportHeight;
+      prevLayout = currentLayout;
+      prevBlockKey = currentBlockKey;
       prevItems = items;
       prevSelectedIndex = index;
       prevSelectedKey = selectedKey;
+      pendingLayoutScroll = false;
       suppressSelectionScroll = false;
       programmaticScrolling = true;
       try {
@@ -382,12 +392,20 @@ export const SessionList: Component<SessionListProps> = (props) => {
       return;
     }
 
-    if (!validIndex) return;
+    if (!validIndex) {
+      prevLayout = currentLayout;
+      prevBlockKey = currentBlockKey;
+      pendingLayoutScroll = false;
+      return;
+    }
 
     if (suppressSelectionScroll) {
       suppressSelectionScroll = false;
+      pendingLayoutScroll = false;
       initialScrollDone = true;
       prevViewportHeight = viewportHeight;
+      prevLayout = currentLayout;
+      prevBlockKey = currentBlockKey;
       prevItems = items;
       prevSelectedIndex = index;
       prevSelectedKey = selectedKey;
@@ -397,19 +415,36 @@ export const SessionList: Component<SessionListProps> = (props) => {
     const isInitialLayout = !initialScrollDone;
     const viewportResized =
       !isInitialLayout && viewportHeight !== prevViewportHeight;
+    const layoutChanged =
+      !isInitialLayout &&
+      (currentLayout !== prevLayout || currentBlockKey !== prevBlockKey);
     const selectionChanged =
       !isInitialLayout &&
       (items === prevItems
         ? index !== prevSelectedIndex || selectedKey !== prevSelectedKey
         : selectedKey !== prevSelectedKey);
 
+    if (layoutChanged) {
+      pendingLayoutScroll = true;
+    }
+    if (selectionChanged) {
+      pendingLayoutScroll = false;
+    }
+
     initialScrollDone = true;
     prevViewportHeight = viewportHeight;
+    prevLayout = currentLayout;
+    prevBlockKey = currentBlockKey;
     prevItems = items;
     prevSelectedIndex = index;
     prevSelectedKey = selectedKey;
 
-    if (!isInitialLayout && !viewportResized && !selectionChanged) {
+    if (
+      !isInitialLayout &&
+      !viewportResized &&
+      !selectionChanged &&
+      !pendingLayoutScroll
+    ) {
       return;
     }
 
@@ -420,13 +455,16 @@ export const SessionList: Component<SessionListProps> = (props) => {
       viewportHeight,
       sessionLines,
     );
-    if (target !== null) {
+    if (target === null) {
+      pendingLayoutScroll = false;
+    } else {
       programmaticScrolling = true;
       try {
         scrollboxRef.scrollTo(target);
       } finally {
         programmaticScrolling = false;
       }
+      pendingLayoutScroll = contentHeight < target + viewportHeight;
     }
   });
 
@@ -576,6 +614,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             autoScrollFields.autoScrollThresholdHorizontal = -1;
             initialScrollDone = false;
             prevViewportHeight = 0;
+            pendingLayoutScroll = false;
             // Handed up here rather than on mount: with no rows there is no
             // scrollbox at all (see the fallback above), and a resolver
             // published before it existed would answer null for the list's
@@ -585,6 +624,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             r.verticalScrollBar.on("change", () => {
               props.onScrollMoved?.(r.scrollTop);
               if (!programmaticScrolling) {
+                pendingLayoutScroll = false;
                 props.onUserScroll?.(r.scrollTop);
               }
             });
