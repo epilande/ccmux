@@ -17,7 +17,7 @@ import {
   onCleanup,
 } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
-import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
+import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { IssueListResponse } from "../../daemon/issue-list";
 import type { PRListResponse } from "../../daemon/pr-list";
 import type { WorktreeListResponse } from "../../daemon/worktree-list";
@@ -1100,6 +1100,12 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
               // with the filter still up, and two focused inputs would both
               // take the keystrokes.
               focused={props.enabled !== false}
+              // `focused` only applies on change, and OpenTUI focuses what a
+              // left click lands on: behind a dialog, a click here would move
+              // the dialog's typing into this hidden filter.
+              onMouseDown={(event: MouseEvent) => {
+                if (props.enabled === false) event.preventDefault();
+              }}
               placeholder="Filter pull requests and issues..."
               placeholderColor={theme.overlay}
               textColor={theme.text}

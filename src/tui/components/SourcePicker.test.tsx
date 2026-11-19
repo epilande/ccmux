@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { createMockKeys } from "@opentui/core/testing";
+import { createMockKeys, createMockMouse } from "@opentui/core/testing";
 import {
   deliverEscape,
   expectContentSizedThumb,
@@ -126,6 +126,9 @@ async function mount(
     initialCursor?: string | null;
     compact?: boolean;
     showPreview?: boolean;
+    enabled?: boolean;
+    /** A focused input beside the picker, standing in for a dialog's. */
+    dialogInput?: boolean;
     openResult?: boolean;
     copyResult?: boolean;
     prDetail?: Handlers["prDetail"];
@@ -141,30 +144,36 @@ async function mount(
   const picked: Picked = { prs: [], issues: [], worktrees: [], closes: 0 };
   setup = await testRender(
     () => (
-      <SourcePicker
-        activeSessionId="s1"
-        {...opts.actions}
-        effects={{
-          openUrl: () => opts.openResult ?? true,
-          copyText: () => ({
-            osc52: opts.copyResult ?? true,
-            local: false,
-          }),
-        }}
-        repo={opts.repo ?? "/repo"}
-        cwd="/repo"
-        compact={opts.compact}
-        showPreview={opts.showPreview}
-        previewWidth={50}
-        initialFilter={opts.initialFilter}
-        initialCursor={opts.initialCursor}
-        onClose={() => {
-          picked.closes += 1;
-        }}
-        onPickPR={(target) => picked.prs.push(target)}
-        onPickIssue={(target) => picked.issues.push(target)}
-        onOpenWorktree={(target) => picked.worktrees.push(target)}
-      />
+      <box flexDirection="column" width="100%" height="100%">
+        <SourcePicker
+          activeSessionId="s1"
+          enabled={opts.enabled}
+          {...opts.actions}
+          effects={{
+            openUrl: () => opts.openResult ?? true,
+            copyText: () => ({
+              osc52: opts.copyResult ?? true,
+              local: false,
+            }),
+          }}
+          repo={opts.repo ?? "/repo"}
+          cwd="/repo"
+          compact={opts.compact}
+          showPreview={opts.showPreview}
+          previewWidth={50}
+          initialFilter={opts.initialFilter}
+          initialCursor={opts.initialCursor}
+          onClose={() => {
+            picked.closes += 1;
+          }}
+          onPickPR={(target) => picked.prs.push(target)}
+          onPickIssue={(target) => picked.issues.push(target)}
+          onOpenWorktree={(target) => picked.worktrees.push(target)}
+        />
+        {opts.dialogInput ? (
+          <input id="dialog-field" focused width={30} value="" />
+        ) : null}
+      </box>
     ),
     { width: opts.width ?? 90, height: opts.height ?? 24 },
   );
@@ -180,7 +189,14 @@ async function mount(
     deliverEscape(setup!.renderer);
     await setup!.renderOnce();
   };
-  return { picked, keys, escape, frame, spans: () => setup!.captureSpans() };
+  return {
+    picked,
+    keys,
+    mouse: createMockMouse(setup.renderer),
+    escape,
+    frame,
+    spans: () => setup!.captureSpans(),
+  };
 }
 
 /** Everything answered, with one PR and one issue. */
@@ -808,6 +824,35 @@ describe("SourcePicker keys", () => {
 });
 
 describe("SourcePicker filter", () => {
+  // Behind a dialog the filter is still drawn, and OpenTUI focuses whatever a
+  // left click lands on: typing meant for the dialog's field would edit the
+  // hidden filter instead.
+  it("keeps a dialog's focus when the disabled filter is clicked", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [],
+      initialFilter: "park",
+      enabled: false,
+      dialogInput: true,
+    });
+    const focused = () =>
+      (
+        setup!.renderer as unknown as {
+          currentFocusedRenderable?: { id?: string } | null;
+        }
+      ).currentFocusedRenderable?.id;
+    expect(focused()).toBe("dialog-field");
+    const row = (await harness.frame())
+      .split("\n")
+      .findIndex((line) => line.includes("/ park"));
+    expect(row).toBeGreaterThanOrEqual(0);
+    await harness.mouse.click(10, row);
+    await harness.frame();
+    expect(focused()).toBe("dialog-field");
+    await harness.keys.typeText("zz");
+    expect(await harness.frame()).not.toContain("/ parkzz");
+  });
+
   it("narrows to what was typed, across both kinds at once", async () => {
     const harness = await mountSettled({
       prs: [openPR({ title: "auto-detect nested tmux" })],
