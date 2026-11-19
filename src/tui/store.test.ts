@@ -6569,4 +6569,60 @@ describe("group rename and merge (#42)", () => {
       expect(store.state.palette).toBeNull();
     });
   });
+
+  // A selected row the new names push out of the list (here, out of an
+  // alias-only search) must stop being the action target: the preview, a
+  // search Enter and preview focus would otherwise keep acting on a session
+  // nobody can see. Its header takes the cursor only when it is drawn.
+  describe("a selected row the new names hide", () => {
+    function hidden() {
+      const { store, writes } = setup({
+        groupAliases: { project: { beta: "Office" } },
+      });
+      store.actions.setSearchQuery("Office");
+      store.actions.setSelectedSessionId("b");
+      store.actions.enterPreviewFocus();
+      expect(store.selectedSession()?.id).toBe("b");
+      return { store, writes };
+    }
+    function expectCleared(store: ReturnType<typeof createTUIStore>) {
+      expect(
+        store
+          .flatItems()
+          .some(
+            (i) => i.type === "session" && i.filteredSession.session.id === "b",
+          ),
+      ).toBe(false);
+      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedHeaderKey()).toBeNull();
+      expect(store.state.previewFocused).toBe(false);
+    }
+
+    it("clears it when another instance renames the alias away", () => {
+      const { store } = hidden();
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      expectCleared(store);
+    });
+
+    it("clears it when another instance resets the alias", () => {
+      const { store } = hidden();
+      store.actions.reloadUIState({ groupAliases: {} });
+      expectCleared(store);
+    });
+
+    it("clears it on a local rename", () => {
+      const { store } = hidden();
+      store.actions.renameGroup("Office", "Backend");
+      expectCleared(store);
+    });
+
+    it("clears it on a local reset", () => {
+      const { store } = hidden();
+      store.actions.resetGroupName("Office");
+      expectCleared(store);
+    });
+  });
 });
