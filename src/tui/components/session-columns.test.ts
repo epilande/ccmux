@@ -1535,6 +1535,53 @@ describe("fitProjectCell", () => {
     }
   });
 
+  it("never drops a branch it showed at a narrower cell", () => {
+    // Where the repo's reserve first cuts the branch, the path is cut too,
+    // and the one-mark rule used to settle that by dropping the branch: it
+    // showed at 14 (`workt…:fix-me+`), vanished at 15-18, and came back at 19.
+    const shapes = [
+      { prefix: "project/", dirname: "worktree-super-long", branch: "fix-me" },
+      {
+        prefix: "claude-toolkit/",
+        dirname: "worktree-super-long",
+        branch: "fix-me",
+      },
+      { prefix: "ccmux/", dirname: "parking", branch: "fix/a" },
+      // Longer than the cap, so only ever shown cut, beside a whole name.
+      {
+        prefix: "project/",
+        dirname: "worktree-super-long",
+        branch: "feat/sidebar-parking-renderer",
+      },
+    ];
+    for (const shape of shapes) {
+      let shown = false;
+      for (let budget = 8; budget <= 50; budget++) {
+        const out = fitProjectCell(
+          { ...shape, isWorktree: true, repoPrefix: true },
+          budget,
+          8,
+        );
+        if (shown)
+          expect([shape.prefix, budget, out.branchLabel]).not.toEqual([
+            shape.prefix,
+            budget,
+            "",
+          ]);
+        shown ||= out.branchLabel !== "";
+        expect(cellWidth(out)).toBeLessThanOrEqual(budget);
+      }
+      expect(shown).toBe(true);
+    }
+    expect(
+      fitProjectCell(
+        { ...shapes[0]!, isWorktree: true, repoPrefix: true },
+        15,
+        8,
+      ),
+    ).toEqual({ prefix: "", dirname: "worktr…", branchLabel: ":fix-me+" });
+  });
+
   it("makes the branch yield before the worktree row loses its identity", () => {
     // A long branch used to spell itself out to `maxBranchLen` while the repo
     // dropped and the worktree name fell to a stub, which is backwards for a
