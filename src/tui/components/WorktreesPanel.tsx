@@ -532,6 +532,9 @@ export function removalDetails(opts: {
   return lines;
 }
 
+/** The confirm's rows besides its text: border, title, two spacers, Y/N. */
+const CONFIRM_CHROME = 6;
+
 const RemovalConfirm: Component<{
   headline: string;
   details: string[];
@@ -539,15 +542,34 @@ const RemovalConfirm: Component<{
   confirmLabel?: string;
   cancelLabel?: string;
   width: number;
+  /** Rows the panel can give the box. */
+  height: number;
   onConfirm: () => void;
   onCancel: () => void;
 }> = (props) => {
   const boxWidth = () => Math.max(24, Math.min(56, props.width));
-  const headline = createMemo(() => wrapText(props.headline, boxWidth() - 2));
-  const details = createMemo(() =>
-    props.details.flatMap((line) => wrapText(line, boxWidth() - 2)),
-  );
-  const boxHeight = () => 6 + headline().length + details().length;
+  /**
+   * The headline and details, wrapped, then cut to the rows the panel has
+   * left after the frame, the title, the two spacers and the Y/N row: a box
+   * taller than the panel loses its title and its buttons off the edges. The
+   * last line kept says, with an ellipsis, that more was cut.
+   */
+  const body = createMemo(() => {
+    const width = boxWidth() - 2;
+    const lines = [
+      ...wrapText(props.headline, width).map((text) => ({ text, head: true })),
+      ...props.details.flatMap((line) =>
+        wrapText(line, width).map((text) => ({ text, head: false })),
+      ),
+    ];
+    const room = Math.max(1, props.height - CONFIRM_CHROME);
+    if (lines.length <= room) return lines;
+    const kept = lines.slice(0, room);
+    const last = kept[room - 1]!;
+    kept[room - 1] = { ...last, text: truncateText(`${last.text}…`, width) };
+    return kept;
+  });
+  const boxHeight = () => CONFIRM_CHROME + body().length;
   return (
     <box
       position="absolute"
@@ -570,13 +592,20 @@ const RemovalConfirm: Component<{
       <box height={1} />
       {/* Red only when uncommitted work is actually going, so the one
           irreversible case does not read like the routine one. */}
-      <For each={headline()}>
+      <For each={body()}>
         {(line) => (
-          <Text fg={props.destructive ? theme.red : theme.subtext}>{line}</Text>
+          <Text
+            fg={
+              !line.head
+                ? theme.overlay
+                : props.destructive
+                  ? theme.red
+                  : theme.subtext
+            }
+          >
+            {line.text}
+          </Text>
         )}
-      </For>
-      <For each={details()}>
-        {(line) => <Text fg={theme.overlay}>{line}</Text>}
       </For>
       <box height={1} />
       <box flexDirection="row">
@@ -1297,6 +1326,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   };
   /** Embedded and not the key owner: App's footer shows through instead. */
   const footerYielded = () => !!props.embedded && props.enabled === false;
+  /** Rows inside the panel, where the removal confirm is centred: the view
+   *  below the strip (less App's footer when it shows through), or the
+   *  overlay inside its border. */
+  const confirmHeight = () =>
+    props.embedded
+      ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+      : dims().height - 2;
   const footerNote = () =>
     note() || scanError() || (!scan() ? "scanning…" : undefined);
   /** The agents cell's text for a row, at this width. */
@@ -1708,6 +1744,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             ]}
             destructive
             width={width()}
+            height={confirmHeight()}
             onConfirm={() => answerDirty(true)}
             onCancel={() => answerDirty(false)}
           />
@@ -1741,6 +1778,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           ]}
           destructive={dirtyOk().size > 0}
           width={width()}
+          height={confirmHeight()}
           onConfirm={() => void runPrune()}
           onCancel={() => setPhase("list")}
         />

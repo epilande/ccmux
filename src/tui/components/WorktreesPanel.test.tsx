@@ -768,6 +768,53 @@ describe("Worktrees read and effect regressions", () => {
     await h.keys.pressKey("x");
     expect(await h.frame()).toContain("Delete alpha");
   });
+  // A bulk removal names its worktrees twice (targets, then the agents it
+  // ends), and in a short sidebar the confirm grew past the screen, taking
+  // the title and the Y/N row with it.
+  it("keeps the removal confirm's title and Y/N on a 30x20 sidebar", async () => {
+    const names = [
+      "fix-sidebar-parking-renderer",
+      "feat-worktree-prune-dialogs",
+      "issue-214-opencode-v2-plugin",
+      "refactor-session-ref-resolver",
+    ];
+    const h = await mount({
+      width: 30,
+      height: 20,
+      rows: [
+        mainRow(),
+        ...names.map((name, i) =>
+          row({
+            path: `/repo/wt/${name}`,
+            name,
+            branch: `feat/${name}`,
+            sessions: [session({ id: `s${i}` })],
+          }),
+        ),
+      ],
+      scan: async () => ({
+        candidates: names.map((name, i) =>
+          candidate({
+            path: `/repo/wt/${name}`,
+            name,
+            branch: `feat/${name}`,
+            ignoredFiles: [".env"],
+            sessions: [session({ id: `s${i}` })],
+          }),
+        ),
+        skipped: [],
+      }),
+    });
+    await h.frame();
+    await h.keys.pressKey("a");
+    await h.frame();
+    await h.keys.pressKey("x");
+    const frame = await h.frame();
+    expect(frame).toContain("Remove worktrees?");
+    expect(frame).toContain("Y confirm");
+    expect(frame).toContain("N cancel");
+  });
+
   // `a` marks what classification says can go, so without an answer it has
   // nothing to mark from and must leave the marks it would replace alone.
   for (const outcome of ["pending", "failed"] as const) {
