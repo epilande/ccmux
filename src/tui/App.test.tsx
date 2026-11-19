@@ -9734,6 +9734,41 @@ describe("App worktrees panel (W)", () => {
       }
     });
 
+    // Preview focus types into the selected session's pane, so a row that
+    // arrived and took the cursor mid-typing would send the rest of the keys
+    // to a different agent. Focusing the preview is a choice of pane.
+    it("keeps the keys on the focused pane when the new session arrives", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, {
+          groupBy: "none",
+          persistent: true,
+          initialPreview: true,
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        setup.mockInput.pressTab();
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("a");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+        arrive("myapp");
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("b");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+      } finally {
+        restore();
+      }
+    });
+
     // A cursor on a row the list does not draw splits the board: the
     // highlight falls back to the first row while the preview and `x`/`r`
     // read the hidden session.

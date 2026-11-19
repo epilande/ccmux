@@ -3162,7 +3162,8 @@ export function App(props: AppProps) {
    * A spawn's pane, until its session row arrives over SSE and takes the
    * cursor. The row comes from the daemon's next scan, not the spawn reply,
    * so the selection waits for it, but not forever (`SPAWN_SELECT_MS`), and
-   * never over the user: a cursor moved in the meantime wins.
+   * never over the user: a cursor moved in the meantime, or a preview
+   * focused, wins.
    */
   const [pendingSpawn, setPendingSpawn] = createSignal<{
     paneId: string;
@@ -3184,7 +3185,11 @@ export function App(props: AppProps) {
   createEffect(() => {
     const pending = pendingSpawn();
     if (!pending) return;
+    // Preview focus is a choice of pane too: it types into the selected
+    // session's, so a row that took the cursor now would send the rest of
+    // the user's keys to an agent they did not pick.
     if (
+      store.state.previewFocused ||
       store.state.selectedSessionId !== pending.sessionId ||
       store.selectedHeaderKey() !== pending.headerKey
     ) {
