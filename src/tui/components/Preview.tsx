@@ -321,7 +321,8 @@ interface PreviewProps {
  * preview sticks to the bottom and would show only those.
  */
 export function trimTrailingBlankLines(text: string): string {
-  return text.replace(/(?:\n(?:\x1b\[[0-9;]*m|[ \t])*)+$/, "");
+  // `:` too: tmux writes SGR subparameters colon-separated (`ESC[4:3m`).
+  return text.replace(/(?:\n(?:\x1b\[[0-9;:]*m|[ \t])*)+$/, "");
 }
 
 export const Preview: Component<PreviewProps> = (props) => {
