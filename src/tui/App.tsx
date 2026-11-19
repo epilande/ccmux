@@ -3171,6 +3171,10 @@ export function App(props: AppProps) {
     headerKey: string | null;
   } | null>(null);
   function selectWhenArrives(paneId: string) {
+    // Any session event pins a cursor resting on the band's fallback (the
+    // spawned row's own arrival among them), and the check below would take
+    // that pin for the user moving. Pin it first, so the snapshot holds it.
+    store.actions.commitBandFallback();
     const pending = {
       paneId,
       sessionId: store.state.selectedSessionId,

@@ -3599,6 +3599,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     /**
+     * Pin the cursor's band fallback now rather than on the next session
+     * event (see `pinBandFallback`), for a caller about to snapshot the
+     * selection: the later pin would otherwise read as the user moving.
+     */
+    commitBandFallback() {
+      pinBandFallback();
+    },
+
+    /**
      * Put the cursor on session `id`, but only onto a row the list draws. A
      * session the scope, `f` or a search hides is left alone, and so is the
      * selection: a cursor on a row nobody can see splits the highlight (which

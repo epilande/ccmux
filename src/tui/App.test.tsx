@@ -9769,6 +9769,38 @@ describe("App worktrees panel (W)", () => {
       }
     });
 
+    // The cursor opens on the first waiting row without committing to it,
+    // and any session event pins that fallback; the pin is not the user
+    // moving, so it must not cancel the new row's claim on the cursor.
+    it("moves the cursor to the new session from the waiting row's fallback", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        const waiting = mockEnrichedSession({
+          id: "w1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          mainRepoRoot: "/code/myapp",
+          tmuxPane: "%2",
+          tmuxTarget: "dev:1.2",
+          status: "waiting",
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1), waiting], null);
+        await frame();
+        expect(cursorLine()).toContain("dev:1.2");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        arrive("myapp");
+        await frame();
+        expect(cursorLine()).toContain("dev:2.1");
+      } finally {
+        restore();
+      }
+    });
+
     // A cursor on a row the list does not draw splits the board: the
     // highlight falls back to the first row while the preview and `x`/`r`
     // read the hidden session.
