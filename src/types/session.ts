@@ -163,8 +163,8 @@ export interface Session {
   statusChangedAt: string | null;
   /**
    * Monotonic per-session counter, bumped whenever the attention identity
-   * (`attentionType` or `pendingTool`) changes. Complements `statusChangedAt`:
-   * a waiting->waiting swap (one wait resolves, a new same-type wait begins)
+   * (`attentionType`, `pendingTool`, or an opaque input-owner ID) changes.
+   * A waiting->waiting swap (one wait resolves, a new same-type wait begins)
    * keeps `status` unchanged, so `statusChangedAt` can't catch it, but the
    * generation still advances. A notification-action press echoes the
    * generation it fired for and must match the session's current value, so a
@@ -209,16 +209,10 @@ export interface Session {
    */
   backgroundInFlight?: BackgroundInFlight;
   /**
-   * True when this row's `waiting[permission]` folds MORE THAN ONE
-   * concurrently-waiting server-side session into a single ccmux Session
-   * (only OpenCode aggregates this way today; see `aggregateOpenCodeMarkers`).
-   * A notification-action keystroke lands on whichever dialog the pane
-   * currently renders, which may belong to a different server-side session
-   * than the notification described, and the staleness tokens can't catch it
-   * (same ccmux session, same edge). The notifier suppresses Approve/Deny/Reply
-   * while this is true so a press can never approve the wrong session's tool.
-   * Undefined/absent for every non-aggregating agent (treated as "not
-   * ambiguous").
+   * True when the visible input owner cannot be uniquely identified. This
+   * includes aggregated OpenCode waits and remote OMP dialogs without a
+   * locally correlated request. Notification actions are suppressed because
+   * their keystrokes could answer a different request from the one described.
    */
   ambiguousWait?: boolean;
 }
@@ -231,6 +225,12 @@ export interface SessionState {
   attentionType: AttentionType;
   pendingTool: string | null;
   inPlanMode: boolean;
+  /** Agent-owned input identity; null clears it, undefined preserves it. */
+  waitId?: string | null;
+  /** Changes when a same-ID transcript is reset. Not part of the Session wire shape. */
+  conversationEpoch?: string;
+  /** Marker-owned transcript path, including startup association recovery. */
+  logPath?: string | null;
   cwd?: string;
   project?: string;
   /** Store-stamped time the session's status last changed, fed INTO log
@@ -282,10 +282,7 @@ export interface SessionState {
   backgroundChildren?: BackgroundChild[];
   /** Background-only: live progress from `state.json` `inFlight`. */
   backgroundInFlight?: BackgroundInFlight;
-  /** True when the fold aggregates >1 concurrently-waiting server-side
-   * session into this row (see `Session.ambiguousWait`). Emitted by
-   * `aggregateOpenCodeMarkers` on every fold (true or false) so the notifier's
-   * button suppression tracks the live waiting-marker count. */
+  /** Whether the current input owner is unsafe to answer (see Session.ambiguousWait). */
   ambiguousWait?: boolean;
 }
 

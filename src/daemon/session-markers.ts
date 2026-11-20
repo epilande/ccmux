@@ -16,9 +16,20 @@ export interface SessionPidMarker {
   /** Omitted for agents (e.g. OpenCode) that correlate by PID ancestry. */
   tty?: string;
   session_id: string;
-  transcript_path?: string;
+  transcript_path?: string | null;
   timestamp: number;
-  state?: "idle" | "working" | "waiting_permission" | "waiting_question";
+  state?:
+    | "idle"
+    | "working"
+    | "waiting_permission"
+    | "waiting_question"
+    | "waiting_plan";
+  /** The producer observes input ownership; terminal text cannot override it. */
+  state_authoritative?: boolean;
+  in_plan_mode?: boolean;
+  ambiguous_wait?: boolean;
+  wait_id?: string;
+  conversation_epoch?: string;
   state_timestamp?: number;
   pending_tool?: string;
   permission_context?: string;
@@ -26,8 +37,8 @@ export interface SessionPidMarker {
   directory?: string;
   /** Session display title/slug. OpenCode only. */
   title?: string;
-  /** Most recent user prompt, capped at 1KB. Cursor only. */
-  last_prompt?: string;
+  /** Most recent user prompt. Null explicitly clears the previous conversation. */
+  last_prompt?: string | null;
 }
 
 /**

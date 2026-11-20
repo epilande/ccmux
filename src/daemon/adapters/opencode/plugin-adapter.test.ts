@@ -41,6 +41,7 @@ import type { HookManagerContext } from "../../hook-adapter";
 import type { SessionPidMarker } from "../../session-markers";
 import { loadMarkerIntoCache, refreshMarkerCache } from "../../session-markers";
 import type { Session, TmuxPane } from "../../../types/session";
+import { SessionManager } from "../../sessions";
 
 const CCMUX_VERSION = pkg.version;
 
@@ -439,6 +440,82 @@ describe("OpenCodePluginAdapter", () => {
       expect(adapter.isSessionStillLive(makeMarker({ session_id: "x" }))).toBe(
         true,
       );
+    });
+  });
+
+  it("keeps aggregate ambiguity and prompt history when its representative changes", async () => {
+    const manager = new SessionManager();
+    const pane = makePane("%3", 9000);
+    const session = manager.createPaneTrackedSession({
+      agentType: "opencode",
+      paneId: pane.paneId,
+      pid: 9000,
+      cwd: "/repo",
+      nativeSessionId: "first",
+    });
+    const ctx: HookManagerContext = {
+      ...makeCtx([], [pane]),
+      sessionManager: manager,
+    };
+    const first = makeMarker({
+      session_id: "first",
+      state: "waiting_permission",
+      state_timestamp: 1,
+      pending_tool: "bash",
+      last_prompt: "First conversation prompt",
+    });
+    writeMarkerToDisk(first);
+    await adapter.onMarkerAdded(first, ctx);
+    const second = makeMarker({
+      session_id: "second",
+      state: "waiting_permission",
+      state_timestamp: 2,
+      pending_tool: "write",
+      last_prompt: "Second conversation prompt",
+    });
+    writeMarkerToDisk(second);
+    await adapter.onMarkerAdded(second, ctx);
+
+    expect(manager.getSession(session.id)).toMatchObject({
+      nativeSessionId: "second",
+      status: "waiting",
+      attentionType: "permission",
+      pendingTool: "write",
+      ambiguousWait: true,
+      prompts: ["First conversation prompt", "Second conversation prompt"],
+    });
+  });
+
+  it("refuses aggregate state when its representative belongs to a native row", async () => {
+    const manager = new SessionManager();
+    const pane = makePane("%3", 9000);
+    const session = manager.createPaneTrackedSession({
+      agentType: "opencode",
+      paneId: pane.paneId,
+      pid: 9000,
+      cwd: "/repo",
+      nativeSessionId: "owned-here",
+    });
+    manager.createSession("foreign", "/tmp/foreign.jsonl");
+    const ctx: HookManagerContext = {
+      ...makeCtx([], [pane]),
+      sessionManager: manager,
+    };
+    const foreign = makeMarker({
+      session_id: "foreign",
+      state: "waiting_permission",
+      state_timestamp: 2,
+      pending_tool: "bash",
+    });
+    writeMarkerToDisk(foreign);
+
+    await adapter.onMarkerAdded(foreign, ctx);
+
+    expect(manager.getSession(session.id)).toMatchObject({
+      nativeSessionId: "owned-here",
+      status: "idle",
+      attentionType: null,
+      pendingTool: null,
     });
   });
 

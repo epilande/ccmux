@@ -514,6 +514,39 @@ Do you want to allow this access?
       expect(result.attentionType).toBeNull();
     });
 
+    it("detects the current intent footer without relying on its label", () => {
+      const result = matchTerminalRule(
+        "  ⎋ Inspect the pending changes\n ⠼ 5s > ⬢ project > ⑂ fix/omp ▶─0.0%────128K─\n╰─\n",
+        omp,
+      );
+      expect(result).toEqual({
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+      });
+    });
+
+    it("recognizes timed footer frames, profiles, and elapsed units", () => {
+      for (const [frame, elapsed] of [["⠋", "0s"], ["⠦-work", "5m"], ["⠏", "2h"]]) {
+        expect(matchTerminalRule(
+          `  \u001b[33m⎋ Unpredictable intent\u001b[0m\n ${frame} ${elapsed} > project > main\n╰─`,
+          omp,
+        )?.status).toBe("working");
+      }
+    });
+
+    it("does not treat quoted intent or an idle status line as active work", () => {
+      for (const text of [
+        "The footer says ⎋ Inspect the pending changes",
+        "  ⎋ Inspect the pending changes\n project > ⑂ main ▶─0.0%────128K─",
+        " ⠼ 5s > ⬢ project > ⑂ main",
+        ">   ⎋ Inspect the pending changes\n>  ⠼ 5s > ⬢ project > ⑂ main",
+        "  ⎋ Old intent\n ⠼ 5s > project > main\ncompleted\nnew prompt\nanswer\n π > project > main",
+      ]) {
+        expect(matchTerminalRule(text, omp)).toBeNull();
+      }
+    });
+
     it("does not match ASCII 'Working...' (three dots)", () => {
       const result = matchTerminalRule("Working...", omp);
       expect(result).toBeNull();

@@ -53,6 +53,8 @@ export interface SummaryTitleRule {
 export interface TerminalRule {
   matchAny?: string[];
   matchAll?: string[];
+  /** Structural match for built-in widgets whose labels are model-generated. */
+  match?: RegExp;
   status: SessionStatus;
   attentionType: AttentionType;
   pendingTool: string | null;
@@ -1373,13 +1375,16 @@ export const BUILTIN_AGENTS: AgentDef[] = [
         pendingTool: null,
       },
       {
-        // `Working…` (real U+2026, unlike pi's ASCII `Working...`) is only
-        // omp's default loader label. Once the model streams an intent, the
-        // label becomes that intent text (e.g. `⠧ Run touch command ⟦esc⟧`),
-        // so this rule only covers the pre-intent window; the marker carries
-        // `working` the rest of the time. There is no `Thinking…` label. Same
-        // caveat as pi: do NOT key on "interrupt".
+        // Default loader before the model supplies an intent.
         matchAny: ["working…"],
+        status: "working",
+        attentionType: null,
+        pendingTool: null,
+      },
+      {
+        // The live footer pairs the interrupt/intent row with a timed brand
+        // spinner directly below it. Match the widget, not the intent text.
+        match: /(?:^|\n)[ \t]*⎋[ \t]+[^\n]+\n[ \t]*[\u2800-\u28ff](?:-[^\s]+)?[ \t]+\d+[smh][ \t]+>[^\n]*(?:\n[^\n]*){0,2}$/,
         status: "working",
         attentionType: null,
         pendingTool: null,

@@ -1,373 +1,653 @@
 // ccmux-extension v__CCMUX_VERSION__
-// oh-my-pi (omp) extension shipped by ccmux. Writes marker files into the
-// ccmux session-pids dir so the daemon can correlate omp sessions to tmux
-// panes. Installed + uninstalled via `ccmux setup --agent omp`.
-// Source: github.com/epilande/ccmux
-//
-// omp is a hard fork of Pi and kept Pi's extension API, so this file is a
-// near-copy of src/plugins/pi/ccmux.js. Kept separate because the two agents
-// install into different dirs, write different marker prefixes, and diverge
-// on approval tracking (omp has a tool-approval pause; Pi does not).
-//
-// omp auto-discovers both *.ts and *.js extensions, so this plain-JS file
-// runs unchanged under whichever runtime (node or bun) launched omp.
-// Authored as JS (not TS) so it stays out of ccmux's own TypeScript
-// compilation.
-
+// Installed as one self-contained JavaScript extension by `ccmux setup --agent omp`.
 import { writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { setImmediate, setTimeout } from "node:timers/promises";
 
-/**
- * @typedef {object} MarkerState
- * @property {"idle"|"working"|"waiting_permission"} [state]
- * @property {string} [directory]
- * @property {string} [transcript_path]
- * @property {string} [last_prompt]
- * @property {string} [pending_tool]
- */
+// The leaf export is public. The package root does not export getActiveTerminal.
+let nativeGetTerminal;
+try {
+  ({ getActiveTerminal: nativeGetTerminal } = await import("@oh-my-pi/pi-tui/active-terminal"));
+} catch (error) {
+  if (!["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED"].includes(error?.code)) throw error;
+}
 
-/**
- * @typedef {object} MakeExtensionOptions
- * @property {string} markersDir   Absolute path to ccmux marker directory.
- * @property {string} version      ccmux version string (for the sentinel line).
- * @property {() => number} [now]  Injected clock, ms epoch. Defaults to Date.now.
- * @property {(ms: number) => Promise<void>} [sleep] Injected retry delay.
- */
+const decoratedMethods = new WeakMap();
+const BUSY_FLAGS = ["isRunActive", "hasAdmittedSubmission", "isStreaming", "isCompacting", "isBackgroundCompacting", "isBashRunning", "isEvalRunning", "isRetrying", "isAborting"];
+const OBSERVER_ROWS = Object.freeze([]);
 
-/**
- * Build an omp extension bound to the given markers dir.
- *
- * Only the main session owns the pane marker. In-process subagents load
- * this extension too, but share the main session's PID and tmux pane.
- *
- * Unlike upstream Pi, a session switch (`/new`, `/resume`) does not emit
- * `session_shutdown` + `session_start`: omp mutates the session in place and
- * emits `session_switch` (`session_branch` for `/branch`). Both change the
- * session id, so both are bound to the shared `rebindToCurrentSession`
- * handler below, which keeps the old session's marker from leaking and seeds
- * the new one.
- *
- * @param {MakeExtensionOptions} opts
- */
+function decorate(target, key, wrap, cleanups, rawOnly = false) {
+  if (!target) return;
+  const own = Object.getOwnPropertyDescriptor(target, key);
+  if (own && (decoratedMethods.get(own.value) === cleanups || decoratedMethods.get(own.get) === cleanups)) return;
+  let source = own;
+  for (let prototype = Object.getPrototypeOf(target); !source && prototype; prototype = Object.getPrototypeOf(prototype)) {
+    source = Object.getOwnPropertyDescriptor(prototype, key);
+  }
+  if (rawOnly && !source) return;
+  let installed;
+  if (source?.get) {
+    if (own && !own.configurable) return;
+    const wrappers = new WeakMap();
+    installed = {
+      ...source,
+      configurable: own ? source.configurable : true,
+      get: function () {
+        const original = source.get.call(this);
+        if (typeof original !== "function") return original;
+        let wrapped = wrappers.get(original);
+        if (!wrapped) {
+          wrapped = wrap(original);
+          wrappers.set(original, wrapped);
+        }
+        return wrapped;
+      },
+    };
+  } else {
+    const original = source ? source.value : target[key];
+    if (typeof original !== "function" || (own && !own.configurable && !own.writable)) return;
+    installed = source
+      ? { ...source, configurable: own ? source.configurable : true, value: wrap(original) }
+      : { configurable: true, enumerable: false, writable: true, value: wrap(original) };
+  }
+  if (installed.value) decoratedMethods.set(installed.value, cleanups);
+  if (installed.get) decoratedMethods.set(installed.get, cleanups);
+  Object.defineProperty(target, key, installed);
+  cleanups.push(() => {
+    const current = Object.getOwnPropertyDescriptor(target, key);
+    if (current?.value !== installed.value || current?.get !== installed.get || current?.set !== installed.set) return;
+    if (own) Object.defineProperty(target, key, own);
+    else delete target[key];
+  });
+}
+
+/** Build the installed extension. Hooks never wait for marker I/O. */
 export function makeExtension({
   markersDir,
   version,
   now = Date.now,
-  sleep = setTimeout,
+  getActiveTerminal = nativeGetTerminal,
+  writeMarkerFile = writeFile,
 }) {
-  const AGENT_TYPE = "omp";
+  let active;
+  let stopped = false;
+  let generation = 0;
+  let fallbackEpoch = 0;
+  let sequence = 0;
+  let writing = false;
+  let timer;
+  const removals = new Set();
+  const sessionOrigins = new WeakMap();
 
-  /**
-   * Last-written marker state per session, so a `state` flip preserves the
-   * `directory`/`transcript_path`/`last_prompt` captured at session_start.
-   * @type {Map<string, MarkerState>}
-   */
-  const sessionState = new Map();
-  /**
-   * Tool calls awaiting an approval decision, per session, as an
-   * insertion-ordered `toolCallId -> toolName`. One assistant turn can gate
-   * several calls at once; see `publishApprovals` for what the set means.
-   * @type {Map<string, Map<string, string|undefined>>}
-   */
-  const pendingApprovals = new Map();
-  /**
-   * Serialize tmp+rename writes so events firing in the same tick
-   * (before_agent_start -> agent_start) can't race on disk.
-   * @type {Promise<unknown>}
-   */
-  let writeChain = Promise.resolve();
+  const pathOf = id => join(markersDir, `omp-${id}.json`);
+  const live = binding => active === binding && !binding.closed && !stopped;
+  const report = (message, error) => console.error(`[ccmux-extension] ${message}`, error);
 
-  function markerPath(sessionId) {
-    return join(markersDir, `${AGENT_TYPE}-${sessionId}.json`);
-  }
-
-  async function atomicWrite(path, body) {
-    const tmp = `${path}.tmp.${process.pid}.${now()}`;
-    await writeFile(tmp, body);
-    await rename(tmp, path);
-  }
-
-  function buildMarkerBody(sessionId, state) {
-    const ts = Math.floor(now() / 1000);
-    return JSON.stringify({
-      agent_type: AGENT_TYPE,
-      pid: process.pid,
-      session_id: sessionId,
-      timestamp: ts,
-      state_timestamp: ts,
-      ...state,
-    });
-  }
-
-  /** Chain a write so concurrent handlers serialize on disk. */
-  function queue(updater) {
-    const next = writeChain.then(updater).catch((err) => {
-      console.error("[ccmux-extension] write failed", err);
-    });
-    writeChain = next;
-    return next;
-  }
-
-  /**
-   * Merge `patch` into the session's state and flush a fresh marker.
-   * @param {string} sessionId
-   * @param {MarkerState} patch
-   */
-  function writeMerged(sessionId, patch) {
-    const merged = { ...(sessionState.get(sessionId) ?? {}), ...patch };
-    sessionState.set(sessionId, merged);
-    return atomicWrite(
-      markerPath(sessionId),
-      buildMarkerBody(sessionId, merged),
-    );
-  }
-
-  async function removeMarker(sessionId) {
-    sessionState.delete(sessionId);
-    pendingApprovals.delete(sessionId);
-    try {
-      await unlink(markerPath(sessionId));
-    } catch (err) {
-      // ENOENT is expected when we never wrote a marker for this session.
-      if (err && err.code !== "ENOENT") {
-        console.error("[ccmux-extension] unlink failed", err);
-      }
-    }
-  }
-
-  /**
-   * Tool name of the oldest outstanding approval, i.e. the prompt omp is
-   * currently showing (`Map` iterates in insertion order).
-   * @param {Map<string, string|undefined>} pending
-   */
-  function headToolName(pending) {
-    return pending.values().next().value;
-  }
-
-  /**
-   * Publish what the outstanding approvals imply. Two rules, both
-   * load-bearing: stay `waiting_permission` until the last id resolves
-   * (reporting `working` mid-wait would clear the row's attention while
-   * prompts are still on screen), and name the oldest entry, because omp's
-   * dialog surface is FIFO and newest-wins would point ccmux's Approve/Deny
-   * notification at a tool the user cannot see.
-   *
-   * Returns the queued write so a handler can await the marker hitting disk.
-   * @param {string} sessionId
-   * @param {Map<string, string|undefined>} pending
-   */
-  function publishApprovals(sessionId, pending) {
-    /** @type {MarkerState} */
-    const patch =
-      pending.size > 0
-        ? {
-            state: "waiting_permission",
-            pending_tool: headToolName(pending),
-          }
-        : { state: "working", pending_tool: undefined };
-    return queue(() => writeMerged(sessionId, patch));
-  }
-
-  /** Resolve the main session id; subagents do not own a pane marker. */
-  function sessionIdOf(ctx) {
-    try {
-      if (ctx?.agent?.kind === "sub") return null;
-      const id = ctx?.sessionManager?.getSessionId();
-      return typeof id === "string" && id ? id : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function transcriptOf(ctx) {
-    try {
-      const file = ctx?.sessionManager?.getSessionFile();
-      return typeof file === "string" && file ? file : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /** @param {any} omp */
-  function ccmuxExtension(omp) {
-    // session_start fires at launch (reason "startup") with the session id,
-    // transcript path, and cwd all already resolved, so the marker carries
-    // full identity immediately (unlike Codex, whose marker waits for the
-    // first turn).
-    omp.on("session_start", async (_event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      await mkdir(markersDir, { recursive: true });
-      return queue(() =>
-        writeMerged(sessionId, {
-          state: "idle",
-          directory: ctx.cwd,
-          transcript_path: transcriptOf(ctx),
-        }),
-      );
-    });
-
-    // Fires after the user submits, before the agent loop. Carries the
-    // prompt text, which ccmux surfaces as the session's last prompt.
-    omp.on("before_agent_start", async (event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const prompt =
-        typeof event?.prompt === "string" ? event.prompt.trim() : "";
-      if (!prompt) return;
-      return queue(() =>
-        writeMerged(sessionId, { last_prompt: prompt.slice(0, 1024) }),
-      );
-    });
-
-    // Internal turns and tools do not finish a user prompt. Even agent_end
-    // can schedule a continuation or arrive after the next prompt starts.
-    omp.on("agent_start", async (_event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      return queue(() =>
-        writeMerged(sessionId, { state: "working", pending_tool: undefined }),
-      );
-    });
-
-    omp.on("agent_end", async (event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      if (event?.willContinue === true) return;
-      void (async () => {
-        const state = await queue(() => sessionState.get(sessionId));
-        await setImmediate();
-        for (let retries = 10; retries >= 0; retries--) {
-          const settled = await queue(async () => {
-            if (sessionState.get(sessionId) !== state) return true;
-            if (ctx.isIdle?.() === false) return false;
-            pendingApprovals.delete(sessionId);
-            await writeMerged(sessionId, {
-              state: "idle",
-              pending_tool: undefined,
-            });
-            return true;
-          });
-          if (settled !== false || retries === 0) return;
-          await sleep(100);
+  function flush() {
+    if (writing || (!removals.size && !active?.dirty)) return;
+    writing = true;
+    let failed = false;
+    void (async () => {
+      // Let synchronous UI failures remove their owner before snapshotting it.
+      await Promise.resolve();
+      for (const id of removals) {
+        try {
+          await unlink(pathOf(id));
+          removals.delete(id);
+        } catch (error) {
+          if (error?.code === "ENOENT") removals.delete(id);
+          else throw error;
         }
-      })().catch((err) => {
-        console.error("[ccmux-extension] idle settle failed", err);
-      });
-    });
-
-    // omp emits the approval pair only when an approval is actually required,
-    // so subscribing does not force pauses on the default `yolo` mode; it
-    // only makes configured pauses observable. This is the one behavior where
-    // omp diverges from Pi, which has no approval pause at all.
-    omp.on("tool_approval_requested", async (event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const toolCallId =
-        typeof event?.toolCallId === "string" ? event.toolCallId : null;
-      if (!toolCallId) return;
-      let pending = pendingApprovals.get(sessionId);
-      if (!pending) {
-        pending = new Map();
-        pendingApprovals.set(sessionId, pending);
       }
-      pending.set(
-        toolCallId,
-        typeof event?.toolName === "string" ? event.toolName : undefined,
-      );
-      // omp awaits this handler before it renders the prompt, so returning
-      // the queued write puts the waiting marker on disk by the time the
-      // user can answer.
-      return publishApprovals(sessionId, pending);
-    });
-
-    // Fires for both outcomes (approve and deny) and for the no-UI/aborted
-    // paths omp resolves fail-closed. The agent loop resumes either way,
-    // so `working` is right for both; `agent_end` still delivers the final
-    // idle when the turn actually finishes.
-    omp.on("tool_approval_resolved", async (event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      const pending = pendingApprovals.get(sessionId);
-      // Nothing of ours is waiting (never saw the request, or `agent_end`
-      // already cleared an aborted turn), so this resolve has no state to
-      // undo. Writing `working` here would drag an idle row back up.
-      if (!pending) return;
-      const toolCallId =
-        typeof event?.toolCallId === "string" ? event.toolCallId : null;
-      if (toolCallId) pending.delete(toolCallId);
-      // A resolve we cannot correlate must not pin the row at waiting
-      // forever, so treat it as resolving everything outstanding.
-      else pending.clear();
-      // Re-publish so the notification retargets the prompt that just moved
-      // to the front of the queue.
-      if (pending.size === 0) pendingApprovals.delete(sessionId);
-      return publishApprovals(sessionId, pending);
-    });
-
-    // `/new`, `/resume`, and `/branch` land here, not on a shutdown/start pair
-    // (see the factory doc above). omp installs the new session id before it
-    // emits, so every other id we still track belongs to the session we just
-    // left: reap those markers, then seed a fresh idle marker for the current
-    // id. The new file's chokidar add event drives the existing
-    // `onMarkerAdded` re-link.
-    const rebindToCurrentSession = async (_event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      await mkdir(markersDir, { recursive: true });
-      const stale = [...sessionState.keys()].filter((id) => id !== sessionId);
-      // A same-id rebind is real (`reload()` re-enters switchSession), and
-      // the rebind aborts the running turn, so drop any outstanding approval
-      // rather than publish an idle marker that a late resolve could drag
-      // back to working.
-      pendingApprovals.delete(sessionId);
-      return queue(async () => {
-        for (const id of stale) await removeMarker(id);
-        await writeMerged(sessionId, {
-          state: "idle",
-          directory: ctx.cwd,
-          transcript_path: transcriptOf(ctx),
-          pending_tool: undefined,
-        });
+      const binding = active;
+      if (!binding || !live(binding) || !binding.dirty) return;
+      const revision = binding.revision;
+      const writerGeneration = binding.generation;
+      const writerSessionId = binding.id;
+      const timestamp = Math.floor(now() / 1000);
+      const body = JSON.stringify({
+        agent_type: "omp", pid: process.pid, session_id: writerSessionId,
+        timestamp, state_timestamp: timestamp, ...binding.desired,
       });
-    };
-
-    omp.on("session_switch", rebindToCurrentSession);
-
-    // `session_branch` is the same id-changing event class as `session_switch`,
-    // just reached through `/branch` and the `app.session.fork` keybinding;
-    // omp mints the fresh id before emitting, so the handler sees the new id
-    // exactly as it does for a switch. Without this the old marker leaks for
-    // the life of the process, and the per-scan link pass cannot heal the row
-    // because it skips sessions already holding a marker-matched id.
-    //
-    // Deliberately NOT registered for `session_tree`: a tree switch moves a
-    // leaf within the same session and leaves the session id untouched.
-    omp.on("session_branch", rebindToCurrentSession);
-
-    // Forward-compat alias: upstream pi-mono renamed `session_branch` ->
-    // `session_fork`. omp has not taken the rename yet but tracks upstream,
-    // so subscribing to both keeps a future omp from regressing to the
-    // leaked-marker bug this handler fixes; an unused handler costs nothing.
-    omp.on("session_fork", rebindToCurrentSession);
-
-    omp.on("session_shutdown", async (_event, ctx) => {
-      const sessionId = sessionIdOf(ctx);
-      if (!sessionId) return;
-      return queue(() => removeMarker(sessionId));
+      const file = pathOf(writerSessionId);
+      const tmp = `${file}.tmp.${process.pid}.${writerGeneration}.${revision}`;
+      try {
+        await mkdir(markersDir, { recursive: true });
+        if (!live(binding) || binding.generation !== writerGeneration || binding.id !== writerSessionId) return;
+        await writeMarkerFile(tmp, body);
+        if (live(binding) && binding.generation === writerGeneration && binding.id === writerSessionId) await rename(tmp, file);
+        if (live(binding) && binding.generation === writerGeneration && binding.id === writerSessionId && revision === binding.revision) binding.dirty = false;
+      } finally {
+        await unlink(tmp).catch(error => {
+          if (error?.code !== "ENOENT") report("temporary marker cleanup failed", error);
+        });
+      }
+    })().catch(error => {
+      failed = true;
+      report("marker write failed; retrying latest state", error);
+    }).finally(() => {
+      writing = false;
+      // A close during rename leaves a tombstone. No later callback can cancel it.
+      if (!failed && (removals.size || active?.dirty)) queueMicrotask(flush);
+      if (!active && !removals.size && timer) {
+        clearInterval(timer);
+        timer = undefined;
+      }
     });
   }
 
-  // Carry the installed version as metadata (parity with the OpenCode
-  // plugin). omp ignores unknown properties on the default-exported factory.
-  ccmuxExtension.version = version;
-  return ccmuxExtension;
+  function ensureTimer() {
+    if (timer) return;
+    timer = setInterval(() => {
+      if (active && live(active)) observe(active);
+      flush();
+    }, 100);
+    timer.unref?.();
+  }
+
+  function close(binding) {
+    binding.closed = true;
+    resetConversation(binding);
+    if (active === binding) active = undefined;
+    for (const cleanup of binding.cleanups.reverse()) {
+      try { cleanup(); } catch (error) { report("observer cleanup failed", error); }
+    }
+    removals.add(binding.id);
+    ensureTimer();
+    flush();
+  }
+
+  function publish(binding) {
+    if (!live(binding)) return;
+    try {
+      const ordinary = binding.waits.find(wait => !wait.closed && wait.kind !== "custom");
+      let custom;
+      for (const wait of binding.waits) {
+        if (!wait.closed && wait.kind === "custom" && customOwnsInput(wait)) custom = wait;
+      }
+      let owner = custom && (!ordinary || custom.order > ordinary.order) ? custom : ordinary;
+      let kind = owner?.kind === "permission" ? "permission" : owner ? "question" : undefined;
+      let ambiguous = false;
+      let waitId = owner?.id;
+      let tool = owner?.tool;
+      // Older SDKs expose approval events but no public AgentSession registry.
+      if (!binding.session && binding.ctx.hasUI !== false && !owner && !binding.nativeWait && binding.approvals.size) {
+        const [callId, approval] = binding.approvals.entries().next().value;
+        owner = approval;
+        kind = "permission";
+        waitId = `approval:${binding.generation}:${callId}`;
+        tool = approval.tool;
+      }
+      // OSC contains the visible standard dialog kind, never a guessed title or rendered text.
+      if (binding.nativeWait && (!custom || owner !== custom)) {
+        kind = binding.nativeWait.kind;
+        owner = binding.waits.find(wait => !wait.closed && wait.kind === kind);
+        waitId = owner?.id ?? binding.nativeWait.id;
+        tool = owner?.tool;
+        ambiguous = kind === "permission" && !owner;
+      }
+      const busy = binding.busy || binding.nativeActivity === true;
+      if (binding.review && (!kind || (kind === "permission" && !owner))) {
+        kind = "plan";
+        ambiguous = false;
+        waitId = `plan:${binding.generation}:${binding.review.reviewId}`;
+      }
+      const focused = binding.tui?.getFocused?.();
+      if (focused?.nativeOverlay?.role === "omp.overlay.planSave" && typeof focused.handleInput === "function") {
+        // This is semantic component metadata, not a title or rendered terminal text.
+        let nativeId = binding.nativeOwners.get(focused);
+        if (!nativeId) {
+          nativeId = `native-ui:${binding.generation}:${++sequence}`;
+          binding.nativeOwners.set(focused, nativeId);
+        }
+        kind = "question";
+        waitId = nativeId;
+        tool = undefined;
+        ambiguous = false;
+      }
+      const desired = {
+        state: kind ? `waiting_${kind}` : busy ? "working" : "idle",
+        state_authoritative: true,
+        conversation_epoch: binding.conversationEpoch,
+        in_plan_mode: binding.inPlanMode,
+        ambiguous_wait: ambiguous,
+        directory: binding.ctx.cwd,
+        transcript_path: binding.ctx.sessionManager.getSessionFile() ?? null,
+        last_prompt: binding.prompt,
+        ...(kind ? { wait_id: waitId } : {}),
+        ...(kind === "permission" && tool ? { pending_tool: tool } : {}),
+      };
+      const encoded = JSON.stringify(desired);
+      if (encoded === binding.encoded) return;
+      binding.desired = desired;
+      binding.encoded = encoded;
+      binding.revision++;
+      binding.dirty = true;
+      flush();
+    } catch (error) {
+      report("input ownership observation failed", error);
+    }
+  }
+
+  function customOwnsInput(wait) {
+    if (!wait.component || !wait.tui || wait.handle?.isHidden?.()) return false;
+    const focused = wait.tui.getFocused?.();
+    if (typeof focused?.handleInput !== "function") return false;
+    return focused === wait.component || (focused && wait.component.ownsOverlayFocusTarget?.(focused) === true);
+  }
+
+  function finishWait(binding, wait) {
+    if (wait.closed) return;
+    wait.closed = true;
+    wait.signal?.removeEventListener("abort", wait.abort);
+    const index = binding.waits.indexOf(wait);
+    if (index !== -1) binding.waits.splice(index, 1);
+    if (live(binding)) observe(binding);
+  }
+
+  function watchResult(result, finish) {
+    if (result && typeof result.then === "function") result.then(finish, finish);
+    else finish();
+    return result;
+  }
+
+  function instrumentUI(binding, ui) {
+    if (!ui) return;
+    for (const method of ["select", "confirm", "input", "editor", "askDialog", "formDialog", "approve", "custom"]) {
+      decorate(ui, method, original => function (...args) {
+        if (!live(binding)) return original.apply(this, args);
+        const options = method === "custom" ? args[1] : args.find(arg => arg && typeof arg === "object" && "signal" in arg);
+        if (options?.signal?.aborted) return original.apply(this, args);
+        const approval = method === "approve" ? [...binding.approvals.values()].find(item => !item.claimed) : undefined;
+        if (approval) approval.claimed = true;
+        const wait = {
+          id: `ui:${binding.generation}:${++sequence}`,
+          order: sequence,
+          kind: method === "approve" ? "permission" : method === "custom" ? "custom" : "question",
+          tool: approval?.tool,
+          signal: options?.signal,
+          closed: false,
+        };
+        wait.abort = () => finishWait(binding, wait);
+        wait.signal?.addEventListener("abort", wait.abort, { once: true });
+        binding.waits.push(wait);
+        let callArgs = args;
+        if (method === "custom" && typeof args[0] === "function") {
+          const factory = args[0];
+          callArgs = [...args];
+          callArgs[0] = function (...factoryArgs) {
+            wait.tui = factoryArgs[0];
+            try { instrumentTui(binding, wait.tui); }
+            catch (error) { report("custom focus observation failed", error); }
+            const done = factoryArgs[3];
+            const forwarded = [...factoryArgs];
+            forwarded[3] = function (...doneArgs) {
+              finishWait(binding, wait);
+              return done.apply(this, doneArgs);
+            };
+            const component = factory.apply(this, forwarded);
+            const ready = value => {
+              if (!wait.closed && live(binding)) {
+                wait.component = value;
+                observe(binding);
+              }
+            };
+            if (component && typeof component.then === "function") component.then(ready, () => finishWait(binding, wait));
+            else ready(component);
+            return component;
+          };
+        }
+        publish(binding);
+        try {
+          const result = original.apply(this, callArgs);
+          observe(binding);
+          return watchResult(result, () => finishWait(binding, wait));
+        } catch (error) {
+          finishWait(binding, wait);
+          throw error;
+        }
+      }, binding.cleanups, true);
+    }
+    if (binding.ctx.mode === "tui" && !binding.observerWidget && typeof ui.setWidget === "function") {
+      const key = `ccmux-state-observer:${process.pid}:${binding.generation}`;
+      binding.observerWidget = key;
+      try {
+        ui.setWidget(key, tui => {
+          if (live(binding)) instrumentTui(binding, tui);
+          return {
+            render() {
+              if (live(binding)) publish(binding);
+              return OBSERVER_ROWS;
+            },
+          };
+        }, { placement: "belowEditor" });
+      } catch (error) {
+        binding.observerWidget = undefined;
+        throw error;
+      }
+      binding.cleanups.push(() => ui.setWidget(key, undefined));
+    }
+  }
+
+  function instrumentTui(binding, tui) {
+    if (!live(binding) || !tui) return;
+    binding.tui = tui;
+    instrumentTerminal(binding);
+    if (binding.tuis.has(tui)) return;
+    binding.tuis.add(tui);
+    if (typeof tui.addPaintListener === "function") {
+      binding.cleanups.push(tui.addPaintListener(() => {
+        if (live(binding)) observe(binding);
+      }));
+    }
+    for (const method of ["setFocus", "hideOverlay", ...(typeof tui.addPaintListener === "function" ? [] : ["requestRender"])]) {
+      decorate(tui, method, original => function (...args) {
+        const result = original.apply(this, args);
+        if (live(binding)) publish(binding);
+        return result;
+      }, binding.cleanups);
+    }
+    decorate(tui, "showOverlay", original => function (...args) {
+      const handle = original.apply(this, args);
+      const wait = binding.waits.find(item => !item.closed && item.component === args[0]);
+      if (wait) wait.handle = handle;
+      if (handle) {
+        for (const method of ["hide", "setHidden"]) {
+          decorate(handle, method, action => function (...handleArgs) {
+            const result = action.apply(this, handleArgs);
+            if (method === "hide" && wait) finishWait(binding, wait);
+            if (live(binding)) publish(binding);
+            return result;
+          }, binding.cleanups);
+        }
+      }
+      if (live(binding)) publish(binding);
+      return handle;
+    }, binding.cleanups);
+  }
+
+  function instrumentTools(binding, tools) {
+    for (const tool of tools ?? []) {
+      if (!tool) continue;
+      decorate(tool, "execute", original => function (...args) {
+        // The native tool context is argument five, including RPC's distinct UI target.
+        if (live(binding) && args[4]?.hasUI !== false) {
+          try { instrumentUI(binding, args[4]?.ui); }
+          catch (error) { report("tool UI observation failed", error); }
+        }
+        return original.apply(this, args);
+      }, binding.cleanups);
+    }
+  }
+
+  function instrumentTerminal(binding) {
+    if (binding.ctx.mode !== "tui") return;
+    const terminal = binding.tui?.terminal ?? getActiveTerminal?.();
+    if (!terminal) return;
+    binding.terminal = terminal;
+    decorate(terminal, "write", original => function (...args) {
+      const result = original.apply(this, args);
+      if (!live(binding) || binding.terminal !== terminal || typeof args[0] !== "string") return result;
+      if (/^\x1b\]7501;state=clear(?:\x07|\x1b\\)$/.test(args[0])) {
+        binding.nativeActivity = false;
+        binding.nativeWait = undefined;
+        observe(binding);
+        return result;
+      }
+      const match = /^\x1b\]7501;state=(idle|working|done|error|blocked)(?::kind=(permission|question))?:app=omp(?::msg=[A-Za-z0-9+/=]*)?(?:\x07|\x1b\\)$/.exec(args[0]);
+      if (!match) return result;
+      if ((match[1] === "blocked") !== (match[2] !== undefined)) return result;
+      const kind = match[1] === "blocked" ? match[2] : undefined;
+      if (kind) {
+        if (binding.nativeWait?.report !== args[0]) binding.nativeWait = { kind, report: args[0], id: `osc:${binding.generation}:${++sequence}` };
+      } else {
+        binding.nativeWait = undefined;
+        binding.nativeActivity = match[1] === "working";
+      }
+      observe(binding);
+      return result;
+    }, binding.cleanups);
+  }
+
+  function isMirroredSession(session) {
+    const origin = sessionOrigins.get(session);
+    if (!origin) return false;
+    const file = session.sessionManager.getSessionFile();
+    return origin?.file === file ? origin.mirrored : origin?.previousFile === file && origin.previousMirrored === true;
+  }
+
+  function attachSession(binding, session) {
+    binding.session = session;
+    binding.epoch = session.transcriptEpoch;
+    // Guests adopt a replica through this documented public option pair. Their
+    // ordered extension lifecycle is remote; their local AgentSession never runs.
+    decorate(session, "switchSession", original => function (...args) {
+      if (!live(binding)) return original.apply(this, args);
+      const previous = sessionOrigins.get(session);
+      const origin = {
+        file: args[0],
+        mirrored: args[1]?.preserveLocalCwd === true && args[1]?.keepModel === true,
+        previousFile: session.sessionManager.getSessionFile(),
+        previousMirrored: isMirroredSession(session),
+      };
+      sessionOrigins.set(session, origin);
+      const settle = committed => {
+        if (sessionOrigins.get(session) !== origin) return;
+        if (committed === false) {
+          if (previous) sessionOrigins.set(session, previous);
+          else sessionOrigins.delete(session);
+        } else sessionOrigins.set(session, { file: origin.file, mirrored: origin.mirrored });
+        if (active?.session === session) observe(active);
+      };
+      try {
+        const result = original.apply(this, args);
+        if (result && typeof result.then === "function") result.then(settle, () => settle(false));
+        else settle(result);
+        return result;
+      } catch (error) {
+        settle(false);
+        throw error;
+      }
+    }, binding.cleanups);
+    if (typeof session.subscribe === "function") binding.cleanups.push(session.subscribe(() => {
+      if (live(binding)) observe(binding);
+    }));
+    if (typeof session.subscribeRunState === "function") binding.cleanups.push(session.subscribeRunState(() => {
+      if (live(binding)) observe(binding);
+    }));
+    const agent = session.agent;
+    instrumentTools(binding, agent?.state?.tools);
+    // Instrument at installation, not at the next 100ms sample. A tool can be called immediately.
+    decorate(agent, "setTools", original => function (...args) {
+      if (live(binding)) {
+        try { instrumentTools(binding, args[0]); }
+        catch (error) { report("new tool observation failed", error); }
+      }
+      const result = original.apply(this, args);
+      if (live(binding)) {
+        try { instrumentTools(binding, this.state?.tools); }
+        catch (error) { report("installed tool observation failed", error); }
+      }
+      return result;
+    }, binding.cleanups);
+    decorate(session, "setPlanModeState", original => function (...args) {
+      const result = original.apply(this, args);
+      if (live(binding)) observe(binding);
+      return result;
+    }, binding.cleanups);
+  }
+
+  function resetConversation(binding) {
+    for (const wait of [...binding.waits]) {
+      wait.closed = true;
+      wait.signal?.removeEventListener("abort", wait.abort);
+    }
+    binding.waits.length = 0;
+    binding.nativeOwners = new WeakMap();
+    binding.approvals.clear();
+    binding.nativeWait = undefined;
+    binding.nativeActivity = false;
+    binding.review = undefined;
+    binding.prompt = null;
+    binding.hintBusy = false;
+    binding.generation = ++generation;
+  }
+
+  function observe(binding) {
+    if (!live(binding) || binding.observing) return;
+    binding.observing = true;
+    try {
+      const registry = binding.omp.pi?.AgentRegistry?.global?.();
+      const candidate = binding.ctx.agent?.id ? registry?.get(binding.ctx.agent.id)?.session : undefined;
+      if (candidate && candidate.sessionManager !== binding.ctx.sessionManager) throw new Error("OMP registry session manager does not match extension context");
+      if (candidate && !binding.session) attachSession(binding, candidate);
+      if (registry && binding.ctx.agent?.id && !candidate) throw new Error("OMP registry has no session for the extension agent");
+      const session = binding.session;
+      if (session) {
+        if (candidate !== session || session.sessionManager !== binding.ctx.sessionManager) {
+          throw new Error("OMP registry session identity changed without a session rebind");
+        }
+        if (binding.epoch !== session.transcriptEpoch) {
+          resetConversation(binding);
+          binding.epoch = session.transcriptEpoch;
+        }
+        binding.mirrored = isMirroredSession(session);
+        binding.busy = BUSY_FLAGS.some(key => session[key] === true) || (binding.mirrored && binding.hintBusy);
+        binding.inPlanMode = session.getPlanModeState?.()?.enabled === true;
+        binding.conversationEpoch = `${process.pid}:${session.instanceKey ?? binding.ctx.agent?.id ?? binding.id}:${session.transcriptEpoch ?? fallbackEpoch}`;
+        if (session.extensionRunner?.hasUI?.() !== false) instrumentUI(binding, session.extensionRunner?.getUIContext?.());
+        instrumentTools(binding, session.agent?.state?.tools);
+      } else {
+        binding.busy = binding.ctx.isIdle ? !binding.ctx.isIdle() : binding.hintBusy;
+        binding.conversationEpoch = `${process.pid}:fallback:${fallbackEpoch}`;
+        if (binding.ctx.hasUI !== false) instrumentUI(binding, binding.ctx.ui);
+      }
+      if (typeof binding.ctx.getPendingPlanReview === "function") binding.review = binding.ctx.getPendingPlanReview();
+      instrumentTerminal(binding);
+      publish(binding);
+      binding.observationError = undefined;
+    } catch (error) {
+      if (binding.observationError !== String(error)) report("state observation failed", error);
+      binding.observationError = String(error);
+    } finally {
+      binding.observing = false;
+    }
+  }
+
+  function extension(omp) {
+    function idOf(ctx) {
+      if (ctx?.agent?.kind === "sub") return;
+      const id = ctx?.sessionManager?.getSessionId();
+      return typeof id === "string" && id ? id : undefined;
+    }
+    function current(ctx) {
+      if (stopped || !active || idOf(ctx) !== active.id) return;
+      return active;
+    }
+    function bind(event, ctx) {
+      if (stopped) return;
+      const id = idOf(ctx);
+      if (!id) return;
+      if (event?.reason === "fork" && active?.session && active.ctx.sessionManager === ctx.sessionManager && active.epoch === active.session.transcriptEpoch) {
+        const candidate = ctx.agent?.id ? omp.pi?.AgentRegistry?.global?.().get(ctx.agent.id)?.session : undefined;
+        if (candidate === active.session) {
+          // Native no-argument fork keeps the run and UI alive. Keep this same
+          // binding so pending factories, dialog settlements and observers still own it.
+          if (active.id !== id) removals.add(active.id);
+          active.id = id;
+          active.ctx = ctx;
+          active.prompt = null;
+          active.encoded = undefined;
+          observe(active);
+          flush();
+          return;
+        }
+      }
+      if (active) close(active);
+      const binding = {
+        id, ctx, omp, generation: ++generation, closed: false,
+        prompt: null, hintBusy: false, busy: false, inPlanMode: false,
+        waits: [], approvals: new Map(), cleanups: [],
+        tuis: new WeakSet(), nativeOwners: new WeakMap(),
+        revision: 0, dirty: false,
+      };
+      active = binding;
+      ensureTimer();
+      observe(binding);
+    }
+    omp.on("session_start", bind);
+    omp.on("session_switch", bind);
+    omp.on("session_branch", bind);
+    omp.on("session_clear", (_event, ctx) => {
+      const binding = current(ctx);
+      if (!binding) return;
+      if (binding.session?.transcriptEpoch === undefined) fallbackEpoch++;
+      resetConversation(binding);
+      binding.epoch = binding.session?.transcriptEpoch;
+      observe(binding);
+    });
+    omp.on("before_agent_start", (event, ctx) => {
+      const binding = current(ctx);
+      if (!binding) return;
+      binding.hintBusy = true;
+      const prompt = typeof event?.prompt === "string" ? event.prompt.trim() : "";
+      if (prompt) binding.prompt = prompt.slice(0, 1024);
+      observe(binding);
+    });
+    omp.on("agent_start", (_event, ctx) => {
+      const binding = current(ctx);
+      if (!binding) return;
+      binding.hintBusy = true;
+      observe(binding);
+    });
+    omp.on("agent_end", (event, ctx) => {
+      const binding = current(ctx);
+      if (!binding) return;
+      if ((!binding.session || binding.mirrored) && event?.willContinue !== true) binding.hintBusy = false;
+      if (!binding.session && event?.willContinue !== true && ctx.isIdle?.() !== false) binding.approvals.clear();
+      // Local agent_end can describe an internal loop. Replicas alone use the ordered mirrored lifecycle.
+      observe(binding);
+    });
+    omp.on("tool_approval_requested", (event, ctx) => {
+      const binding = current(ctx);
+      if (!binding || typeof event?.toolCallId !== "string") return;
+      if (!binding.approvals.has(event.toolCallId)) binding.approvals.set(event.toolCallId, {
+        tool: typeof event.toolName === "string" ? event.toolName : undefined,
+        claimed: false,
+      });
+      if (!binding.session) binding.hintBusy = true;
+      observe(binding);
+    });
+    omp.on("tool_approval_resolved", (event, ctx) => {
+      const binding = current(ctx);
+      if (!binding || typeof event?.toolCallId !== "string") return;
+      binding.approvals.delete(event.toolCallId);
+      observe(binding);
+    });
+    omp.on("plan_review_requested", (event, ctx) => {
+      const binding = current(ctx);
+      if (!binding || typeof event?.reviewId !== "string") return;
+      binding.review = event;
+      observe(binding);
+    });
+    omp.on("plan_review_resolved", (event, ctx) => {
+      const binding = current(ctx);
+      if (!binding || binding.review?.reviewId !== event?.reviewId) return;
+      binding.review = undefined;
+      observe(binding);
+    });
+    omp.on("session_shutdown", (_event, ctx) => {
+      const binding = current(ctx);
+      if (!binding) return;
+      stopped = true;
+      close(binding);
+    });
+  }
+  extension.version = version;
+  return extension;
 }
 
 const ccmuxExtension = makeExtension({
   markersDir: "__CCMUX_MARKERS_DIR__",
   version: "__CCMUX_VERSION__",
 });
-
 export default ccmuxExtension;

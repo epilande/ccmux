@@ -132,15 +132,20 @@ The entire interface between ccmux and the agent is one JSON file per session, w
   pid: number,
   tty?: string,                  // Omitted for OpenCode/Cursor (PID-ancestry pane correlation)
   session_id: string,
-  transcript_path?: string,
+  transcript_path?: string | null,
   timestamp: number,
-  state?: "idle" | "working" | "waiting_permission",
+  state?: "idle" | "working" | "waiting_permission" | "waiting_question" | "waiting_plan",
   state_timestamp?: number,      // Fresher than `timestamp` if set
+  state_authoritative?: boolean, // OMP: observed state excludes terminal upgrades
+  in_plan_mode?: boolean,        // OMP
+  wait_id?: string,              // OMP: current input-owner identity
+  conversation_epoch?: string,  // OMP: same-ID transcript reset
+  ambiguous_wait?: boolean,     // OMP: answer actions are unsafe
   pending_tool?: string,         // From PermissionRequest hook (Codex/Cursor), tool_approval_requested (omp)
   permission_context?: string,
   directory?: string,            // OpenCode only
   title?: string,                // OpenCode only
-  last_prompt?: string           // Cursor / OpenCode
+  last_prompt?: string | null    // Cursor / OpenCode / OMP; null clears
 }
 ```
 
@@ -153,7 +158,7 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 | Cursor      | 4 shell scripts (`sessionStart`, `sessionEnd`, `beforeSubmitPrompt`, `stop`) via `~/.cursor/hooks.json`. Scripts walk PID ancestry to find the real `cursor-agent` PID (Cursor invokes hooks via `/bin/zsh -c`, so `$PPID` is a transient shell).                                                                    | PID-ancestry: `ctx.getPaneHostingPid(marker.pid)` |
 | OpenCode    | One JS plugin per major: 1.x loads `~/.config/opencode/plugin/ccmux.js`, subscribed to the server's message bus; 2.x loads `~/.config/opencode/plugins/ccmux/tui.js` inside the TUI process (no shell hooks; pure `node:` builtins so each file runs on Bun or Node).                                                | PID-ancestry; 1.x: one server hosts N sessions    |
 | Pi          | One JS extension at `~/.pi/agent/extensions/ccmux.js` subscribed to Pi's lifecycle events (no shell hooks; pure `node:fs/promises`, auto-discovered and loaded via jiti). Writes the marker at `session_start`, which fires at launch with full identity (pid, session id, transcript path, cwd).                    | PID-ancestry; one session per process             |
-| omp         | One JS extension at `~/.omp/agent/extensions/ccmux.js`. Only the main session publishes a marker; in-process subagents share its PID and pane. Continuing or superseded `agent_end` events preserve the current state. `tool_approval_requested`/`resolved` track permission waits. | PID-ancestry; main-session marker only |
+| omp         | One JS extension at `~/.omp/agent/extensions/ccmux.js`. Public native-session state owns activity; shared UI and native OSC 7501 reports own input waits. Only the main session writes a marker. Conversation epochs invalidate old completion state; failed writes retry the latest snapshot. | PID-ancestry; main-session marker only |
 | Antigravity | 2 shell scripts (`PreInvocation`, `Stop`) via global `~/.gemini/config/hooks.json`. The first `PreInvocation` creates the marker because Antigravity exposes no session-start hook.                                                                                                                                  | TTY match with PID-ancestry fallback              |
 
 ### Lifecycle (`hook-manager.ts`)
@@ -162,12 +167,14 @@ The entire interface between ccmux and the agent is one JSON file per session, w
 2. Agent fires hook, script writes marker file.
 3. `HookManager.start()` first replays existing on-disk markers (covers "daemon was down when agent booted"), then opens chokidar with `ignoreInitial: true`.
 4. Add event triggers `adapter.onMarkerAdded(marker, ctx)`. The adapter locates the matching pane-tracked session, sets `nativeSessionId`, `logPath`, `cwd`, and (Claude) starts log-tailing. A marker written before the daemon's first scan created the pane-tracked session would otherwise be orphaned; the shared, agent-agnostic `reconcileSessionMarkerLinks()` (`adapters/link.ts`, keyed off `adapter.agentType`) closes that race on the next scan and re-derives native-id ownership each scan so a mis-linked id heals.
-5. Per-turn signals (Claude `Notification`, Codex `PermissionRequest`, Cursor `beforeSubmitPrompt`, OpenCode `permission.asked`, Pi `agent_start`/`agent_end`, omp `agent_start`/`agent_end` plus `tool_approval_requested`/`tool_approval_resolved`, Antigravity `PreInvocation`/`Stop`) update the marker's `state` and `state_timestamp`. The next reconcile tick picks them up via the freshest-wins cascade (`evaluateCascade()`).
+5. Agent hooks, plugins, or native state observers update the marker's `state` and `state_timestamp`. The next reconcile tick folds marker, log, and terminal sources with `evaluateCascade()`. Observed OMP markers exclude terminal upgrades, so ordinary output cannot override their input ownership. Their `wait_id` advances the existing attention generation, and `conversation_epoch` clears same-ID reset state without adding fields to the Session wire payload.
 6. Cleanup: `cleanupStaleMarkers()` groups by `(agent_type, session_id)`, dedupes, and applies a 3-level liveness check (PID, TTY, adapter callback `isSessionStillLive`); any failed check unlinks the marker.
 
 ### OpenCode aggregation
 
 OpenCode is the special case. A single OpenCode 1.x server process hosts N sessions, so N markers share one PID. (A 2.x TUI writes one marker, for the session on screen, and the first TUI to show a session owns its marker; see `docs/agent-adapters.md`.) `aggregateOpenCodeMarkers()` (`adapters/opencode/aggregate.ts`) folds them into one ccmux session with worst-of status (waiting > working > idle). `attentionType`, `pendingTool`, `cwd`, and `nativeSessionId` follow the newest-waiting or newest-activity marker. Re-folded on every reconcile tick (not just on marker add or remove), so newly-waiting siblings show up promptly. Fold scope is the row's OWN pane: a marker is folded only when its pid resolves (by process ancestry, `paneIdHostingPid`) to that row's pane, since two servers in one directory share OpenCode's SQLite db and a row can hold a foreign session id until the link pass heals it (issue #177). Symmetrically, the plugin seeds boot markers only for sessions its own status map lists, which is the only per-process evidence that this server hosts them.
+
+The OpenCode native ID is a representative of that shared row, not a new conversation identity. Rotating it preserves aggregate prompt history and input ambiguity. The adapter claims the representative before applying aggregate state and refuses the update on an ownership conflict.
 
 ## Single source of truth for adapters
 

@@ -391,13 +391,14 @@ export class OpenCodePluginAdapter implements HookAdapter {
   ): void {
     const aggregate = aggregateOpenCodeMarkers(siblings);
     const { nativeSessionId, ...state } = aggregate;
-    ctx.sessionManager.updateSession(sessionId, state);
-    if (nativeSessionId) {
-      // Marker-backed, so reclaim: a heuristic holder of this
-      // id is stripped and the id re-routes here.
+    if (
+      nativeSessionId &&
       ctx.sessionManager.setNativeSessionId(sessionId, nativeSessionId, {
         reclaim: true,
-      });
+      }) === "conflict"
+    ) {
+      return;
     }
+    ctx.sessionManager.updateSession(sessionId, state);
   }
 }

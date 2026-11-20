@@ -97,6 +97,63 @@ describe("genericMarkerSource", () => {
     expect(built.source.state.pendingTool).toBeNull();
   });
 
+  it("maps OMP plan review to plan approval without a pending tool", () => {
+    const built = genericMarkerSource(
+      mkMarker({ agent_type: "omp", state: "waiting_plan", pending_tool: "ask" }),
+    );
+    expect(built.source.state.status).toBe("waiting");
+    expect(built.source.state.attentionType).toBe("plan_approval");
+    expect(built.source.state.pendingTool).toBeNull();
+  });
+
+  it("projects current OMP input ownership and transcript metadata", () => {
+    const built = genericMarkerSource(
+      mkMarker({
+        agent_type: "omp",
+        state: "waiting_question",
+        state_authoritative: true,
+        in_plan_mode: true,
+        ambiguous_wait: false,
+        wait_id: "question-2",
+        transcript_path: "/tmp/current-omp.jsonl",
+        last_prompt: null,
+      }),
+    );
+    expect(built.metadata).toEqual({
+      inPlanMode: true,
+      ambiguousWait: false,
+      waitId: "question-2",
+      logPath: "/tmp/current-omp.jsonl",
+      lastPrompt: null,
+    });
+  });
+
+  it("clears retired OMP input ownership and transcript paths", () => {
+    const built = genericMarkerSource(
+      mkMarker({ agent_type: "omp", state: "idle", state_authoritative: true }),
+    );
+    expect(built.metadata.waitId).toBeNull();
+    expect(built.metadata.logPath).toBeNull();
+  });
+
+  it("preserves omitted metadata on legacy OMP markers", () => {
+    const built = genericMarkerSource(mkMarker({ agent_type: "omp" }));
+    expect(built.metadata).toEqual({});
+  });
+
+  it("does not apply OMP-only metadata to other agents", () => {
+    const built = genericMarkerSource(
+      mkMarker({
+        agent_type: "cursor",
+        transcript_path: "/tmp/cursor.jsonl",
+        wait_id: "foreign",
+        in_plan_mode: true,
+        ambiguous_wait: true,
+      }),
+    );
+    expect(built.metadata).toEqual({});
+  });
+
   it("source.timestamp is state_timestamp * 1000 (ms since epoch)", () => {
     const built = genericMarkerSource(
       mkMarker({ state_timestamp: 1_700_000_500 }),

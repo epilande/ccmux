@@ -957,6 +957,108 @@ describe("reconcileAll", () => {
     });
   });
 
+  describe("pane-tracked OMP marker metadata", () => {
+    const omp = BUILTIN_AGENTS.find((agent) => agent.name === "omp")!;
+
+    it("hydrates the startup transcript after the marker add preceded the row", async () => {
+      const id = makeSession(sessionManager, {
+        agentType: "omp",
+        trackingMode: "pane",
+        nativeSessionId: "omp-current",
+        pid: 9000,
+      });
+      const marker: SessionPidMarker = {
+        agent_type: "omp",
+        pid: 9000,
+        session_id: "omp-current",
+        timestamp: 1_700_000_000,
+        state_timestamp: 1_700_000_000,
+        state: "waiting_plan",
+        state_authoritative: true,
+        transcript_path: "/tmp/omp-transcript-created-later.jsonl",
+        in_plan_mode: true,
+        ambiguous_wait: false,
+        wait_id: "review-1",
+        last_prompt: null,
+      };
+      sessionManager.updateSession(id, { lastPrompt: "previous conversation" });
+
+      await reconcileOne(
+        makeDeps(sessionManager, {
+          agents: [omp],
+          hookManager: {
+            getMarkerForSession: () => marker,
+            getMarkersByAgentAndPid: () => [],
+          },
+        }),
+        sessionManager.getSession(id)!,
+        new Map([["%1", fakePane()]]),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.logPath).toBe(marker.transcript_path!);
+      expect(session.status).toBe("waiting");
+      expect(session.attentionType).toBe("plan_approval");
+      expect(session.inPlanMode).toBe(true);
+      expect(session.lastPrompt).toBeNull();
+    });
+
+    for (const state of ["idle", "working"] as const) {
+      it(`keeps authoritative ${state} despite quoted approval text`, async () => {
+        const id = makeSession(sessionManager, {
+          agentType: "omp",
+          trackingMode: "pane",
+          nativeSessionId: "omp-current",
+          pid: 9000,
+        });
+        mockCapturePane = async () => 'printf "Allow tool: example"\nAllow tool: example';
+        const marker: SessionPidMarker = {
+          agent_type: "omp",
+          pid: 9000,
+          session_id: "omp-current",
+          timestamp: 1_700_000_000,
+          state_timestamp: 1_700_000_000,
+          state,
+          state_authoritative: true,
+        };
+
+        await reconcileOne(
+          makeDeps(sessionManager, {
+            agents: [omp],
+            hookManager: {
+              getMarkerForSession: () => marker,
+              getMarkersByAgentAndPid: () => [],
+            },
+          }),
+          sessionManager.getSession(id)!,
+          new Map([["%1", fakePane()]]),
+        );
+
+        const session = sessionManager.getSession(id)!;
+        expect(session.status).toBe(state);
+        expect(session.attentionType).toBeNull();
+        expect(session.pendingTool).toBeNull();
+      });
+    }
+
+    it("detects current intent work without a marker", async () => {
+      const id = makeSession(sessionManager, {
+        agentType: "omp",
+        trackingMode: "pane",
+      });
+      mockCapturePane = async () =>
+        "  ⎋ Run the requested checks\n ⠼ 5s > ⬢ project > ⑂ main ▶─0.0%────128K─\n╰─";
+
+      await reconcileOne(
+        makeDeps(sessionManager, { agents: [omp] }),
+        sessionManager.getSession(id)!,
+        new Map([["%1", fakePane()]]),
+      );
+
+      expect(sessionManager.getSession(id)!.status).toBe("working");
+    });
+  });
+
   describe("Option Y overlay: log-adapter agents", () => {
     // Codex-like agent: has terminal rules for waiting + working, no hooks.
     const codexAgent: AgentDef = {
@@ -3043,6 +3145,69 @@ describe("collectPaneTrackedSources (wiring)", () => {
       ...overrides,
     };
   }
+
+  describe("OMP marker ownership", () => {
+    const marker = makeMarker({
+      agent_type: "omp",
+      session_id: "omp-current",
+      state: "waiting_question",
+      state_authoritative: true,
+      wait_id: "question-1",
+      transcript_path: "/tmp/current.jsonl",
+      last_prompt: "current prompt",
+    });
+
+    const currentSession = () => makePaneSession({
+      agentType: "omp",
+      nativeSessionId: "omp-current",
+    });
+
+    for (const overrides of [
+      { nativeSessionId: "omp-other" },
+      { nativeSessionId: undefined },
+      { pid: 5678 },
+    ]) {
+      it(`rejects foreign metadata for ${JSON.stringify(overrides)}`, () => {
+        const { sources, metadata } = collectPaneTrackedSources(
+          makeCollectorDeps({ marker }),
+          { ...currentSession(), ...overrides },
+          null,
+        );
+        expect(sources).toEqual([]);
+        expect(metadata).toEqual({});
+      });
+    }
+
+    it("rejects a marker whose process is hosted by another pane", () => {
+      const { sources, metadata } = collectPaneTrackedSources(
+        { ...makeCollectorDeps({ marker }), paneIdHostingPid: () => "%9" },
+        currentSession(),
+        null,
+      );
+      expect(sources).toEqual([]);
+      expect(metadata).toEqual({});
+    });
+
+    it("retains the current question despite a terminal permission match", () => {
+      const { sources, metadata, suspectPermissionUpgrade } = collectPaneTrackedSources(
+        makeCollectorDeps({ marker }),
+        currentSession(),
+        { status: "waiting", attentionType: "permission", pendingTool: "bash" },
+      );
+      expect(evaluateCascade(sources).attentionType).toBe("question");
+      expect(metadata.waitId).toBe("question-1");
+      expect(suspectPermissionUpgrade).toBe(false);
+    });
+
+    it("keeps hookless OMP permission detection available", () => {
+      const { sources } = collectPaneTrackedSources(
+        makeCollectorDeps({}),
+        currentSession(),
+        { status: "waiting", attentionType: "permission", pendingTool: null },
+      );
+      expect(evaluateCascade(sources).attentionType).toBe("permission");
+    });
+  });
 
   it("no marker, no log adapter, no rule -> zero sources", () => {
     const { sources, metadata } = collectPaneTrackedSources(

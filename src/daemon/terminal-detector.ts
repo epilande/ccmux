@@ -9,6 +9,8 @@ export interface TerminalDetectionResult {
 }
 
 function matchesRule(content: string, rule: TerminalRule): boolean {
+  if (rule.match) return rule.match.test(content);
+
   if (rule.matchAll) {
     return rule.matchAll.every((pattern) =>
       content.includes(pattern.toLowerCase()),

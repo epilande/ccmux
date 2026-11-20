@@ -1,4 +1,9 @@
-import type { AttentionType, Session, SessionStatus } from "../types/session";
+import type {
+  AttentionType,
+  Session,
+  SessionState,
+  SessionStatus,
+} from "../types/session";
 import type { SessionPidMarker } from "./session-markers";
 import type { TerminalDetectionResult } from "./terminal-detector";
 import { aggregateOpenCodeMarkers } from "./adapters/opencode/aggregate";
@@ -136,10 +141,18 @@ function compareSourcesFreshestFirst(
  * narrow (no cascade fields) so factories cannot accidentally bypass
  * the evaluator.
  */
-export interface MarkerSourceMetadata {
-  cwd?: string;
-  lastPrompt?: string | null;
-}
+export type MarkerSourceMetadata = Partial<
+  Pick<
+    SessionState,
+    | "cwd"
+    | "lastPrompt"
+    | "inPlanMode"
+    | "ambiguousWait"
+    | "waitId"
+    | "conversationEpoch"
+    | "logPath"
+  >
+>;
 
 interface MarkerCascadeBuild {
   source: CascadeSource;
@@ -168,6 +181,20 @@ export function genericMarkerSource(
   const metadata: MarkerSourceMetadata = {};
   if (marker.last_prompt !== undefined)
     metadata.lastPrompt = marker.last_prompt;
+  if (marker.agent_type === "omp") {
+    if (marker.conversation_epoch !== undefined)
+      metadata.conversationEpoch = marker.conversation_epoch;
+    if (marker.in_plan_mode !== undefined)
+      metadata.inPlanMode = marker.in_plan_mode;
+    if (marker.ambiguous_wait !== undefined)
+      metadata.ambiguousWait = marker.ambiguous_wait;
+    if (marker.wait_id !== undefined || marker.state_authoritative === true)
+      metadata.waitId = marker.wait_id ?? null;
+    if (
+      marker.transcript_path !== undefined || marker.state_authoritative === true
+    )
+      metadata.logPath = marker.transcript_path ?? null;
+  }
   return { source: markerCascadeSource(marker, state), metadata };
 }
 
@@ -368,12 +395,15 @@ export function markerStatusState(marker: SessionPidMarker): CascadeState {
       pendingTool: marker.pending_tool ?? null,
     };
   }
-  // OpenCode's question tool (issue #137). Only its plugin writes this state
-  // today, and OpenCode routes through `openCodeMarkerSource`, but the
-  // projection lives here too so the canonical map can't drift from the
-  // aggregate's.
   if (marker.state === "waiting_question") {
     return { status: "waiting", attentionType: "question", pendingTool: null };
+  }
+  if (marker.state === "waiting_plan") {
+    return {
+      status: "waiting",
+      attentionType: "plan_approval",
+      pendingTool: null,
+    };
   }
   if (marker.state === "working") {
     return { status: "working", attentionType: null, pendingTool: null };

@@ -37,7 +37,7 @@ import type { SessionPidMarker } from "./session-markers";
 export interface ReconcilerDeps {
   sessionManager: {
     getSessions(): Readonly<Session>[];
-    updateSession(sessionId: string, updates: Partial<Session>): boolean;
+    updateSession(sessionId: string, updates: Partial<SessionState>): boolean;
     updateSubagent(sessionId: string, subagent: SubagentState): boolean;
     setAttentionState(
       sessionId: string,
@@ -1042,7 +1042,9 @@ export function collectPaneTrackedSources(
   const hasLinkedLog =
     deps.logAdapters.has(session.agentType) && !!session.logPath;
   const matched = deps.hookManager.getMarkerForSession(session);
-  const marker = ownsOpenCodeMarker(deps, session, matched) ? matched : null;
+  const marker =
+    ownsOpenCodeMarker(deps, session, matched) &&
+    ownsOmpMarker(deps, session, matched) ? matched : null;
 
   const sources: CascadeSource[] = [];
   let metadata: MarkerSourceMetadata = {};
@@ -1068,7 +1070,9 @@ export function collectPaneTrackedSources(
   }
 
   let suspectPermissionUpgrade = false;
-  if (ruleMatch) {
+  const authoritativeState =
+    marker?.agent_type === "omp" && marker.state_authoritative === true;
+  if (ruleMatch && !authoritativeState) {
     suspectPermissionUpgrade = dropsStalePermissionTerminalUpgrade(
       deps,
       session,
@@ -1097,6 +1101,22 @@ export function collectPaneTrackedSources(
   }
 
   return { sources, metadata, suspectPermissionUpgrade };
+}
+
+function ownsOmpMarker(
+  deps: Pick<ReconcilerDeps, "paneIdHostingPid">,
+  session: Session,
+  marker: SessionPidMarker | null,
+): boolean {
+  if (session.agentType !== "omp") return true;
+  if (
+    !marker ||
+    marker.agent_type !== "omp" ||
+    marker.session_id !== session.nativeSessionId ||
+    (session.pid != null && marker.pid !== session.pid)
+  ) return false;
+  const hostingPane = deps.paneIdHostingPid?.(marker.pid);
+  return typeof hostingPane !== "string" || hostingPane === session.tmuxPane;
 }
 
 /** One warn per (session, marker session id, marker pid); see below. */

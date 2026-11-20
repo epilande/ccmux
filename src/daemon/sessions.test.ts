@@ -663,6 +663,39 @@ describe("SessionManager", () => {
     expect(session?.lastActivityAt).toBeNull();
   });
 
+  it.each(["read", "unread"])(
+    "does not carry %s completion into a replacement OMP process",
+    (attention) => {
+      const manager = new SessionManager();
+      const old = manager.createPaneTrackedSession({
+        agentType: "omp",
+        paneId: "%4",
+        cwd: "/repo",
+        pid: 111,
+        nativeSessionId: "old-conversation",
+      });
+      manager.setAttentionState(old.id, "read");
+      if (attention === "unread") manager.setAttentionState(old.id, "unread");
+      const revision = manager.getAttentionRevision(old.id);
+
+      const fresh = manager.createPaneTrackedSession({
+        agentType: "omp",
+        paneId: "%4",
+        cwd: "/repo",
+        pid: 222,
+      });
+
+      expect(fresh).toMatchObject({
+        pid: 222,
+        status: "idle",
+        previousStatus: null,
+        attentionState: null,
+        lastSeenAt: null,
+      });
+      expect(manager.getAttentionRevision(old.id)).toBeGreaterThan(revision);
+    },
+  );
+
   it("cwd-only change with the same pid updates cwd but keeps identity (lsof-flap guard)", () => {
     // A transient lsof miss makes the daemon fall back to
     // `pane.currentPath`, which can differ from the process cwd as a
@@ -1128,6 +1161,51 @@ describe("SessionManager", () => {
       expect(manager.setNativeSessionId("ghost", "some-id")).toBe("noop");
     });
 
+    it.each(["setter", "scan"])(
+      "replaces the old conversation context through the %s native-ID handoff",
+      (route) => {
+        const manager = new SessionManager();
+        const old = manager.createPaneTrackedSession({
+          agentType: "omp",
+          paneId: "%5",
+          cwd: "/repo",
+          pid: 111,
+          nativeSessionId: "old-conversation",
+        });
+        manager.setLogPath(old.id, "/sessions/old-conversation.jsonl");
+        manager.updateSession(old.id, {
+          status: "working",
+          lastPrompt: "Only the previous conversation should match this",
+        });
+        manager.updateSession(old.id, { status: "idle" });
+        manager.setAttentionState(old.id, "unread");
+
+        if (route === "setter") {
+          manager.setNativeSessionId(old.id, "new-conversation");
+        } else {
+          manager.createPaneTrackedSession({
+            agentType: "omp",
+            paneId: "%5",
+            cwd: "/repo",
+            pid: 111,
+            nativeSessionId: "new-conversation",
+          });
+        }
+
+        expect(manager.getSession(old.id)).toMatchObject({
+          nativeSessionId: "new-conversation",
+          pid: 111,
+          status: "idle",
+          previousStatus: null,
+          attentionState: null,
+          lastSeenAt: null,
+          lastPrompt: null,
+          prompts: [],
+          logPath: null,
+        });
+      },
+    );
+
     it("returns 'set' when assigning a fresh nativeSessionId with no collision", () => {
       const manager = new SessionManager();
       manager.createPaneTrackedSession({
@@ -1503,5 +1581,72 @@ describe("updateSession cwd drift", () => {
 
     expect(manager.getSession("sess-156")?.cwd).toBe(real);
     expect(manager.getSession("sess-156")?.project).toBe("add-tags");
+  });
+});
+
+describe("input ownership", () => {
+  it("invalidates an earlier notification when the next wait uses the same tool", () => {
+    const manager = new SessionManager();
+    const session = manager.createPaneTrackedSession({
+      agentType: "omp",
+      paneId: "%1",
+      cwd: "/repo",
+      pid: 111,
+    });
+    manager.updateSession(session.id, {
+      status: "waiting",
+      attentionType: "permission",
+      pendingTool: "bash",
+      waitId: "call-one",
+    });
+    const generation = session.attentionGeneration;
+    const changedAt = session.statusChangedAt;
+
+    manager.updateSession(session.id, { waitId: "call-two" });
+
+    expect(session.attentionGeneration).toBe(generation + 1);
+    expect(session.statusChangedAt).toBe(changedAt);
+    expect(manager.updateSession(session.id, { waitId: "call-two" })).toBe(false);
+  });
+
+  it("clears a completed conversation on same-ID reset without clearing a later finish", () => {
+    const manager = new SessionManager();
+    const session = manager.createPaneTrackedSession({
+      agentType: "omp",
+      paneId: "%1",
+      cwd: "/repo",
+      pid: 111,
+      nativeSessionId: "same-session",
+    });
+    manager.updateSession(session.id, {
+      conversationEpoch: "before-clear",
+      status: "working",
+      lastPrompt: "Previous conversation",
+    });
+    manager.updateSession(session.id, { status: "idle" });
+    manager.setAttentionState(session.id, "unread");
+
+    manager.updateSession(session.id, {
+      conversationEpoch: "after-clear",
+      status: "idle",
+      lastPrompt: null,
+      logPath: "/current/transcript.jsonl",
+    });
+
+    expect(session).toMatchObject({
+      nativeSessionId: "same-session",
+      status: "idle",
+      previousStatus: null,
+      attentionState: null,
+      lastSeenAt: null,
+      lastPrompt: null,
+      prompts: [],
+      logPath: "/current/transcript.jsonl",
+    });
+    manager.updateSession(session.id, { status: "working" });
+    manager.updateSession(session.id, { status: "idle" });
+    manager.setAttentionState(session.id, "unread");
+    manager.updateSession(session.id, { conversationEpoch: "after-clear" });
+    expect(session.attentionState).toBe("unread");
   });
 });

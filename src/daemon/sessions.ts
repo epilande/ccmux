@@ -38,6 +38,17 @@ function derivePaneTrackedSessionId(paneId: string, agentType: string): string {
   return `${agentType}_${paneToken}`;
 }
 
+function changesConversationIdentity(
+  session: Readonly<Session>,
+  nextNativeSessionId: string | undefined,
+): boolean {
+  // OpenCode rotates a representative of the same server row, not its conversation.
+  return session.agentType !== "opencode" &&
+    nextNativeSessionId !== undefined &&
+    session.nativeSessionId !== undefined &&
+    session.nativeSessionId !== nextNativeSessionId;
+}
+
 /**
  * Inputs for a Claude background (background-agent) session. Identity fields
  * follow the background-source rules: `daemonShort` is the stable
@@ -271,6 +282,8 @@ export class SessionManager extends EventEmitter {
    * `statusChangedAt`, two edges in the same millisecond never share it.
    */
   private statusRevisions: Map<string, number> = new Map();
+  private waitIds = new Map<string, string>();
+  private conversationEpochs = new Map<string, string>();
 
   /**
    * Clear a pane-tracked session's per-run enrichment (status, activity,
@@ -290,8 +303,25 @@ export class SessionManager extends EventEmitter {
     if (!isPaneTrackedSession(session)) {
       return false;
     }
-
+    this.waitIds.delete(session.id);
+    this.conversationEpochs.delete(session.id);
     let changed = false;
+    if (session.ambiguousWait !== undefined) {
+      delete session.ambiguousWait;
+      changed = true;
+    }
+    if (session.attentionState !== null) {
+      session.attentionState = null;
+      this.attentionRevisions.set(
+        session.id,
+        this.getAttentionRevision(session.id) + 1,
+      );
+      changed = true;
+    }
+    if (session.lastSeenAt !== null) {
+      session.lastSeenAt = null;
+      changed = true;
+    }
 
     // A reset is an edge with no previous status, so it outdates any finish
     // of the previous run still being decided without reading as one.
@@ -440,16 +470,12 @@ export class SessionManager extends EventEmitter {
     if (existing) {
       let changed = false;
       const pidChanged = existing.pid !== input.pid;
+      const nativeSessionChanged = changesConversationIdentity(
+        existing,
+        input.nativeSessionId,
+      );
 
-      // Pane reuse: a different process in this pane means a new run —
-      // clear the previous run's identity for ALL pane-tracked agents,
-      // not just Claude. The new run's own marker / rollout
-      // link re-enriches it. Gated on pidChanged ONLY: a new run always
-      // has a new pid, while a cwd-only change with the same pid is the
-      // same run (a chdir, or a transient lsof miss making the caller fall
-      // back to `pane.currentPath`) — resetting identity there would
-      // flicker a live session's nativeSessionId/logPath.
-      if (pidChanged) {
+      if (pidChanged || nativeSessionChanged) {
         if (
           this.resetPaneTrackedSessionState(existing, {
             clearNativeSessionId: true,
@@ -587,6 +613,13 @@ export class SessionManager extends EventEmitter {
     if (!session) return false;
 
     let changed = false;
+    if (state.conversationEpoch !== undefined) {
+      const previousEpoch = this.conversationEpochs.get(sessionId);
+      if (previousEpoch !== undefined && previousEpoch !== state.conversationEpoch) {
+        changed = this.resetPaneTrackedSessionState(session);
+      }
+      this.conversationEpochs.set(sessionId, state.conversationEpoch);
+    }
 
     const statusChanged =
       state.status !== undefined && state.status !== session.status;
@@ -616,14 +649,21 @@ export class SessionManager extends EventEmitter {
       changed = true;
     }
 
-    // Advance the attention generation once per call when the attention
-    // identity changed. This is the ONLY site that bumps it (see the field
-    // doc on Session). A waiting->waiting swap that keeps `status` unchanged
-    // is invisible to `statusChangedAt` but flips `attentionType`/`pendingTool`,
-    // so the generation moves and a press against the resolved wait is rejected.
-    // A single +1 covers both fields changing in one call.
-    if (attentionChanged || pendingToolChanged) {
+    const waitId = state.waitId;
+    const waitIdChanged =
+      waitId !== undefined && waitId !== (this.waitIds.get(sessionId) ?? null);
+    if (waitIdChanged) {
+      if (waitId === null) this.waitIds.delete(sessionId);
+      else this.waitIds.set(sessionId, waitId);
+    }
+
+    if (attentionChanged || pendingToolChanged || waitIdChanged) {
       session.attentionGeneration += 1;
+      changed = true;
+    }
+
+    if (state.logPath !== undefined && state.logPath !== session.logPath) {
+      session.logPath = state.logPath;
       changed = true;
     }
 
@@ -990,6 +1030,11 @@ export class SessionManager extends EventEmitter {
         }
       }
     }
+    if (changesConversationIdentity(session, nativeSessionId)) {
+      this.resetPaneTrackedSessionState(session, {
+        clearNativeSessionId: true,
+      });
+    }
     session.nativeSessionId = nativeSessionId;
     session.updatedAt = new Date();
     this.nativeSessionResolvedAt.set(sessionId, Date.now());
@@ -1015,6 +1060,8 @@ export class SessionManager extends EventEmitter {
     const existed = this.sessions.delete(sessionId);
     this.attentionRevisions.delete(sessionId);
     this.statusRevisions.delete(sessionId);
+    this.waitIds.delete(sessionId);
+    this.conversationEpochs.delete(sessionId);
     if (existed) {
       this.emit("change", { type: "removed", sessionId } as SessionEvent);
     }
@@ -1191,6 +1238,8 @@ export class SessionManager extends EventEmitter {
   clear(): void {
     const sessionIds = Array.from(this.sessions.keys());
     this.sessions.clear();
+    this.waitIds.clear();
+    this.conversationEpochs.clear();
     for (const sessionId of sessionIds) {
       this.emit("change", { type: "removed", sessionId } as SessionEvent);
     }

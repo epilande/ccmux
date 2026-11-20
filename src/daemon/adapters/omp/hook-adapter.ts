@@ -19,9 +19,8 @@ import {
   type HookAdapterOutcome,
   type HookManagerContext,
 } from "../../hook-adapter";
-import { markerStatusState } from "../../cascade-evaluator";
+import { genericMarkerSource } from "../../cascade-evaluator";
 import type { SessionPidMarker } from "../../session-markers";
-import type { SessionState } from "../../../types/session";
 
 const CCMUX_VERSION: string = pkg.version;
 
@@ -47,11 +46,6 @@ function inspectInstalledExtension(path: string): {
 
 /**
  * oh-my-pi (omp) extension-based hook integration.
- *
- * omp is a hard fork of Pi that kept Pi's extension API, so this adapter is
- * structurally the Pi adapter with one addition: omp has a tool-approval
- * pause, so its marker can carry `waiting_permission` and this adapter
- * projects a real permission wait.
  *
  * - Install writes a single auto-discovered file
  *   (`~/.omp/agent/extensions/ccmux.js`) with a sentinel first line so we
@@ -172,19 +166,18 @@ export class OmpHookAdapter implements HookAdapter {
     ) {
       return;
     }
-    ctx.sessionManager.updateSession(session.id, stateFromOmpMarker(marker));
-    // omp has no registered LogAdapter, so this only makes the transcript
-    // path visible to consumers that check for one themselves (ccmux show);
-    // it does not add a cascade log source (that's keyed on a registered
-    // adapter, not mere logPath presence). Set verbatim, no existsSync: a
-    // marker rewrite doesn't dispatch onMarkerChanged (unimplemented here),
-    // so this runs once per marker lifetime — an existence check at that one
-    // moment would turn a transcript-created-later race into a permanent
-    // miss. A dangling path is safe; every consumer either tolerates a
-    // missing file or is unreachable for this agent type.
-    if (marker.transcript_path) {
-      ctx.sessionManager.setLogPath(session.id, marker.transcript_path);
-    }
+    const { source, metadata } = genericMarkerSource(marker);
+    ctx.sessionManager.updateSession(session.id, { ...metadata, ...source.state });
+  }
+
+  async onMarkerChanged(
+    marker: SessionPidMarker,
+    ctx: HookManagerContext,
+  ): Promise<void> {
+    const session = await findTargetSession(marker.pid, ctx, this.agentType);
+    if (!session || session.nativeSessionId !== marker.session_id) return;
+    const { source, metadata } = genericMarkerSource(marker);
+    ctx.sessionManager.updateSession(session.id, { ...metadata, ...source.state });
   }
 
   async onMarkerRemoved(
@@ -203,26 +196,11 @@ async function findTargetSession(
   pid: number,
   ctx: HookManagerContext,
   agentType: string,
-): Promise<{ id: string } | null> {
+) {
   const pane = await ctx.getPaneHostingPid(pid);
   if (!pane) return null;
   const session = findPaneTrackedSession(ctx, agentType, pane.paneId);
-  return session ? { id: session.id } : null;
+  if (!session || (session.pid != null && session.pid !== pid)) return null;
+  return session;
 }
 
-/**
- * Map an omp marker into the SessionState fields the adapter owns. Unlike
- * pi's projection, `waiting_permission` is reachable. The status/attention
- * tuple comes from the cascade's own `markerStatusState`, so this add-time
- * write and every later reconcile agree by construction; only
- * `lastPrompt`/`lastActivityAt` are the adapter's to add.
- */
-function stateFromOmpMarker(marker: SessionPidMarker): Partial<SessionState> {
-  return {
-    ...markerStatusState(marker),
-    lastPrompt: marker.last_prompt,
-    lastActivityAt: marker.state_timestamp
-      ? new Date(marker.state_timestamp * 1000).toISOString()
-      : undefined,
-  };
-}

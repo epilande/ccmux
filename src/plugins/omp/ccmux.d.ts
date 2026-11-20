@@ -1,40 +1,74 @@
-/**
- * Type surface for the authored JS extension. The real implementation
- * lives in `ccmux.js`; this file is solely for TypeScript callers (tests,
- * the renderer). Kept intentionally loose: the extension talks to omp's
- * runtime whose types are not in our dependency graph.
- */
+export interface OmpTerminal {
+  write(data: string, ...args: unknown[]): unknown;
+}
 
 export interface MakeExtensionOptions {
   markersDir: string;
   version: string;
   now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+  getActiveTerminal?: () => OmpTerminal | null;
+  writeMarkerFile?: (path: string, body: string) => Promise<unknown>;
+}
+
+export interface OmpSessionManager {
+  getSessionId(): string | undefined;
+  getSessionFile(): string | undefined;
+}
+
+export interface OmpPlanReview {
+  reviewId: string;
 }
 
 export interface OmpExtensionContext {
   cwd: string;
-  agent?: { kind: "main" | "sub" };
+  mode?: string;
+  ui?: object;
+  hasUI?: boolean;
+  agent?: { id?: string; kind: "main" | "sub" };
   isIdle?(): boolean;
-  sessionManager: {
-    getSessionId(): string | undefined;
-    getSessionFile(): string | undefined;
-  };
+  getPendingPlanReview?(): OmpPlanReview | undefined;
+  sessionManager: OmpSessionManager;
 }
 
-/** Minimal slice of omp's ExtensionAPI used by the ccmux extension. */
+export interface OmpSessionSwitchOptions {
+  preserveLocalCwd?: boolean;
+  keepModel?: boolean;
+}
+
+export interface OmpNativeSession {
+  readonly instanceKey?: string;
+  sessionManager: OmpSessionManager;
+  readonly transcriptEpoch?: number;
+  readonly isRunActive?: boolean;
+  readonly hasAdmittedSubmission?: boolean;
+  readonly isStreaming?: boolean;
+  readonly isCompacting?: boolean;
+  readonly isBackgroundCompacting?: boolean;
+  readonly isBashRunning?: boolean;
+  readonly isEvalRunning?: boolean;
+  readonly isRetrying?: boolean;
+  readonly isAborting?: boolean;
+  subscribe?(listener: (event: unknown) => void): () => void;
+  subscribeRunState?(listener: (state: "running" | "idle") => void): () => void;
+  switchSession?(file: string, options?: OmpSessionSwitchOptions): Promise<boolean>;
+  getPlanModeState?(): { enabled: boolean } | undefined;
+  extensionRunner?: { getUIContext(): object; hasUI?(): boolean };
+  agent?: object;
+}
+
 export interface OmpExtensionApi {
+  pi?: {
+    AgentRegistry?: {
+      global(): { get(id: string): { session: OmpNativeSession | null } | undefined };
+    };
+  };
   on(
     event: string,
     handler: (event: unknown, ctx: OmpExtensionContext) => void | Promise<void>,
   ): void;
 }
 
-export type OmpExtension = ((omp: OmpExtensionApi) => void) & {
-  version: string;
-};
-
+export type OmpExtension = ((omp: OmpExtensionApi) => void) & { version: string };
 export function makeExtension(opts: MakeExtensionOptions): OmpExtension;
-
 declare const ccmuxExtension: OmpExtension;
 export default ccmuxExtension;

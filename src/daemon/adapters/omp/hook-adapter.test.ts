@@ -25,7 +25,7 @@ import { OmpHookAdapter } from "./hook-adapter";
 import type { HookManagerContext } from "../../hook-adapter";
 import type { SessionPidMarker } from "../../session-markers";
 import { loadMarkerIntoCache, refreshMarkerCache } from "../../session-markers";
-import type { Session, TmuxPane } from "../../../types/session";
+import type { Session, SessionState, TmuxPane } from "../../../types/session";
 
 const CCMUX_VERSION = pkg.version;
 
@@ -62,7 +62,8 @@ interface FakeSession {
   trackingMode: "pane" | "native";
   tmuxPane: string | null;
   nativeSessionId?: string;
-  state: Partial<Session>;
+  pid?: number | null;
+  state: Partial<SessionState>;
 }
 
 function makeCtx(
@@ -72,7 +73,7 @@ function makeCtx(
   return {
     sessionManager: {
       getSessions: () => sessions as unknown as Session[],
-      updateSession: (id: string, patch: Partial<Session>) => {
+      updateSession: (id: string, patch: Partial<SessionState>) => {
         const s = sessions.find((x) => x.id === id);
         if (!s) return false;
         Object.assign(s.state, patch);
@@ -293,6 +294,119 @@ describe("OmpHookAdapter", () => {
       expect(session.state.pendingTool).toBe(null);
     });
 
+    for (const [state, attentionType] of [
+      ["waiting_question", "question"],
+      ["waiting_plan", "plan_approval"],
+    ] as const) {
+      it(`projects ${state} and shares current metadata on add and change`, async () => {
+        const session = paneSession();
+        const ctx = makeCtx([session], [makePane("%1", 9000)]);
+        const marker = makeMarker({
+          state,
+          state_authoritative: true,
+          state_timestamp: 1_700_000_000,
+          pending_tool: "stale tool",
+          wait_id: "first-dialog",
+          in_plan_mode: true,
+          ambiguous_wait: true,
+          transcript_path: join(tempRoot, "first.jsonl"),
+          last_prompt: "first prompt",
+        });
+        writeMarkerToCache(marker);
+        await adapter.onMarkerAdded(marker, ctx);
+        expect(session.state).toMatchObject({
+          status: "waiting",
+          attentionType,
+          pendingTool: null,
+          waitId: "first-dialog",
+          inPlanMode: true,
+          ambiguousWait: true,
+          logPath: marker.transcript_path,
+          lastPrompt: "first prompt",
+        });
+
+        const changed = makeMarker({
+          state,
+          state_authoritative: true,
+          wait_id: "next-dialog",
+          in_plan_mode: false,
+          ambiguous_wait: false,
+          transcript_path: join(tempRoot, "current.jsonl"),
+          last_prompt: null,
+        });
+        writeMarkerToCache(changed);
+        await adapter.onMarkerChanged(changed, ctx);
+        expect(session.state).toMatchObject({
+          status: "waiting",
+          attentionType,
+          pendingTool: null,
+          waitId: "next-dialog",
+          inPlanMode: false,
+          ambiguousWait: false,
+          logPath: changed.transcript_path,
+          lastPrompt: null,
+        });
+      });
+    }
+
+    it("clears retired owner and transcript metadata on authoritative change", async () => {
+      const session = paneSession();
+      session.nativeSessionId = makeMarker({}).session_id;
+      session.state = { waitId: "old-dialog", logPath: "/tmp/old.jsonl", lastPrompt: "old" };
+      const ctx = makeCtx([session], [makePane("%1", 9000)]);
+
+      await adapter.onMarkerChanged(
+        makeMarker({ state: "idle", state_authoritative: true, last_prompt: null }),
+        ctx,
+      );
+
+      expect(session.state.waitId).toBeNull();
+      expect(session.state.logPath).toBeNull();
+      expect(session.state.lastPrompt).toBeNull();
+    });
+
+    it("does not reclaim a different current native ID on marker change", async () => {
+      const session = paneSession();
+      session.nativeSessionId = "current-conversation";
+      const ctx = makeCtx([session], [makePane("%1", 9000)]);
+
+      await adapter.onMarkerChanged(
+        makeMarker({ state: "waiting_question", last_prompt: "stale" }),
+        ctx,
+      );
+
+      expect(session.nativeSessionId).toBe("current-conversation");
+      expect(session.state).toEqual({});
+    });
+
+    it("does not write state when native ID claiming conflicts", async () => {
+      const session = paneSession();
+      const ctx = makeCtx([session], [makePane("%1", 9000)]);
+      ctx.sessionManager.setNativeSessionId = () => "conflict";
+
+      await adapter.onMarkerAdded(makeMarker({ state: "waiting_question" }), ctx);
+
+      expect(session.nativeSessionId).toBeUndefined();
+      expect(session.state).toEqual({});
+    });
+
+    it("does not update a replacement process in the same pane", async () => {
+      const session = paneSession();
+      session.pid = 9001;
+      session.nativeSessionId = makeMarker({}).session_id;
+      const ctx = makeCtx([session], [makePane("%1", 9000)]);
+      const marker = makeMarker({
+        state: "waiting_question",
+        transcript_path: "/tmp/old-process.jsonl",
+        last_prompt: "old process prompt",
+      });
+
+      await adapter.onMarkerAdded(marker, ctx);
+      await adapter.onMarkerChanged(marker, ctx);
+
+      expect(session.state).toEqual({});
+    });
+
     it("no-ops when the marker pid maps to no tmux pane", async () => {
       const session = paneSession();
       const ctx = makeCtx([session], [makePane("%1", 9000)]);
@@ -321,11 +435,8 @@ describe("OmpHookAdapter", () => {
     });
 
     it("sets logPath from transcript_path verbatim even when the file does not exist yet", async () => {
-      // A marker rewrite doesn't dispatch onMarkerChanged (unimplemented),
-      // so onMarkerAdded runs once per marker lifetime. Refusing a
-      // not-yet-created transcript here would turn that race into a
-      // permanent miss; every logPath consumer either tolerates a missing
-      // file or is unreachable for this agent type.
+      // A transcript may be created after its marker; never require it to
+      // exist before linking the current path.
       const session = paneSession();
       const ctx = makeCtx([session], [makePane("%1", 9000)]);
       const transcriptPath = join(tempRoot, "vanished.jsonl");
