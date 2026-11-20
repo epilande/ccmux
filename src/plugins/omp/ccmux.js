@@ -3,14 +3,6 @@
 import { writeFile, rename, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-// The leaf export is public. The package root does not export getActiveTerminal.
-let nativeGetTerminal;
-try {
-  ({ getActiveTerminal: nativeGetTerminal } = await import("@oh-my-pi/pi-tui/active-terminal"));
-} catch (error) {
-  if (!["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED"].includes(error?.code)) throw error;
-}
-
 const decoratedMethods = new WeakMap();
 const BUSY_FLAGS = ["isRunActive", "hasAdmittedSubmission", "isStreaming", "isCompacting", "isBackgroundCompacting", "isBashRunning", "isEvalRunning", "isRetrying", "isAborting"];
 const OBSERVER_ROWS = Object.freeze([]);
@@ -65,7 +57,7 @@ export function makeExtension({
   markersDir,
   version,
   now = Date.now,
-  getActiveTerminal = nativeGetTerminal,
+  getActiveTerminal,
   writeMarkerFile = writeFile,
 }) {
   let active;

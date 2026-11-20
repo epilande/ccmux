@@ -557,7 +557,7 @@ describe("OMP input ownership", () => {
     expect(h.read().state).toBe("idle");
   });
 
-  it.each(["unavailable", "different"])("uses the captured TUI terminal when the imported terminal is %s", async source => {
+  it.each(["unavailable", "different"])("uses the captured TUI terminal when the fallback getter is %s", async source => {
     const fixture = customFixture();
     const widgets = new Map<string, { render(width: number): readonly string[] }>();
     const ui = {
@@ -567,14 +567,14 @@ describe("OMP input ownership", () => {
       },
     };
     const otherTerminal = { write(_data: string) {} };
-    let importedReads = 0;
+    let fallbackReads = 0;
     const h = harness(ui, { getActiveTerminal: () => {
-      importedReads++;
+      fallbackReads++;
       return source === "unavailable" ? null : otherTerminal;
     } });
     Object.assign(fixture.tui, { terminal: h.terminal });
     await h.start();
-    expect(importedReads).toBe(0);
+    expect(fallbackReads).toBe(0);
     h.status("working");
     await h.wait("working");
     h.status("blocked:kind=permission");

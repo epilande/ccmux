@@ -30,8 +30,3 @@ export function renderOmpExtension(opts: RenderOmpExtensionOptions): string {
     .replaceAll(SENTINEL_VERSION, JSON.stringify(opts.version))
     .replaceAll("__CCMUX_VERSION__", opts.version);
 }
-
-/** Exposed for tests that want to assert against the raw template. */
-export function getOmpExtensionSourceForTests(): string {
-  return extensionSource;
-}

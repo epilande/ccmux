@@ -51,8 +51,6 @@ export async function waitForMarker(directory: string, id: string, predicate: (m
   return result;
 }
 
-export const waitForIdleMarker = (directory: string, id: string) => waitForMarker(directory, id, marker => marker.state === "idle");
-
 export interface NativeTool {
   execute(...args: unknown[]): unknown;
 }
