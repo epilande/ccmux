@@ -270,6 +270,41 @@ ccmux daemon restart
 
 Colors default to `red` for waiting and `green` for unread, matching the picker; ANSI names follow your terminal's palette. Set a color to empty (`ccmux config set statusBar.waitingColor ''`) to inherit the surrounding tmux style instead. Accepted colors are ANSI names such as `yellow` or `brightred`, `colour0`–`colour255`, `#rrggbb`, and `default`. Icons are plain text. All `statusBar` settings, and changes to `iconStyle` for this daemon-owned surface, require a daemon restart. Updates follow session changes, write only changed values, and use the configured tmux socket. A normal daemon stop unsets the options and marks; pane moves are picked up on the next daemon scan.
 
+Choose one window mark: keep `@ccmux_mark` for attention only, or replace it with `@ccmux_state_mark` to also show working and idle agents. Do not display both marks together. To choose the full-state mark, replace the two window format lines above with:
+
+```tmux
+set -g window-status-format '#I:#W#{@ccmux_state_mark}'
+set -g window-status-current-format '#I:#W#{@ccmux_state_mark}'
+```
+
+If you customize these formats or use a theme, replace each `#{@ccmux_mark}` reference with `#{@ccmux_state_mark}` instead of appending another mark. Reload your tmux configuration after the change. The daemon publishes both options but never changes your formats or window names.
+
+Both marks share the same per-window aggregation. `@ccmux_state_mark` shows the highest-priority state across all agent panes, in the order `waiting > unread > working > idle`. With `dot` icons, these are red `■`, green `●`, yellow `◐`, and brightblack `○`. Working and idle use static icons by default. Other icon styles use the shared working and idle glyphs. With `iconStyle none`, marks are hidden unless a waiting or unread icon is explicitly overridden. Existing waiting and unread icon/color overrides apply to either mark, and `@ccmux_mark` keeps its existing attention-only behavior.
+
+The state mark includes its leading space and foreground reset, like the attention mark. An idle agent still has a mark. When the last agent leaves the window or exits, the option is unset. Pane moves follow the next daemon scan. Paneless background sessions do not contribute to window marks. `statusBar.enabled false` disables all publishing, and a normal daemon stop clears both marks.
+
+To animate working agents on tmux 3.8 or later, opt in with:
+
+```bash
+ccmux config set statusBar.animateWorking true
+ccmux daemon restart
+```
+
+Replace the state-mark reference in both tmux formats with `#{E:@ccmux_state_mark}` so tmux evaluates the animation expression stored in the option:
+
+```tmux
+set -g window-status-format '#I:#W#{E:@ccmux_state_mark}'
+set -g window-status-current-format '#I:#W#{E:@ccmux_state_mark}'
+```
+
+Use this instead of either previous pair of window formats, not alongside them. With a theme or the mouse binding below, make the same replacement inside the existing text or clickable range. Reload your tmux configuration. Without `E:`, the animation expression appears as literal text when animation is enabled on a supported server. Existing formats remain valid while animation is disabled, and `E:` also works for static marks.
+
+The daemon checks the connected server's version through the configured tmux socket, not `tmux -V`. On servers older than 3.8, or if the version cannot be determined, working remains static even when the setting is true. Capability is cached until the daemon detects that the server has gone away. A failed version query falls back to static output and can be retried by the next normal update.
+
+Dot and Nerd Font working marks reuse the shared spinner frames through tmux's native `A/2` modifier, with 200 ms per frame. Emoji remains static, and `none` still hides icons. Waiting, unread, and idle never animate. tmux redraws the status line every 100 ms while an animation expression is present, independently of `status-interval`; ccmux adds no animation timer or per-frame tmux commands. See the [tmux 3.8 changelog](https://raw.githubusercontent.com/tmux/tmux/master/CHANGES).
+
+To return to static working marks, set `ccmux config set statusBar.animateWorking false` and restart the daemon. This is the default. The `E:` formats can remain in place. Changes to `statusBar` settings require a daemon restart; the daemon does not rewrite your tmux configuration.
+
 **Click to open the picker (tmux 3.4+).** Use these formats and binding in `~/.tmux.conf` to make the attention segment and individual window marks open a picker popup. Window names still select their windows, and the clock keeps its normal status-right behavior:
 
 ```tmux
@@ -286,6 +321,7 @@ bind-key -n MouseDown1Status if-shell -F '#{==:#{mouse_status_range},ccmux}' {
 ```
 
 Reload with `tmux source-file ~/.tmux.conf`. If you already customize `MouseDown1Status`, keep your existing action in the final branch instead of `select-window -t =`. These mouse bindings belong to your tmux configuration; the daemon only publishes the option values.
+For full-state tabs with this mouse binding, replace `#{@ccmux_mark}` with `#{@ccmux_state_mark}` in both formats. Use only the chosen mark inside each clickable range.
 
 ### Notifications
 
