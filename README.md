@@ -226,7 +226,7 @@ ccmux sidebar --toggle --position right # Right side (default: left)
 ccmux sidebar --resize --width 30       # Snap every existing sidebar pane to <width>
 ```
 
-The smart toggle fills gaps when some windows are missing sidebars, and kills all sidebars when every window already has one. New windows automatically get a sidebar, and sidebars snap back to their configured width when a window is resized.
+The smart toggle fills gaps when some windows are missing sidebars, and kills all sidebars when every window already has one. New windows, including the first window in a new tmux session, automatically get a sidebar. Sidebars snap back to their configured width when a window is resized.
 
 Sidebars start without changing the active pane, so you can keep typing while a new window's sidebar initializes.
 Inside tmux, the sidebar renderer assumes truecolor to avoid legacy palette queries whose replies could otherwise reach the working pane.

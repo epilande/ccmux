@@ -116,6 +116,12 @@ describe("parseAutoOpenHook", () => {
     expect(parseAutoOpenHook(output)).toBe(true);
   });
 
+  it("recognizes a surviving session hook for width updates", () => {
+    const output =
+      "after-new-session[99] split-window -fhbd -l 30 'sleep 0.1 && exec ccmux sidebar'";
+    expect(parseAutoOpenHook(output)).toBe(true);
+  });
+
   it("returns false when hook is absent", () => {
     const output = "after-new-session[0] -> run-shell 'some command'";
     expect(parseAutoOpenHook(output)).toBe(false);
