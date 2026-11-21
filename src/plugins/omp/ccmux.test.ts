@@ -911,5 +911,20 @@ describe("omp ccmux extension", () => {
       await tick();
       expect(readMarker("S1").state).toBe("idle");
     });
+
+    it("stops the reconcile before removing the marker on shutdown", async () => {
+      const fire = startExtension();
+      const { ctx, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      await fire("session_shutdown", null, ctx);
+      expect(existsSync(markerPath("S1"))).toBe(false);
+
+      // A tick that would have landed behind the queued removal must find
+      // no timer to run and must not recreate the marker.
+      await tick();
+      expect(existsSync(markerPath("S1"))).toBe(false);
+    });
   });
 });

@@ -516,7 +516,12 @@ export function makeExtension({
       // The rebind aborts any running turn, so drop its activity reasons
       // too; the fresh idle marker below is the whole truth.
       activityReasons.delete(sessionId);
+      // Timers stop BEFORE the removals are queued: a tick that lands
+      // while they are merely queued would publish behind the removal and
+      // recreate a reaped session's marker. omp clears managed timers only
+      // after awaiting this handler, so the ordering is ours to keep.
       stopReconcile(sessionId);
+      for (const id of stale) stopReconcile(id);
       return queue(async () => {
         for (const id of stale) await removeMarker(id);
         await writeMerged(sessionId, {
@@ -550,6 +555,10 @@ export function makeExtension({
     omp.on("session_shutdown", async (_event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
+      // Same ordering as the rebind: stop the reconcile before queueing
+      // the removal, or a tick that lands first would publish behind it
+      // and recreate the marker of the session being shut down.
+      stopReconcile(sessionId);
       return queue(() => removeMarker(sessionId));
     });
   }
