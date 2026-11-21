@@ -171,12 +171,13 @@ mock.module("./utils/review", () => ({
 // clear that persister's half-window ceiling for any width the degenerate gate
 // lets through, so a future resize-based test cannot reach the spawn.
 const realWindowState = await import("./utils/tmux-window-state");
+let mockWindowActive = true;
 
 mock.module("./utils/tmux-window-state", () => ({
   ...realWindowState,
   fetchWindowState: async () => ({
     windowWidth: 1,
-    windowActive: true,
+    windowActive: mockWindowActive,
     sessionAttached: true,
   }),
 }));
@@ -257,6 +258,7 @@ beforeEach(() => {
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
   uiStateGate = null;
+  mockWindowActive = true;
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -266,6 +268,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setup?.renderer.destroy();
+  setup = undefined as unknown as Setup;
   restoreFetch();
   // refreshServerInfo writes the module-global server-guard cache; restore
   // fail-open so a guard test's refusal can't leak into other test files.
@@ -277,6 +280,7 @@ async function renderApp(
   height = 20,
   props: Record<string, unknown> = {},
 ) {
+  setup?.renderer.destroy();
   setup = await testRender(() => <App {...props} />, { width, height });
   await setup.renderOnce();
   return setup.captureCharFrame();
@@ -289,7 +293,7 @@ async function renderApp(
  * test awaits in place of a fixed sleep, plus `restore()` to put back the
  * original `fetch`.
  *
- * The capture is gated on the URL containing "/sidebar-state" rather than
+ * The capture is gated on GET "/sidebar-state" rather than
  * being a bare last-write-wins assignment: onMount also fires
  * `refreshServerInfo()`'s `/server-info` fetch first (App.tsx:1399-1405), so
  * an ungated capture would only happen to grab the right promise because of
@@ -298,22 +302,32 @@ async function renderApp(
  * installed, so callers of this helper don't inherit ambient fetch state
  * from another test.
  */
-function mockSidebarStateFetch(payload: Record<string, unknown>) {
+function mockSidebarStateFetch(
+  payload: Record<string, unknown>,
+  options: { ok?: boolean; gate?: Promise<void> } = {},
+) {
+  const { ok = true, gate } = options;
   const originalFetch = globalThis.fetch;
   let hydrationFetchPromise:
-    | Promise<{ json: () => Promise<unknown> }>
+    | Promise<{ ok: boolean; json: () => Promise<unknown> }>
     | undefined;
-  globalThis.fetch = ((input: string | URL | Request) => {
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url =
       typeof input === "string" || input instanceof URL
         ? input.toString()
         : input.url;
-    if (url.includes("/sidebar-state")) {
-      const promise = (async () => ({ json: async () => payload }))();
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
+    if (url.includes("/sidebar-state") && method === "GET") {
+      const promise = (async () => {
+        if (gate) await gate;
+        return { ok, json: async () => payload };
+      })();
       hydrationFetchPromise = promise;
       return promise;
     }
-    return (async () => ({ json: async () => ({}) }))();
+    return (async () => ({ ok: true, json: async () => ({}) }))();
   }) as unknown as typeof fetch;
   return {
     getPromise: () => hydrationFetchPromise,
@@ -596,8 +610,256 @@ describe("App", () => {
       setup.mockInput.pressKey("x");
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Kill Session?");
-      expect(frame).toContain("alpha");
+      expect(frame).toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration resolving BEFORE onInit is preserved across initial init and reconnect without flashing", async () => {
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: "s1",
+      selectedHeaderKey: null,
+    });
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      flashPaneSpy.mockClear();
+      const sessions = [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%10",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%20",
+        }),
+      ];
+      // Initial onInit arrives AFTER hydration resolved: activePane is s2 (%20),
+      // but hydrated selection s1 (alpha) must stay selected and not flash on mount.
+      sseCallbacks!.onInit(sessions, "%20");
+      await setup.renderOnce();
+      expect(flashPaneSpy).not.toHaveBeenCalled();
+
+      // SSE reconnect delivers another onInit: selection s1 must still be preserved.
+      sseCallbacks!.onInit(sessions, "%20");
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration does not overwrite newer SSE sidebar_state", async () => {
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // Newer SSE sidebar_state arrives before the startup GET resolves.
+      sseCallbacks!.onSidebarState!("s2", null, 3, "peer-sidebar", 5);
+      await setup.renderOnce();
+
+      // Now let the stale startup GET /sidebar-state resolve with s1.
+      releaseHydration();
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration skips non-OK response and preserves active-pane default", async () => {
+    const nonOk = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null },
+      { ok: false },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%20",
+      );
+      await nonOk.getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      nonOk.restore();
+    }
+  });
+
+  it("sidebar hydration does not overwrite local user navigation while GET is in flight", async () => {
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // User navigates locally from alpha (s1) to beta (s2) before GET resolves.
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+
+      releaseHydration();
+      await getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration does not overwrite off-screen onActivePane update while GET is in flight", async () => {
+    mockWindowActive = false;
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      // Drain initial fetchWindowState() so visibility.visible() settles to false.
+      await new Promise((r) => setTimeout(r, 0));
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // Off-screen sidebar receives a newer active_pane switch to s2.
+      sseCallbacks!.onActivePane!("s2", "%20");
+      await setup.renderOnce();
+
+      releaseHydration();
+      await getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
     } finally {
       restore();
     }

@@ -4,7 +4,7 @@ import type {
   WorktreeCountsResponse,
 } from "../../daemon/worktree-list";
 import { groupWorktreeFacts } from "./session-columns";
-import type { Component } from "solid-js";
+import type { Accessor, Component } from "solid-js";
 import {
   createEffect,
   createMemo,
@@ -27,6 +27,7 @@ import {
   type FlatItem,
   type FilteredSession,
   type GroupBy,
+  flatItemIdentity,
   groupSessions,
   groupRepoRoot,
   NEEDS_YOU_GROUP_KEY,
@@ -109,6 +110,14 @@ interface SessionListProps {
    * scroll offset and the viewport's own position all live here.
    */
   onRowAnchor?: (resolve: RowAnchor) => void;
+  /** Cross-sidebar vertical scroll synchronization signal */
+  scrollSync?: { top: number; generation: number } | null;
+  /** Fired only on user-initiated scroll (mouse wheel / scrollbar) */
+  onUserScroll?: (scrollTop: number) => void;
+  /** Fired whenever scrollTop changes (user or programmatic) */
+  onScrollMoved?: (scrollTop: number) => void;
+  /** Hands parent a synchronous reader for the live scrollTop */
+  onScrollTopReader?: (read: () => number) => void;
 }
 
 /** Where a flat-item row is on screen right now, or null when it is not
@@ -328,6 +337,18 @@ export const SessionList: Component<SessionListProps> = (props) => {
       ? 1
       : 0);
 
+  let initialScrollDone = false;
+  let prevViewportHeight = 0;
+  let prevLayout: ResolvedColumns | undefined;
+  let prevBlockKey = "";
+  let prevItems: FlatItem[] | undefined;
+  let prevSelectedIndex = -1;
+  let prevSelectedKey: string | null = null;
+  let prevSyncGeneration = 0;
+  let pendingLayoutScroll = false;
+  let suppressSelectionScroll = false;
+  let programmaticScrolling = false;
+
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
     // The scrollbox mounts in the same update that delivers the first
@@ -335,19 +356,115 @@ export const SessionList: Component<SessionListProps> = (props) => {
     // measured it: scrollTo clamps against a zero-size viewport/content and
     // the initial scroll-into-view is silently lost.
     void scrollboxLayout();
+    const items = props.items;
     const index = props.selectedIndex;
-    if (!scrollboxRef || index < 0) return;
+    const sync = props.scrollSync ?? null;
+    const currentLayout = layout();
+    const currentBlockKey = blockActive()
+      ? `${props.promptLines ?? 0}:${promptBlockWidth(effectiveWidth())}`
+      : "off";
+    if (!scrollboxRef || items.length === 0) return;
 
     const viewportHeight = scrollboxRef.viewport?.height ?? 0;
+    const contentHeight = scrollboxRef.content?.height ?? 0;
+    if (viewportHeight <= 0 || contentHeight <= 0) return;
+
+    const validIndex = index >= 0 && index < items.length;
+    const selectedKey = validIndex ? flatItemIdentity(items[index]!) : null;
+
+    if (sync && sync.generation !== prevSyncGeneration) {
+      prevSyncGeneration = sync.generation;
+      initialScrollDone = true;
+      prevViewportHeight = viewportHeight;
+      prevLayout = currentLayout;
+      prevBlockKey = currentBlockKey;
+      prevItems = items;
+      prevSelectedIndex = index;
+      prevSelectedKey = selectedKey;
+      pendingLayoutScroll = false;
+      suppressSelectionScroll = false;
+      programmaticScrolling = true;
+      try {
+        scrollboxRef.scrollTo(sync.top);
+      } finally {
+        programmaticScrolling = false;
+      }
+      return;
+    }
+
+    if (!validIndex) {
+      prevLayout = currentLayout;
+      prevBlockKey = currentBlockKey;
+      pendingLayoutScroll = false;
+      return;
+    }
+
+    if (suppressSelectionScroll) {
+      suppressSelectionScroll = false;
+      pendingLayoutScroll = false;
+      initialScrollDone = true;
+      prevViewportHeight = viewportHeight;
+      prevLayout = currentLayout;
+      prevBlockKey = currentBlockKey;
+      prevItems = items;
+      prevSelectedIndex = index;
+      prevSelectedKey = selectedKey;
+      return;
+    }
+
+    const isInitialLayout = !initialScrollDone;
+    const viewportResized =
+      !isInitialLayout && viewportHeight !== prevViewportHeight;
+    const layoutChanged =
+      !isInitialLayout &&
+      (currentLayout !== prevLayout || currentBlockKey !== prevBlockKey);
+    const selectionChanged =
+      !isInitialLayout &&
+      (items === prevItems
+        ? index !== prevSelectedIndex || selectedKey !== prevSelectedKey
+        : selectedKey !== prevSelectedKey);
+
+    if (layoutChanged) {
+      pendingLayoutScroll = true;
+    }
+    if (selectionChanged) {
+      pendingLayoutScroll = false;
+    }
+
+    initialScrollDone = true;
+    prevViewportHeight = viewportHeight;
+    prevLayout = currentLayout;
+    prevBlockKey = currentBlockKey;
+    prevItems = items;
+    prevSelectedIndex = index;
+    prevSelectedKey = selectedKey;
+
+    if (
+      !isInitialLayout &&
+      !viewportResized &&
+      !selectionChanged &&
+      !pendingLayoutScroll
+    ) {
+      return;
+    }
+
     const target = scrollTarget(
-      props.items,
+      items,
       index,
       scrollboxRef.scrollTop,
       viewportHeight,
       sessionLines,
     );
-    if (target !== null) {
-      scrollboxRef.scrollTo(target);
+    if (target === null) {
+      pendingLayoutScroll = false;
+    } else {
+      programmaticScrolling = true;
+      try {
+        scrollboxRef.scrollTo(target);
+      } finally {
+        programmaticScrolling = false;
+      }
+      pendingLayoutScroll = contentHeight < target + viewportHeight;
     }
   });
 
@@ -382,31 +499,38 @@ export const SessionList: Component<SessionListProps> = (props) => {
     };
   };
 
-  const renderItem = (item: FlatItem, index: number) => {
+  const renderItem = (item: FlatItem, index: Accessor<number>) => {
     const onActivate = props.onActivate
-      ? () => props.onActivate!(item, index)
+      ? () => {
+          suppressSelectionScroll = true;
+          try {
+            props.onActivate!(item, index());
+          } finally {
+            suppressSelectionScroll = false;
+          }
+        }
       : undefined;
     const onContextMenu = props.onContextMenu
-      ? (event: MouseEvent) => props.onContextMenu!(item, index, event)
+      ? (event: MouseEvent) => props.onContextMenu!(item, index(), event)
       : undefined;
 
     if (item.type === "header") {
       return (
         <>
-          {index > 0 && (
+          <Show when={index() > 0}>
             <box height={1} paddingLeft={1} paddingRight={1}>
               <Text fg={theme.border}>
                 {"─".repeat(Math.max(0, effectiveWidth() - 5))}
               </Text>
             </box>
-          )}
+          </Show>
           <GroupHeader
             label={item.label}
             count={item.count}
             width={effectiveWidth() - 3}
             facts={groupWorktreeFacts(item, worktreeRepos())}
             collapsed={item.collapsed}
-            selected={index === props.selectedIndex}
+            selected={index() === props.selectedIndex}
             members={item.members}
             iconStyle={props.iconStyle}
             dimmed={props.dimmed}
@@ -419,8 +543,8 @@ export const SessionList: Component<SessionListProps> = (props) => {
     return (
       <SessionItem
         session={item.filteredSession.session}
-        selected={index === props.selectedIndex}
-        index={getSessionIndex(props.items, index)}
+        selected={index() === props.selectedIndex}
+        index={getSessionIndex(props.items, index())}
         highlights={item.filteredSession.highlights}
         transcriptSnippet={
           item.filteredSession.transcriptMatch
@@ -479,11 +603,31 @@ export const SessionList: Component<SessionListProps> = (props) => {
         <scrollbox
           ref={(r: ScrollBoxRenderable) => {
             scrollboxRef = r;
+            // Disable drag-edge auto-scrolling so a mid-click tmux window switch
+            // (which steals focus before MouseUp reaches this pane) can never
+            // leave an 80-Hz runaway scroll timer running to the bottom.
+            const autoScrollFields = r as unknown as {
+              autoScrollThresholdVertical: number;
+              autoScrollThresholdHorizontal: number;
+            };
+            autoScrollFields.autoScrollThresholdVertical = -1;
+            autoScrollFields.autoScrollThresholdHorizontal = -1;
+            initialScrollDone = false;
+            prevViewportHeight = 0;
+            pendingLayoutScroll = false;
             // Handed up here rather than on mount: with no rows there is no
             // scrollbox at all (see the fallback above), and a resolver
             // published before it existed would answer null for the list's
             // whole life.
             props.onRowAnchor?.(rowAnchor);
+            props.onScrollTopReader?.(() => r.scrollTop);
+            r.verticalScrollBar.on("change", () => {
+              props.onScrollMoved?.(r.scrollTop);
+              if (!programmaticScrolling) {
+                pendingLayoutScroll = false;
+                props.onUserScroll?.(r.scrollTop);
+              }
+            });
             // The root's resize fires before its children are measured, so
             // listen on the two nodes whose sizes the scroll effect reads.
             const bump = () => setScrollboxLayout((v) => v + 1);
@@ -493,7 +637,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
           flexGrow={1}
         >
           <For each={props.items}>
-            {(item, index) => renderItem(item, index())}
+            {(item, index) => renderItem(item, index)}
           </For>
         </scrollbox>
       </Show>

@@ -755,6 +755,187 @@ describe("SessionList", () => {
     expect(frame).not.toContain("filler-0");
   });
 
+  it("preserves manual wheel scroll across SSE item updates when selected session does not change", async () => {
+    const buildItems = (promptSuffix: string): FlatItem[] => [
+      makeHeader("proj", 12),
+      ...Array.from({ length: 12 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: i === 11 ? "/code/target-end" : `/code/filler-${i}`,
+          lastPrompt: `prompt ${i} ${promptSuffix}`,
+        }),
+      ),
+    ];
+    const [items, setItems] = createSignal(buildItems("v1"));
+    const [selectedIndex, setSelectedIndex] = createSignal(12);
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items()}
+            selectedIndex={selectedIndex()}
+            previewWidth={30}
+            promptDisplay="row2"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBeGreaterThan(0);
+
+    // User scrolls up to the top with mouse wheel while s11 remains selected
+    box!.scrollTo(0);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("filler-0");
+
+    // SSE session_updated arrives (new items array, same selected session s11)
+    setItems(buildItems("v2"));
+    await setup.renderOnce();
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("filler-0");
+
+    // Explicit selection change to s10 DOES scroll it into view
+    setSelectedIndex(11);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("updates index-dependent props reactively when an earlier item is inserted without recreating existing FlatItems", async () => {
+    const s1 = makeSessionItem("s1", "proj", { cwd: "/code/one" });
+    const s2 = makeSessionItem("s2", "proj", { cwd: "/code/two" });
+    const [items, setItems] = createSignal<FlatItem[]>([s1, s2]);
+    const calls: Array<{ id: string; index: number }> = [];
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items()}
+            selectedIndex={0}
+            previewWidth={30}
+            onActivate={(item, index) => {
+              if (item.type === "session") {
+                calls.push({ id: item.filteredSession.session.id, index });
+              }
+            }}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 20 },
+    );
+    await setup.renderOnce();
+
+    // Insert s0 before s1 while keeping s1 and s2 FlatItem references intact
+    const s0 = makeSessionItem("s0", "proj", { cwd: "/code/zero" });
+    setItems([s0, s1, s2]);
+    await setup.renderOnce();
+
+    // Click s1 (now at row 1): index passed to onActivate must be 1, not stale 0
+    await setup.mockMouse.click(3, 1);
+    expect(calls).toEqual([{ id: "s1", index: 1 }]);
+  });
+
+  it("applies synced scrollTop verbatim and disables drag auto-scroll on scrollbox", async () => {
+    const items: FlatItem[] = [
+      makeHeader("proj", 20),
+      ...Array.from({ length: 20 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: `/code/item-${i}`,
+          lastPrompt: `prompt ${i}`,
+        }),
+      ),
+    ];
+    const [scrollSync, setScrollSync] = createSignal<{
+      top: number;
+      generation: number;
+    } | null>({ top: 7, generation: 1 });
+    const userScrolls: number[] = [];
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={5}
+            previewWidth={30}
+            promptDisplay="row2"
+            scrollSync={scrollSync()}
+            onUserScroll={(top) => userScrolls.push(top)}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    // Exact scrollTop=7 applied instead of scrollTarget's minimum scroll
+    expect(box!.scrollTop).toBe(7);
+    // Drag auto-scroll disabled so mid-click window switches cannot runaway scroll
+    expect(
+      (box as unknown as { autoScrollThresholdVertical: number })
+        .autoScrollThresholdVertical,
+    ).toBe(-1);
+    // Programmatic sync must not echo back through onUserScroll
+    expect(userScrolls).toEqual([]);
+
+    // Updating scrollSync generation moves scrollTop verbatim again
+    setScrollSync({ top: 3, generation: 2 });
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(3);
+    expect(userScrolls).toEqual([]);
+  });
+
+  it("clears suppressSelectionScroll after clicking an already-selected row so subsequent keyboard navigation scrolls", async () => {
+    const items: FlatItem[] = [
+      makeHeader("proj", 14),
+      ...Array.from({ length: 14 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: `/code/item-${i}`,
+          lastPrompt: `prompt ${i}`,
+        }),
+      ),
+    ];
+    const [selectedIndex, setSelectedIndex] = createSignal(1);
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={selectedIndex()}
+            previewWidth={30}
+            promptDisplay="row2"
+            onActivate={(_item, idx) => {
+              // Clicking row 1 when selectedIndex is already 1 is a reactive no-op
+              setSelectedIndex(idx);
+            }}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 10 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+
+    // Click already-selected row 1 (y=1 right below header)
+    await setup.mockMouse.click(3, 1);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+
+    // Next programmatic/keyboard jump to off-screen row 13 MUST scroll into view
+    setSelectedIndex(13);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBeGreaterThan(0);
+  });
+
   it("routes clicks to onActivate with the right item and index", async () => {
     const items: FlatItem[] = [
       makeHeader("proj", 2),
@@ -852,6 +1033,47 @@ describe("SessionList", () => {
     expect(group1Line).toBeGreaterThanOrEqual(0);
     expect(separatorLine).toBeGreaterThan(group1Line);
     expect(group2Line).toBeGreaterThan(separatorLine);
+  });
+
+  it("recalculates scroll target when row layout grows so selected row stays in view", async () => {
+    const items: FlatItem[] = Array.from({ length: 10 }, (_, i) =>
+      makeSessionItem(`s${i}`, "g", {
+        cwd: `/Users/test/Code/proj-${i}`,
+        lastPrompt: `prompt-${i}`,
+      }),
+    );
+    const [promptDisplay, setPromptDisplay] = createSignal<"off" | "row2">(
+      "off",
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items}
+            selectedIndex={9}
+            previewWidth={0}
+            promptDisplay={promptDisplay()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("proj-9");
+
+    // Enabling row2 doubles each session row height (10 -> 20 lines in a 12-line
+    // viewport), pushing selected row 9 below the fold unless scroll recalculates.
+    setPromptDisplay("row2");
+    await setup.renderOnce();
+    await setup.renderOnce();
+
+    expect(box!.scrollTop).toBe(8);
+    expect(setup.captureCharFrame()).toContain("proj-9");
+    expect(setup.captureCharFrame()).toContain("prompt-9");
   });
 });
 

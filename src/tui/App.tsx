@@ -329,6 +329,16 @@ export function App(props: AppProps) {
     lastSpawnAgent: props.lastSpawnAgent,
   });
   markStartup("store_created");
+  let readSidebarScrollTop: (() => number) | null = null;
+  let suppressFlashOnce = false;
+  function withoutPaneFlash(fn: () => void): void {
+    suppressFlashOnce = true;
+    try {
+      fn();
+    } finally {
+      suppressFlashOnce = false;
+    }
+  }
 
   /** Guard a tmux-targeting action: toast and return false when the pane is on
    *  a different server, so we refuse rather than hit the wrong pane. Reads the
@@ -376,9 +386,8 @@ export function App(props: AppProps) {
         flashPane(pane);
         return;
       }
-      flashPaneDetached(pane);
-      // The daemon call is a fetch; exiting first would kill it in flight.
-      await notified;
+      // The daemon call and pane check are async; exiting first would kill them in flight.
+      await Promise.all([notified, Promise.resolve(flashPaneDetached(pane))]);
       process.exit(0);
     });
   }
@@ -386,6 +395,18 @@ export function App(props: AppProps) {
   function activateItem(item: FlatItem) {
     if (item.type === "header") {
       store.actions.toggleGroupCollapse(item.groupKey);
+      if (props.sidebar) {
+        void store.flushSidebarStateNow();
+      }
+      return;
+    }
+    if (props.sidebar) {
+      // Flush selection + current scrollTop to the daemon BEFORE switching
+      // windows so the destination sidebar renders the exact same viewport
+      // offset without a post-switch jump.
+      void store
+        .flushSidebarStateNow(readSidebarScrollTop?.())
+        .finally(() => activateSession(item.filteredSession.session));
       return;
     }
     activateSession(item.filteredSession.session);
@@ -1173,7 +1194,7 @@ export function App(props: AppProps) {
       store.actions.hideGroupContextMenu();
       return;
     }
-    store.actions.setSelectedIndex(index);
+    withoutPaneFlash(() => store.actions.selectFlatItem(item, index));
     // A click while aiming a handoff picks that row, the same as Enter on it.
     // The alternative is the ordinary activation, which in the one-shot picker
     // switches panes and EXITS, losing both the pick and the surface it was
@@ -1264,7 +1285,7 @@ export function App(props: AppProps) {
     if (modalOverlayOpen() || store.state.handoffPick) {
       return;
     }
-    store.actions.setSelectedIndex(index);
+    store.actions.selectFlatItem(item, index);
     openRowMenu(item, event.x, event.y, false);
   }
 
@@ -3283,25 +3304,39 @@ export function App(props: AppProps) {
   const isVisible = (): boolean => visibility?.visible() ?? true;
 
   let sseClient: SSEClient | null = null;
+  let hydrationAbort: AbortController | null = null;
   let previewScrollbox: ScrollBoxRenderable | undefined;
   let helpScrollbox: ScrollBoxRenderable | undefined;
   const [previewRefreshKey, setPreviewRefreshKey] = createSignal(0);
   const [initialDataReceived, setInitialDataReceived] = createSignal(false);
 
   onMount(() => {
+    let hydratedFromSidebarState = false;
+    let initialInitHandled = false;
+
     sseClient = new SSEClient({
       onInit: (sessions, activePaneId, invocations) => {
         markStartup("first_data");
         reportStartup();
-        store.actions.setSessions(sessions);
-        if (activePaneId) {
+        withoutPaneFlash(() => {
+          store.actions.setSessions(sessions);
+          const active = activePaneId
+            ? sessions.find((s) => s.tmuxPane === activePaneId)
+            : undefined;
           store.actions.setActivePaneId(activePaneId);
-          const active = sessions.find((s) => s.tmuxPane === activePaneId);
-          if (active) {
-            store.actions.setActiveSessionId(active.id);
-            store.actions.setSelectedSessionId(active.id);
+          store.actions.setActiveSessionId(active?.id ?? null);
+          if (
+            active &&
+            !initialInitHandled &&
+            !hydratedFromSidebarState &&
+            !store.hasLocalSidebarActivity() &&
+            store.state.selectedSessionId === null &&
+            store.selectedHeaderKey() === null
+          ) {
+            store.actions.applySidebarSelection(active.id, null);
           }
-        }
+          initialInitHandled = true;
+        });
         setInitialDataReceived(true);
         // Reconcile invoke state against the daemon's init snapshot on every
         // (re)connect. SSE has no replay, so an `invocation_finished` missed
@@ -3340,19 +3375,44 @@ export function App(props: AppProps) {
         if (state === "connected") refreshServerInfo();
       },
       onActivePane: (sessionId, paneId) => {
+        const wasHidden = visibility ? !visibility.visible() : false;
         store.actions.setActivePaneId(paneId);
         store.actions.setActiveSessionId(sessionId);
+        // Sync off-screen sidebars' cursor to the newly focused session so
+        // switching tmux sessions/windows highlights and scrolls to the active
+        // session on arrival, while leaving a visible sidebar's cursor (or an
+        // already click-synced selection + scrollTop) alone.
+        if (
+          wasHidden &&
+          sessionId &&
+          store.state.selectedSessionId !== sessionId
+        ) {
+          hydratedFromSidebarState = true;
+          withoutPaneFlash(() =>
+            store.actions.applySidebarSelection(sessionId, null),
+          );
+        }
         // The daemon broadcasts this on every pane/window switch, which is
         // also every moment a sidebar can become visible or hidden. Debounced
         // inside the primitive.
         visibility?.refresh();
       },
-      onSidebarState: (selectedSessionId, selectedHeaderKey, version) => {
+      onSidebarState: (
+        selectedSessionId,
+        selectedHeaderKey,
+        version,
+        senderId,
+        scrollTop,
+      ) => {
         // Ignore echo-back of our own broadcasts (stale version)
-        if (!store.isSidebarVersionNewer(version)) return;
-        store.actions.applySidebarSelection(
-          selectedSessionId,
-          selectedHeaderKey,
+        if (!store.isSidebarVersionNewer(version, senderId)) return;
+        hydratedFromSidebarState = true;
+        withoutPaneFlash(() =>
+          store.actions.applySidebarSelection(
+            selectedSessionId,
+            selectedHeaderKey,
+            scrollTop,
+          ),
         );
       },
       onError: (error) => {
@@ -3369,9 +3429,16 @@ export function App(props: AppProps) {
     // Hydrate sidebar selection from daemon so new instances sync with existing ones.
     // Skip if the daemon has nothing to share so we don't clobber the active-pane default.
     if (props.sidebar) {
-      fetch(`${getDaemonUrl()}/sidebar-state`)
-        .then((r) => r.json() as Promise<Record<string, unknown>>)
+      hydrationAbort = new AbortController();
+      const abortSignal = hydrationAbort.signal;
+      fetch(`${getDaemonUrl()}/sidebar-state`, {
+        signal: AbortSignal.any([abortSignal, AbortSignal.timeout(500)]),
+      })
+        .then((r) =>
+          r.ok ? (r.json() as Promise<Record<string, unknown>>) : null,
+        )
         .then((data) => {
+          if (!data || abortSignal.aborted) return;
           const sessionId =
             typeof data.selectedSessionId === "string"
               ? data.selectedSessionId
@@ -3380,8 +3447,29 @@ export function App(props: AppProps) {
             typeof data.selectedHeaderKey === "string"
               ? data.selectedHeaderKey
               : null;
-          if (sessionId === null && headerKey === null) return;
-          store.actions.applySidebarSelection(sessionId, headerKey);
+          const scrollTop =
+            typeof data.scrollTop === "number" &&
+            Number.isFinite(data.scrollTop)
+              ? data.scrollTop
+              : undefined;
+          if (
+            sessionId === null &&
+            headerKey === null &&
+            scrollTop === undefined
+          ) {
+            return;
+          }
+          if (hydratedFromSidebarState || store.hasLocalSidebarActivity()) {
+            return;
+          }
+          hydratedFromSidebarState = true;
+          withoutPaneFlash(() =>
+            store.actions.applySidebarSelection(
+              sessionId,
+              headerKey,
+              scrollTop,
+            ),
+          );
         })
         .catch(() => {});
     }
@@ -3404,7 +3492,7 @@ export function App(props: AppProps) {
     });
     createEffect(() => {
       const pane = selectedPaneId();
-      if (!pane) return;
+      if (!pane || suppressFlashOnce) return;
       flasher.schedule(pane);
     });
     onCleanup(() => flasher.cancel());
@@ -3544,6 +3632,7 @@ export function App(props: AppProps) {
   }
 
   onCleanup(() => {
+    hydrationAbort?.abort();
     sseClient?.disconnect();
     if (tickTimerId) untrackInterval(tickTimerId);
     stopPerfReporter();
@@ -4209,6 +4298,20 @@ export function App(props: AppProps) {
             onActivate={handleRowActivate}
             onContextMenu={handleRowContextMenu}
             onRowAnchor={(resolve) => (rowAnchor = resolve)}
+            scrollSync={store.scrollSync()}
+            onScrollMoved={
+              props.sidebar
+                ? (top) => store.actions.setLocalScrollTop(top)
+                : undefined
+            }
+            onUserScroll={
+              props.sidebar
+                ? (top) => store.actions.syncSidebarScroll(top)
+                : undefined
+            }
+            onScrollTopReader={(fn) => {
+              readSidebarScrollTop = fn;
+            }}
           />
           <Show when={!props.sidebar && store.state.showPreview}>
             <Show
