@@ -453,19 +453,31 @@ export function makeExtension({
 
     // Compaction and auto-retry are activity the approval-era marker missed
     // most visibly: a session running auto-compaction after a turn read as
-    // `idle` while it was busy and not ready for input. omp names a start
-    // and an end event for each shape (manual `/compact` pairs
-    // manual_compaction_* with session_compact, auto-compaction pairs
-    // auto_compaction_* with it), so subscribe to every start and every end
-    // and let the named-reason set make the overlap idempotent.
-    // `session.compacting` is hasHandlers-gated: it fires only because this
-    // extension subscribes, and omp reads only the optional
-    // `context`/`prompt`/`preserveData` off the handler's return, so the
-    // queued marker write we return is inert. The end events are paired on
-    // every path (aborts included), so they are trusted to deliver idle;
-    // the reconcile timer heals only a lost `turn`.
+    // `idle` while it was busy and not ready for input. Only events omp's
+    // lifecycle mirror actually forwards to extensions may be subscribed,
+    // and only in reliably paired shapes:
     //
-    // Deliberately NOT subscribed: `session_before_compact`. omp skips its
+    // - `auto_compaction_start` / `auto_compaction_end` are mirrored, and
+    //   the end is emitted on every outcome (abort, failure, skip), so the
+    //   auto path is tracked start to finish.
+    // - `session_compact` fires when a compaction is saved. Subscribing to
+    //   the end alone is harmless and finishes any start we saw.
+    //
+    // Deliberately NOT subscribed: `session.compacting` and the
+    // `manual_compaction_*` pair. In omp 19.0.1 the mirror swallows the
+    // manual pair (its forwarders are literally `async () => {}`), and
+    // `session.compacting` fires from the prep path before the summarizer
+    // even on compactions that fail or get cancelled, while
+    // `session_compact` fires only on save. None of them has an
+    // extension-visible end when a compaction does not commit, so starting
+    // from them pins the row at `working` until a later successful
+    // compaction, a rebind, or shutdown. A manual `/compact` therefore
+    // reads at its pre-command state; the trade is accepted because a
+    // stuck row suppresses finish notifications and blocks queued
+    // handoffs, while a running `/compact` is user-initiated and
+    // self-evident.
+    //
+    // Also NOT subscribed: `session_before_compact`. omp skips its
     // speculative and mid-turn compaction entirely when an extension
     // registers that hook, and ccmux must not cost users background
     // compaction just to observe it.
@@ -480,18 +492,8 @@ export function makeExtension({
       return endActivity(sessionId, reason);
     };
 
-    for (const name of [
-      "session.compacting",
-      "auto_compaction_start",
-      "manual_compaction_start",
-    ]) {
-      omp.on(name, trackActivity("compaction"));
-    }
-    for (const name of [
-      "session_compact",
-      "auto_compaction_end",
-      "manual_compaction_end",
-    ]) {
+    omp.on("auto_compaction_start", trackActivity("compaction"));
+    for (const name of ["session_compact", "auto_compaction_end"]) {
       omp.on(name, untrackActivity("compaction"));
     }
     omp.on("auto_retry_start", trackActivity("retry"));

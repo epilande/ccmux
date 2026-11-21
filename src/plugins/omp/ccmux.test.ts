@@ -658,19 +658,14 @@ describe("omp ccmux extension", () => {
   });
 
   describe("compaction and retry activity", () => {
-    it("tracks a manual compaction as working until it ends", async () => {
+    it("treats a save-only session_compact as a harmless end without a start", async () => {
       const fire = startExtension();
 
       await fire("session_start");
-      await fire("manual_compaction_start");
-      expect(readMarker("S1").state).toBe("working");
-
-      // The start shapes overlap (session.compacting fires from the shared
-      // foreground path); the named reason keeps that idempotent.
-      await fire("session.compacting");
-      expect(readMarker("S1").state).toBe("working");
-
-      await fire("manual_compaction_end");
+      // omp 19.0.1's mirror never forwards a manual compaction's start, so
+      // a saved manual `/compact` can arrive as this end-only event; it
+      // must not lift an idle row.
+      await fire("session_compact");
       expect(readMarker("S1").state).toBe("idle");
     });
 
@@ -769,25 +764,34 @@ describe("omp ccmux extension", () => {
       expect(existsSync(markerPath("S1"))).toBe(false);
     });
 
-    it("subscribes to the compaction and retry pairs, but not session_before_compact", () => {
+    it("subscribes only to the mirrored, reliably paired activity events", () => {
       const events = registeredEvents();
 
       for (const name of [
-        "session.compacting",
         "auto_compaction_start",
-        "manual_compaction_start",
         "session_compact",
         "auto_compaction_end",
-        "manual_compaction_end",
         "auto_retry_start",
         "auto_retry_end",
       ]) {
         expect(events).toContain(name);
       }
-      // omp skips speculative and mid-turn compaction when an extension
-      // registers that hook; observing it would cost users background
-      // compaction.
-      expect(events).not.toContain("session_before_compact");
+      // Every unsubscribed name here starts an activity the event model
+      // cannot reliably end: omp 19.0.1's lifecycle mirror swallows
+      // manual_compaction_*, `session.compacting` fires before the
+      // summarizer even on failed or cancelled compactions, and
+      // `session_compact` fires only on save, so none of them has an
+      // extension-visible end when a compaction does not commit.
+      // `session_before_compact` additionally disables omp's speculative
+      // and mid-turn compaction when any extension registers it.
+      for (const name of [
+        "session.compacting",
+        "manual_compaction_start",
+        "manual_compaction_end",
+        "session_before_compact",
+      ]) {
+        expect(events).not.toContain(name);
+      }
     });
   });
 
