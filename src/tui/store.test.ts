@@ -9,13 +9,15 @@ import {
 } from "bun:test";
 import { createRoot } from "solid-js";
 import {
-  getGroupKey,
+  groupKeyOf,
   NEEDS_YOU_GROUP_KEY,
   SESSIONS_GROUP_KEY,
   type FlatItem,
+  type GroupLayouts,
 } from "./utils/grouping";
 import { mockEnrichedSession } from "./components/test-helpers";
 import { MAX_TURNS } from "../daemon/transcript-read";
+import { mergedToast, resetToast } from "./utils/group-copy";
 
 // capturePane is mocked (process-wide, per Bun's mock.module) so the
 // searchPaneLines tests can assert what the store passes it, without
@@ -1095,7 +1097,7 @@ describe("store", () => {
               cwd: "/code/alpha",
               tmuxTarget: "dev:1.0",
             });
-            const groupKey = getGroupKey(waiting, groupBy);
+            const groupKey = groupKeyOf(waiting, groupBy, {});
             const store = createTUIStore({
               groupBy,
               collapsedGroups: [groupKey, "untouched"],
@@ -2603,8 +2605,8 @@ describe("store", () => {
         tmuxTarget: "beta:0.0",
         status: "waiting",
       });
-      const alphaKey = getGroupKey(alpha, groupBy);
-      const betaKey = getGroupKey(beta, groupBy);
+      const alphaKey = groupKeyOf(alpha, groupBy, {});
+      const betaKey = groupKeyOf(beta, groupBy, {});
 
       it(`preserves an all-waiting ${groupBy} group across persistence and reload`, async () => {
         let saved: string[] | undefined;
@@ -2796,7 +2798,7 @@ describe("store", () => {
         );
         store.actions.setSessions(sessions.map((s) => ({ ...s })));
         store.actions.setSelectedSessionId("beta");
-        const keys = sessions.map((s) => getGroupKey(s, groupBy));
+        const keys = sessions.map((s) => groupKeyOf(s, groupBy, {}));
         store.actions.moveGroupDown(keys[1]!, "beta");
         expect(store.pinnedGroups()).toEqual([keys[0], keys[2], keys[1]]);
         expect(store.selectedSession()?.id).toBe("beta");
@@ -5311,5 +5313,1147 @@ describe("attention band off", () => {
     expect(store.collapsedGroups().has("alpha")).toBe(true);
     expect(store.state.selectedSessionId).toBe("w");
     expect(persisted.some((u) => "collapsedGroups" in u)).toBe(false);
+  });
+});
+
+describe("group rename and merge (#42)", () => {
+  type Header = Extract<FlatItem, { type: "header" }>;
+  const headersOf = (items: FlatItem[]) =>
+    items.filter((i): i is Header => i.type === "header");
+
+  /** A store over alpha, beta and gamma project groups, recording writes. */
+  function setup(options: Parameters<typeof createTUIStore>[0] = {}) {
+    const writes: Record<string, unknown>[] = [];
+    const store = createTUIStore({
+      groupBy: "project",
+      onPersistState: (updates) => {
+        writes.push(updates as Record<string, unknown>);
+      },
+      ...options,
+    });
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha" }),
+      createMockSession({ id: "b", project: "beta" }),
+      createMockSession({ id: "g", project: "gamma" }),
+    ]);
+    return { store, writes };
+  }
+
+  /** Put the cursor on a header (by key) or a session row (by id). */
+  function select(store: ReturnType<typeof createTUIStore>, target: string) {
+    const index = store
+      .flatItems()
+      .findIndex((i) =>
+        i.type === "header"
+          ? i.groupKey === target
+          : i.filteredSession.session.id === target,
+      );
+    expect(index).toBeGreaterThanOrEqual(0);
+    store.actions.setSelectedIndex(index);
+  }
+
+  it("renames a group, and the alias is what the header shows", () => {
+    const { store } = setup();
+    store.actions.renameGroup("beta", "Backend");
+    const backend = headersOf(store.flatItems()).find(
+      (h) => h.groupKey === "Backend",
+    )!;
+    expect(backend.label).toBe("Backend");
+    expect(backend.rawKeys).toEqual(["beta"]);
+    expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+  });
+
+  it("writes the whole groupAliases object, in one immediate write with the layout", () => {
+    const { store, writes } = setup({
+      groupAliases: { session: { dev: "Development" } },
+      pinnedGroups: ["beta"],
+    });
+    store.actions.renameGroup("beta", "Backend");
+    // Not debounced: a second instance reads the rename at once, and the
+    // aliases, pins and collapse land together so it never sees half.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toEqual({
+      groupAliases: {
+        session: { dev: "Development" },
+        project: { beta: "Backend" },
+      },
+      // A plain rename records no layout to restore: the layout moved with it.
+      groupLayouts: {},
+      pinnedGroups: ["Backend"],
+      collapsedGroups: [],
+    });
+  });
+
+  it("merges into an existing name, and the target's layout wins", () => {
+    const { store, writes } = setup({
+      pinnedGroups: ["beta", "gamma"],
+      collapsedGroups: ["beta"],
+    });
+    store.actions.renameGroup("beta", "alpha");
+    const headers = headersOf(store.flatItems());
+    expect(headers.map((h) => h.groupKey)).toEqual(["gamma", "alpha"]);
+    const alpha = headers.find((h) => h.groupKey === "alpha")!;
+    expect(alpha.rawKeys).toEqual(["alpha", "beta"]);
+    expect(alpha.members.map((m) => m.session.id)).toEqual(["a", "b"]);
+    // alpha was neither pinned nor collapsed, so the merged group is neither.
+    expect(store.pinnedGroups()).toEqual(["gamma"]);
+    expect(store.collapsedGroups().has("alpha")).toBe(false);
+    expect(writes.at(-1)).toMatchObject({
+      pinnedGroups: ["gamma"],
+      collapsedGroups: [],
+    });
+  });
+
+  it("never duplicates a pin when both sides of a merge were pinned", () => {
+    const { store } = setup({ pinnedGroups: ["beta", "alpha"] });
+    store.actions.renameGroup("beta", "alpha");
+    expect(store.pinnedGroups()).toEqual(["alpha"]);
+  });
+
+  it("keeps the target's collapse on a merge", () => {
+    const { store } = setup({ collapsedGroups: ["alpha"] });
+    store.actions.renameGroup("beta", "alpha");
+    expect(store.collapsedGroups().has("alpha")).toBe(true);
+    expect(store.collapsedGroups().has("beta")).toBe(false);
+  });
+
+  it("carries pin position and collapse to a brand-new name", () => {
+    const { store } = setup({
+      pinnedGroups: ["gamma", "beta"],
+      collapsedGroups: ["beta"],
+    });
+    store.actions.renameGroup("beta", "Zed");
+    expect(store.pinnedGroups()).toEqual(["gamma", "Zed"]);
+    expect(store.collapsedGroups().has("Zed")).toBe(true);
+    expect(store.collapsedGroups().has("beta")).toBe(false);
+  });
+
+  it("moves the header selection with the rename", () => {
+    const { store } = setup();
+    select(store, "beta");
+    store.actions.renameGroup("beta", "Backend");
+    expect(store.selectedHeaderKey()).toBe("Backend");
+    expect(store.selectedGroupHeader()?.groupKey).toBe("Backend");
+  });
+
+  it("follows a header selected only by the first-row fallback", () => {
+    const { store } = setup();
+    // No explicit selection: the cursor is on the first header, alpha.
+    expect(store.selectedGroupHeader()?.groupKey).toBe("alpha");
+    store.actions.renameGroup("alpha", "Zed");
+    // Zed now sorts last; the cursor goes with it rather than staying on
+    // whatever took row 0.
+    expect(store.selectedGroupHeader()?.groupKey).toBe("Zed");
+  });
+
+  describe("cwd grouping, whose labels are home-shortened", () => {
+    const home = process.env.HOME ?? "/home/user";
+    const alpha = `${home}/Code/alpha`;
+    const beta = `${home}/Code/beta`;
+
+    function cwdSetup(sessions: { id: string; paneCwd: string }[]) {
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "cwd",
+        collapsedGroups: [sessions[1]!.paneCwd],
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+      });
+      store.actions.setSessions(
+        sessions.map((s) => createMockSession({ ...s, project: "p" })),
+      );
+      return { store, writes };
+    }
+
+    it("merges into a group named by its displayed label", () => {
+      const { store } = cwdSetup([
+        { id: "a", paneCwd: alpha },
+        { id: "b", paneCwd: beta },
+      ]);
+      const target = headersOf(store.flatItems()).find(
+        (h) => h.groupKey === beta,
+      )!;
+      expect(target.label).not.toBe(beta);
+      store.actions.renameGroup(alpha, target.label);
+      const headers = headersOf(store.flatItems());
+      expect(headers).toHaveLength(1);
+      expect(headers[0]!.groupKey).toBe(beta);
+      expect(headers[0]!.rawKeys).toEqual([alpha, beta]);
+      // The target's layout wins, as in any merge.
+      expect(store.collapsedGroups().has(beta)).toBe(true);
+      expect(store.groupAliases()).toEqual({ cwd: { [alpha]: beta } });
+      // The toast names the group the way its header does, and the undo,
+      // fitted to whatever columns the toast has.
+      expect(store.toastFit()?.(36)).toBe(mergedToast(target.label, 36));
+      expect(store.toastFit()?.(28)).toBe(mergedToast(target.label, 28));
+      expect(store.state.toastMessage).toBe(mergedToast(target.label, 36));
+    });
+
+    it("keeps the toast to one line for a long name", () => {
+      const { store } = cwdSetup([
+        { id: "a", paneCwd: alpha },
+        { id: "b", paneCwd: beta },
+      ]);
+      store.actions.renameGroup(alpha, "x".repeat(60));
+      // The toast's box is 40 columns, 36 inside its border and padding.
+      expect(store.state.toastMessage!.length).toBeLessThanOrEqual(36);
+      expect(store.toastFit()?.(30)?.length).toBeLessThanOrEqual(30);
+    });
+
+    it("merges from the prompt into a group named by its full path past the name cap", () => {
+      const deep = (leaf: string) =>
+        `/srv/${"nested-directory/".repeat(5)}${leaf}`;
+      const { store } = cwdSetup([
+        { id: "a", paneCwd: deep("alpha") },
+        { id: "b", paneCwd: deep("beta") },
+      ]);
+      expect(deep("beta").length).toBeGreaterThan(64);
+      store.actions.openRenamePrompt(deep("alpha"));
+      store.actions.setPaletteQuery(deep("beta"));
+      store.actions.commitRenamePrompt();
+      const headers = headersOf(store.flatItems());
+      expect(headers).toHaveLength(1);
+      expect(headers[0]!.rawKeys).toEqual([deep("alpha"), deep("beta")]);
+      // The merge survives a reload of what was written.
+      store.actions.reloadUIState({ groupAliases: {} });
+      store.actions.reloadUIState({
+        groupAliases: { cwd: { [deep("alpha")]: deep("beta") } },
+      });
+      expect(headersOf(store.flatItems())).toHaveLength(1);
+    });
+  });
+
+  it("rewrites every member's entry when a merged group is renamed", () => {
+    const { store } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    store.actions.renameGroup("X", "Y");
+    expect(store.groupAliases()).toEqual({
+      project: { alpha: "Y", beta: "Y" },
+    });
+  });
+
+  it("deletes an alias renamed back to its raw key", () => {
+    const { store } = setup({ groupAliases: { project: { beta: "B" } } });
+    store.actions.renameGroup("B", "beta");
+    expect(store.groupAliases()).toEqual({});
+    expect(
+      headersOf(store.flatItems()).find((h) => h.groupKey === "beta")?.rawKeys,
+    ).toEqual(["beta"]);
+  });
+
+  it("renames a merged group to one member's raw key without aliasing that key to itself", () => {
+    const { store } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    store.actions.renameGroup("X", "alpha");
+    expect(store.groupAliases()).toEqual({ project: { beta: "alpha" } });
+  });
+
+  it("sanitizes the name before it becomes a key", () => {
+    const { store } = setup();
+    store.actions.renameGroup("beta", "  Back\x1b[31mend\0  ");
+    expect(store.groupAliases()).toEqual({ project: { beta: "Back[31mend" } });
+  });
+
+  it("does nothing for an empty name, a synthetic header, or no grouping", () => {
+    const { store, writes } = setup();
+    store.actions.renameGroup("beta", "   ");
+    store.actions.renameGroup(NEEDS_YOU_GROUP_KEY, "x");
+    store.actions.renameGroup(SESSIONS_GROUP_KEY, "x");
+    expect(store.groupAliases()).toEqual({});
+    store.actions.setGroupBy("none");
+    writes.length = 0;
+    store.actions.renameGroup("", "x");
+    expect(store.groupAliases()).toEqual({});
+    expect(writes).toEqual([]);
+  });
+
+  it("resets a merge with no recorded layouts by copying the group's layout to each", () => {
+    // Aliases saved before layouts were recorded: every key carried the
+    // group's layout here, so each takes it back.
+    const { store, writes } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+      pinnedGroups: ["gamma", "X"],
+      collapsedGroups: ["X"],
+    });
+    select(store, "X");
+    store.actions.resetGroupName("X");
+    expect(store.groupAliases()).toEqual({});
+    expect(headersOf(store.flatItems()).map((h) => h.groupKey)).toEqual([
+      "gamma",
+      "alpha",
+      "beta",
+    ]);
+    expect(store.pinnedGroups()).toEqual(["gamma", "alpha", "beta"]);
+    expect(store.collapsedGroups()).toEqual(new Set(["alpha", "beta"]));
+    expect(store.selectedHeaderKey()).toBe("alpha");
+    expect(store.state.toastMessage).toBe("Reset: alpha, beta");
+    expect(store.toastFit()?.(36)).toBe(resetToast(["alpha", "beta"], 36));
+    expect(writes.at(-1)).toEqual({
+      groupAliases: {},
+      groupLayouts: {},
+      pinnedGroups: ["gamma", "alpha", "beta"],
+      collapsedGroups: ["alpha", "beta"],
+    });
+  });
+
+  describe("reset restores each source's own layout", () => {
+    /** ccmux, dotfiles and x, with dotfiles pinned to the top and ccmux
+     *  pinned to the bottom (which pins everything above it) and collapsed:
+     *  the layout TUI Test merged dotfiles out of. */
+    function pinnedSetup(options: Parameters<typeof createTUIStore>[0] = {}) {
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["dotfiles", "x", "ccmux"],
+        collapsedGroups: ["ccmux"],
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+        ...options,
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "c", project: "ccmux" }),
+        createMockSession({ id: "d", project: "dotfiles" }),
+        createMockSession({ id: "x", project: "x" }),
+      ]);
+      return { store, writes };
+    }
+    const order = (store: ReturnType<typeof createTUIStore>) =>
+      headersOf(store.flatItems()).map((h) => h.groupKey);
+
+    it("gives a merged-away group back its pin and collapse, and the target keeps its own", () => {
+      const { store, writes } = pinnedSetup();
+      store.actions.renameGroup("dotfiles", "ccmux");
+      expect(order(store)).toEqual(["x", "ccmux"]);
+      // The merge recorded dotfiles' own layout, whole, beside the aliases.
+      expect(writes.at(-1)).toMatchObject({
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: {
+          project: {
+            pins: ["dotfiles", "x", "ccmux"],
+            merged: { dotfiles: { collapsed: false } },
+          },
+        },
+      });
+
+      store.actions.resetGroupName("ccmux");
+      expect(order(store)).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(false);
+      expect(store.collapsedGroups().has("ccmux")).toBe(true);
+      // The snapshot is spent: cleared with the alias, in the same write.
+      expect(store.groupLayouts()).toEqual({});
+      expect(writes.at(-1)).toMatchObject({
+        groupAliases: {},
+        groupLayouts: {},
+        pinnedGroups: ["dotfiles", "x", "ccmux"],
+        collapsedGroups: ["ccmux"],
+      });
+    });
+
+    it("restores a collapsed source as collapsed", () => {
+      const { store } = pinnedSetup({
+        pinnedGroups: [],
+        collapsedGroups: ["dotfiles"],
+      });
+      store.actions.renameGroup("dotfiles", "ccmux");
+      expect(store.collapsedGroups().has("ccmux")).toBe(false);
+      store.actions.resetGroupName("ccmux");
+      expect(store.collapsedGroups().has("dotfiles")).toBe(true);
+      expect(store.collapsedGroups().has("ccmux")).toBe(false);
+    });
+
+    it("survives a restart: the snapshot comes back from state.json", () => {
+      const { store } = pinnedSetup({
+        pinnedGroups: ["x", "ccmux"],
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: {
+          project: {
+            pins: ["dotfiles", "x", "ccmux"],
+            merged: { dotfiles: { collapsed: true } },
+          },
+        },
+      });
+      store.actions.resetGroupName("ccmux");
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(true);
+    });
+
+    it("restores a merge another instance made", () => {
+      const { store } = pinnedSetup({ pinnedGroups: [] });
+      store.actions.reloadUIState({
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: {
+          project: {
+            pins: ["dotfiles", "x", "ccmux"],
+            merged: { dotfiles: { collapsed: false } },
+          },
+        },
+        pinnedGroups: ["x", "ccmux"],
+      });
+      store.actions.resetGroupName("ccmux");
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+    });
+
+    it("keeps the target's own changes made while merged", () => {
+      const { store } = pinnedSetup();
+      store.actions.renameGroup("dotfiles", "ccmux");
+      store.actions.toggleGroupCollapse("ccmux"); // expand the merged group
+      store.actions.moveGroupToEdge("ccmux", "top");
+      store.actions.resetGroupName("ccmux");
+      // ccmux keeps what was done to it while merged; dotfiles gets its own.
+      expect(store.collapsedGroups().has("ccmux")).toBe(false);
+      expect(order(store)[0]).toBe("dotfiles");
+      expect(order(store)).toContain("ccmux");
+      expect(store.collapsedGroups().has("dotfiles")).toBe(false);
+    });
+
+    it("lets a pin or collapse the source has now win over its snapshot", () => {
+      // Another instance (or a stale write) gave dotfiles its own entries
+      // while it was merged: newer than the snapshot, so they stand.
+      const { store } = pinnedSetup({
+        pinnedGroups: ["x", "ccmux", "dotfiles"],
+        collapsedGroups: ["dotfiles"],
+        groupAliases: { project: { dotfiles: "ccmux" } },
+        groupLayouts: {
+          project: {
+            pins: ["dotfiles", "x", "ccmux"],
+            merged: { dotfiles: { collapsed: false } },
+          },
+        },
+      });
+      store.actions.resetGroupName("ccmux");
+      expect(store.pinnedGroups()).toEqual(["x", "ccmux", "dotfiles"]);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(true);
+    });
+
+    it("gives a renamed group's own key the group's layout, and a merged source its own", () => {
+      const { store } = pinnedSetup({
+        pinnedGroups: ["dotfiles", "x", "ccmux"],
+        collapsedGroups: ["ccmux"],
+      });
+      // ccmux is renamed (its layout moves to Main), then dotfiles merges in.
+      store.actions.renameGroup("ccmux", "Main");
+      store.actions.renameGroup("dotfiles", "Main");
+      store.actions.resetGroupName("Main");
+      expect(store.pinnedGroups()).toEqual(["dotfiles", "x", "ccmux"]);
+      expect(store.collapsedGroups().has("ccmux")).toBe(true);
+      expect(store.collapsedGroups().has("dotfiles")).toBe(false);
+    });
+
+    it("records the pins by raw key, not by the names they had", () => {
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["beta", "alpha", "gamma"],
+      });
+      store.actions.setSessions(
+        ["alpha", "beta", "gamma", "zeta"].map((p) =>
+          createMockSession({ id: p, project: p }),
+        ),
+      );
+      store.actions.renameGroup("beta", "Beta");
+      store.actions.renameGroup("alpha", "Alpha");
+      store.actions.renameGroup("Alpha", "gamma");
+      store.actions.renameGroup("Beta", "gamma");
+      // Recorded again on the second merge, alpha (merged away already)
+      // kept where it stood.
+      expect(store.groupLayouts().project).toEqual({
+        pins: ["beta", "alpha", "gamma"],
+        merged: { alpha: { collapsed: false }, beta: { collapsed: false } },
+      });
+    });
+
+    it("keeps the snapshot of a group whose key is __proto__", () => {
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: ["__proto__", "alpha"],
+        collapsedGroups: ["__proto__"],
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "p", project: "__proto__" }),
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "z", project: "zeta" }),
+      ]);
+      store.actions.renameGroup("__proto__", "alpha");
+      const { merged } = store.groupLayouts().project!;
+      expect(Object.hasOwn(merged, "__proto__")).toBe(true);
+      expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+      store.actions.resetGroupName("alpha");
+      expect(store.pinnedGroups()).toEqual(["__proto__", "alpha"]);
+      expect(store.collapsedGroups().has("__proto__")).toBe(true);
+    });
+
+    it("drops a snapshot once its key is no longer merged away", () => {
+      const { store } = pinnedSetup();
+      store.actions.renameGroup("dotfiles", "ccmux");
+      // Renaming the merged group to dotfiles' own key un-aliases dotfiles.
+      store.actions.renameGroup("ccmux", "dotfiles");
+      expect(store.groupAliases()).toEqual({
+        project: { ccmux: "dotfiles" },
+      });
+      expect(store.groupLayouts()).toEqual({});
+    });
+
+    it("keeps other modes' snapshots when writing one mode's", () => {
+      const { store, writes } = pinnedSetup({
+        groupAliases: { session: { a: "b" } },
+        groupLayouts: {
+          session: { pins: [], merged: { a: { collapsed: true } } },
+        },
+      });
+      store.actions.renameGroup("dotfiles", "ccmux");
+      expect(writes.at(-1)?.groupLayouts).toEqual({
+        session: { pins: [], merged: { a: { collapsed: true } } },
+        project: {
+          pins: ["dotfiles", "x", "ccmux"],
+          merged: { dotfiles: { collapsed: false } },
+        },
+      });
+    });
+  });
+
+  describe("reset puts merged pins back in order", () => {
+    /** One live project group per key in `projects`, pinned `pins`. */
+    function board(
+      pins: string[],
+      projects: readonly string[],
+      options: Parameters<typeof createTUIStore>[0] = {},
+    ) {
+      const store = createTUIStore({
+        groupBy: "project",
+        pinnedGroups: pins,
+        ...options,
+      });
+      store.actions.setSessions(
+        projects.map((p) => createMockSession({ id: p, project: p })),
+      );
+      return store;
+    }
+    const permutations = <T>(xs: readonly T[]): T[][] =>
+      xs.length
+        ? xs.flatMap((x, i) =>
+            permutations(xs.filter((_, j) => j !== i)).map((rest) => [
+              x,
+              ...rest,
+            ]),
+          )
+        : [[]];
+
+    it.each([
+      ["alpha first", ["alpha", "beta"]],
+      ["beta first", ["beta", "alpha"]],
+    ])(
+      "restores two merges into one group whichever merged first (%s)",
+      (_, sources) => {
+        // TUI Test's live case: beta's record was taken after alpha had
+        // merged, so alpha was not among its neighbours.
+        const store = board(
+          ["beta", "alpha", "gamma"],
+          ["alpha", "beta", "gamma", "zeta"],
+        );
+        for (const source of sources!)
+          store.actions.renameGroup(source, "gamma");
+        expect(store.pinnedGroups()).toEqual(["gamma"]);
+        store.actions.resetGroupName("gamma");
+        expect(store.pinnedGroups()).toEqual(["beta", "alpha", "gamma"]);
+      },
+    );
+
+    it.each([
+      ["Alpha first", ["Alpha", "Beta"]],
+      ["Beta first", ["Beta", "Alpha"]],
+    ])("restores two groups renamed before they merged (%s)", (_, sources) => {
+      const store = board(
+        ["beta", "alpha", "gamma"],
+        ["alpha", "beta", "gamma", "zeta"],
+      );
+      store.actions.renameGroup("beta", "Beta");
+      store.actions.renameGroup("alpha", "Alpha");
+      expect(store.pinnedGroups()).toEqual(["Beta", "Alpha", "gamma"]);
+      for (const source of sources!) store.actions.renameGroup(source, "gamma");
+      store.actions.resetGroupName("gamma");
+      expect(store.pinnedGroups()).toEqual(["beta", "alpha", "gamma"]);
+    });
+
+    it("restores a chain of merges into the first pin", () => {
+      // b's record has c after it; c's record does not have b. Placing
+      // each on its own put c ahead of b.
+      const store = board(["a", "b", "c"], ["a", "b", "c", "z"]);
+      store.actions.renameGroup("b", "a");
+      store.actions.renameGroup("c", "a");
+      store.actions.resetGroupName("a");
+      expect(store.pinnedGroups()).toEqual(["a", "b", "c"]);
+    });
+
+    it("restores every two-merge sequence over three pinned groups", () => {
+      // Each pin order, each group renamed or not, every source and target
+      // for the first merge, then the third group merged either way.
+      const failures: unknown[] = [];
+      for (const pins of permutations(["a", "b", "c"]))
+        for (let mask = 0; mask < 8; mask++) {
+          const named = (raw: string) =>
+            mask & (1 << "abc".indexOf(raw)) ? raw.toUpperCase() : raw;
+          for (const source of pins)
+            for (const target of pins.filter((k) => k !== source)) {
+              const third = pins.find((k) => k !== source && k !== target)!;
+              for (const [from, to] of [
+                [target, third],
+                [third, target],
+              ]) {
+                const store = board(pins, ["a", "b", "c", "z"]);
+                for (const raw of pins)
+                  if (named(raw) !== raw)
+                    store.actions.renameGroup(raw, named(raw));
+                store.actions.renameGroup(named(source), named(target));
+                // The first target may have been renamed by the merge: the
+                // second step names groups as their headers do now.
+                const label = (raw: string) =>
+                  store.groupAliases().project?.[raw] ?? raw;
+                store.actions.renameGroup(label(from!), label(to!));
+                store.actions.resetGroupName(label(to!));
+                const got = store.pinnedGroups();
+                if (JSON.stringify(got) !== JSON.stringify(pins))
+                  failures.push({
+                    pins,
+                    renamed: pins.filter((k) => named(k) !== k),
+                    merges: [
+                      [source, target],
+                      [from, to],
+                    ],
+                    got,
+                  });
+              }
+            }
+        }
+      expect(failures).toEqual([]);
+    });
+
+    it.each([
+      ["t1", "t2"],
+      ["t2", "t1"],
+    ])(
+      "restores pins merged into different groups (reset %s, then %s)",
+      (first, second) => {
+        const store = board(
+          ["b", "a", "t1", "t2"],
+          ["a", "b", "t1", "t2", "z"],
+        );
+        store.actions.renameGroup("a", "t1");
+        store.actions.renameGroup("b", "t2");
+        expect(store.pinnedGroups()).toEqual(["t1", "t2"]);
+        store.actions.resetGroupName(first!);
+        store.actions.resetGroupName(second!);
+        expect(store.pinnedGroups()).toEqual(["b", "a", "t1", "t2"]);
+      },
+    );
+
+    it("restores pins merged into different groups in every pin order, renamed or not, reset either way", () => {
+      const failures: unknown[] = [];
+      for (const pins of permutations(["a", "b", "t1", "t2"]))
+        for (const renamed of [false, true])
+          for (const resets of [
+            ["t1", "t2"],
+            ["t2", "t1"],
+          ]) {
+            const store = board(pins, ["a", "b", "t1", "t2", "z"]);
+            const named = (raw: string) => (renamed ? raw.toUpperCase() : raw);
+            if (renamed)
+              for (const raw of pins)
+                store.actions.renameGroup(raw, named(raw));
+            store.actions.renameGroup(named("a"), named("t1"));
+            store.actions.renameGroup(named("b"), named("t2"));
+            for (const target of resets)
+              store.actions.resetGroupName(named(target));
+            const got = store.pinnedGroups();
+            if (JSON.stringify(got) !== JSON.stringify(pins))
+              failures.push({ pins, renamed, resets, got });
+          }
+      expect(failures).toEqual([]);
+    });
+
+    it("knows a merged pin by the alias table, not by which sessions are live", () => {
+      const store = board(["a", "x", "b", "t"], ["a", "x", "b", "t", "z"]);
+      store.actions.renameGroup("a", "b");
+      store.actions.renameGroup("x", "t");
+      expect(store.pinnedGroups()).toEqual(["b", "t"]);
+      // b's own session goes away; a, merged into b, keeps the group live.
+      store.actions.setSessions(
+        ["a", "x", "t", "z"].map((p) =>
+          createMockSession({ id: p, project: p }),
+        ),
+      );
+      store.actions.resetGroupName("t");
+      expect(store.pinnedGroups()).toEqual(["x", "b", "t"]);
+      // b comes back, and the other merge still resets into place.
+      store.actions.setSessions(
+        ["a", "x", "b", "t", "z"].map((p) =>
+          createMockSession({ id: p, project: p }),
+        ),
+      );
+      store.actions.resetGroupName("b");
+      expect(store.pinnedGroups()).toEqual(["a", "x", "b", "t"]);
+    });
+
+    it("ignores a layout saved with name-based neighbours", () => {
+      // An f5932f4 record: `N` was the name of the group behind raw n, and
+      // raw N is now shown as Other. Its neighbours mean nothing now, so s
+      // resets like a merge saved before layouts were recorded: beside t.
+      const store = board(["N", "Other", "t"], ["s", "n", "N", "t", "z"], {
+        groupAliases: { project: { N: "Other", n: "N", s: "t" } },
+        groupLayouts: {
+          project: {
+            s: { pin: 0, collapsed: false, order: ["s", "N", "Other", "t"] },
+          },
+        } as unknown as GroupLayouts,
+      });
+      store.actions.resetGroupName("t");
+      expect(store.pinnedGroups()).toEqual(["N", "Other", "t", "s"]);
+    });
+
+    it("puts back a pin made between two merges where it was", () => {
+      const store = board(["a", "b"], ["a", "b", "n", "z"]);
+      store.actions.renameGroup("b", "a");
+      store.actions.moveGroupToEdge("n", "top");
+      expect(store.pinnedGroups()).toEqual(["n", "a"]);
+      store.actions.renameGroup("n", "a");
+      store.actions.resetGroupName("a");
+      expect(store.pinnedGroups()).toEqual(["n", "a", "b"]);
+    });
+
+    it("keeps a pin moved while a merge was outstanding where it was moved", () => {
+      const store = board(["a", "b", "c"], ["a", "b", "c", "z"]);
+      store.actions.renameGroup("b", "a");
+      store.actions.moveGroupToEdge("c", "top");
+      expect(store.pinnedGroups()).toEqual(["c", "a"]);
+      store.actions.resetGroupName("a");
+      // c stays on top; b comes back after a, the pin it followed.
+      expect(store.pinnedGroups()).toEqual(["c", "a", "b"]);
+    });
+
+    it("never takes a name for a raw key", () => {
+      // Beta's pin is beta's: delta named Beta afterwards is another group.
+      const store = board(
+        ["beta", "alpha", "gamma", "delta"],
+        ["alpha", "beta", "gamma", "delta", "z"],
+      );
+      store.actions.renameGroup("beta", "Beta");
+      store.actions.renameGroup("alpha", "gamma");
+      store.actions.renameGroup("Beta", "gamma");
+      store.actions.renameGroup("delta", "Beta");
+      expect(store.pinnedGroups()).toEqual(["gamma", "Beta"]);
+      store.actions.resetGroupName("gamma");
+      expect(store.pinnedGroups()).toEqual(["beta", "alpha", "gamma", "Beta"]);
+    });
+
+    it("pins every key a merged group held, its own beside one renamed to it", () => {
+      // alpha took the name gamma while gamma had no session; gamma's
+      // session came back into the same group.
+      const store = board(["x", "delta"], ["alpha", "delta", "x", "z"]);
+      store.actions.renameGroup("alpha", "gamma");
+      store.actions.setSessions(
+        ["alpha", "gamma", "delta", "x", "z"].map((p) =>
+          createMockSession({ id: p, project: p }),
+        ),
+      );
+      store.actions.moveGroupToEdge("gamma", "top");
+      expect(store.pinnedGroups()).toEqual(["gamma", "x", "delta"]);
+      store.actions.renameGroup("gamma", "delta");
+      store.actions.resetGroupName("delta");
+      expect(store.pinnedGroups()).toEqual(["alpha", "gamma", "x", "delta"]);
+    });
+
+    it("leaves a group unpinned that was unpinned when it merged", () => {
+      const store = board(["a", "b", "c"], ["a", "b", "c", "z"]);
+      store.actions.renameGroup("b", "a");
+      // Another instance unpins c, then c merges into a.
+      store.actions.reloadUIState({ pinnedGroups: ["a"] });
+      store.actions.renameGroup("c", "a");
+      store.actions.resetGroupName("a");
+      expect(store.pinnedGroups()).toEqual(["a", "b"]);
+    });
+
+    it("restores the original pins and collapse after any run of merges, renames and resets", () => {
+      // Seeded (mulberry32), so a failure reproduces.
+      let seed = 0x5eed;
+      const random = () => {
+        seed = (seed + 0x6d2b79f5) | 0;
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+      const pick = <T>(xs: readonly T[]): T =>
+        xs[Math.floor(random() * xs.length)]!;
+      const shuffle = <T>(xs: readonly T[]): T[] =>
+        xs
+          .map((x) => [random(), x] as const)
+          .sort((p, q) => p[0] - q[0])
+          .map(([, x]) => x);
+      const raws = ["a", "b", "c", "d", "e", "f"];
+      const failures: unknown[] = [];
+      for (let run = 0; run < 300; run++) {
+        const pins = shuffle(raws).slice(0, 1 + Math.floor(random() * 6));
+        const folded = shuffle(raws).slice(0, Math.floor(random() * 4));
+        const store = board(pins, raws, { collapsedGroups: folded });
+        const steps: string[] = [];
+        const named = () => [
+          ...new Set(Object.values(store.groupAliases().project ?? {})),
+        ];
+        for (let step = 0; step < 8; step++) {
+          const groups = headersOf(store.flatItems()).map((h) => h.groupKey);
+          const roll = random();
+          if (roll < 0.6 && groups.length > 1) {
+            const source = pick(groups);
+            const target = pick(groups.filter((g) => g !== source));
+            steps.push(`${source}>${target}`);
+            store.actions.renameGroup(source, target);
+          } else if (roll < 0.8) {
+            // A name, never a raw key: renaming a merged group to one of
+            // its members' keys un-merges that member by rename. Names are
+            // reused, so a group can take a name another one had.
+            const group = pick(groups);
+            const name = pick(["N0", "N1", "N2"]);
+            steps.push(`${group}=${name}`);
+            store.actions.renameGroup(group, name);
+          } else if (named().length) {
+            const group = pick(named());
+            steps.push(`reset ${group}`);
+            store.actions.resetGroupName(group);
+          }
+        }
+        while (named().length) {
+          const group = pick(named());
+          steps.push(`reset ${group}`);
+          store.actions.resetGroupName(group);
+        }
+        const got = {
+          pins: store.pinnedGroups(),
+          folded: [...store.collapsedGroups()].sort(),
+        };
+        const want = { pins, folded: [...folded].sort() };
+        if (JSON.stringify(got) !== JSON.stringify(want))
+          failures.push({ run, want, steps, got });
+      }
+      expect({ failed: failures.length, first: failures.slice(0, 3) }).toEqual({
+        failed: 0,
+        first: [],
+      });
+    });
+  });
+
+  it("resets only the current mode's aliases", () => {
+    const { store } = setup({
+      groupAliases: {
+        project: { beta: "B" },
+        session: { beta: "B" },
+      },
+    });
+    store.actions.resetGroupName("B");
+    expect(store.groupAliases()).toEqual({ session: { beta: "B" } });
+  });
+
+  it("knows which groups have a name to reset", () => {
+    const { store } = setup({ groupAliases: { project: { beta: "alpha" } } });
+    expect(store.groupHasAlias("alpha")).toBe(true);
+    expect(store.groupHasAlias("gamma")).toBe(false);
+  });
+
+  it("keeps aliases through group-by changes", () => {
+    const { store, writes } = setup({
+      groupAliases: { project: { beta: "Backend" } },
+    });
+    store.actions.cycleGroupBy();
+    store.actions.setGroupBy("project");
+    expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+    expect(writes.some((w) => "groupAliases" in w)).toBe(false);
+    expect(
+      headersOf(store.flatItems()).some((h) => h.groupKey === "Backend"),
+    ).toBe(true);
+  });
+
+  it("never prunes an alias whose group has no sessions left", () => {
+    const { store } = setup();
+    store.actions.renameGroup("beta", "Backend");
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha" }),
+    ]);
+    store.actions.renameGroup("alpha", "Front");
+    expect(store.groupAliases()).toEqual({
+      project: { beta: "Backend", alpha: "Front" },
+    });
+    // The first new session in beta lands back in its renamed group.
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha" }),
+      createMockSession({ id: "b2", project: "beta" }),
+    ]);
+    expect(
+      headersOf(store.flatItems()).find((h) => h.groupKey === "Backend")
+        ?.members[0]?.session.id,
+    ).toBe("b2");
+  });
+
+  it("keeps a merged group's collapse when another group's collapse is persisted", async () => {
+    const { store, writes } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    store.actions.toggleGroupCollapse("X");
+    store.actions.toggleGroupCollapse("gamma");
+    await waitForDebounce();
+    expect(writes.at(-1)?.collapsedGroups).toEqual(["X", "gamma"]);
+  });
+
+  it("collapses the merged group a session row belongs to", () => {
+    const { store } = setup({
+      groupAliases: { project: { alpha: "X", beta: "X" } },
+    });
+    select(store, "b");
+    store.actions.collapseParent();
+    expect(store.collapsedGroups().has("X")).toBe(true);
+    expect(store.selectedHeaderKey()).toBe("X");
+  });
+
+  it("matches a search on the displayed name and on the raw key", () => {
+    const { store } = setup({
+      groupBy: "session",
+      groupAliases: { session: { work: "Office" } },
+    });
+    store.actions.setSessions([
+      createMockSession({ id: "w", project: "p1", tmuxTarget: "work:0.0" }),
+      createMockSession({ id: "h", project: "p2", tmuxTarget: "home:0.0" }),
+    ]);
+    store.actions.setSearchQuery("Office");
+    expect(store.filteredSessions().map((f) => f.session.id)).toEqual(["w"]);
+    store.actions.setSearchQuery("work");
+    expect(store.filteredSessions().map((f) => f.session.id)).toEqual(["w"]);
+  });
+
+  describe("reloadUIState", () => {
+    it("picks up another instance's aliases", () => {
+      const { store } = setup();
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+      expect(
+        headersOf(store.flatItems()).some((h) => h.groupKey === "Backend"),
+      ).toBe(true);
+    });
+
+    it("drops malformed aliases from disk", () => {
+      const { store } = setup();
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: 7 } } as never,
+      });
+      expect(store.groupAliases()).toEqual({});
+    });
+
+    it("moves a selected header whose group another instance renamed away", () => {
+      const { store } = setup();
+      select(store, "beta");
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      expect(store.selectedHeaderKey()).toBe("Backend");
+    });
+
+    it("does not revert a b, f or p press still waiting to be written", () => {
+      const { store } = setup();
+      store.actions.cycleGroupBy(); // project -> cwd
+      store.actions.toggleHideIdle(); // false -> true
+      const prompt = store.state.promptDisplay;
+      store.actions.cyclePrompt();
+      const cycled = store.state.promptDisplay;
+      expect(cycled).not.toBe(prompt);
+      // An older file lands (the daemon's write, say) before the debounce.
+      store.actions.reloadUIState({
+        groupBy: "project",
+        hideIdle: false,
+        promptDisplay: prompt,
+      });
+      expect(store.state.groupBy).toBe("cwd");
+      expect(store.state.hideIdle).toBe(true);
+      expect(store.state.promptDisplay).toBe(cycled);
+    });
+
+    it("does not revert a local change still waiting to be written", () => {
+      const { store } = setup();
+      store.actions.toggleGroupCollapse("alpha");
+      // An echo of an older file arrives before the debounced write lands.
+      store.actions.reloadUIState({ collapsedGroups: [] });
+      expect(store.collapsedGroups().has("alpha")).toBe(true);
+    });
+  });
+
+  describe("rename prompt", () => {
+    it("opens prefilled with the group's label, in the palette slot", () => {
+      const { store } = setup({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.openRenamePrompt("Backend");
+      expect(store.state.palette).toEqual({
+        query: "Backend",
+        highlight: null,
+        rename: {
+          groupKey: "Backend",
+          label: "Backend",
+          groupBy: "project",
+          members: ["Backend", "beta"],
+        },
+      });
+    });
+
+    it("cancels when another instance reset the group under it", () => {
+      const { store, writes } = setup({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.openRenamePrompt("Backend");
+      // Another picker resets Backend: there is no Backend group any more.
+      store.actions.reloadUIState({ groupAliases: {} });
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      // No phantom alias for a raw key nothing derives, and no "Renamed".
+      expect(store.groupAliases()).toEqual({});
+      expect(writes.some((w) => "groupAliases" in w)).toBe(false);
+      expect(store.state.toastMessage).toBe("Group changed; rename cancelled");
+    });
+
+    it("cancels when another instance renamed the group under it", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+      expect(store.state.toastMessage).toBe("Group changed; rename cancelled");
+    });
+
+    it("cancels when another instance merged a group into it", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.reloadUIState({
+        groupAliases: { project: { gamma: "beta" } },
+      });
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      expect(store.groupAliases()).toEqual({ project: { gamma: "beta" } });
+    });
+
+    it("still renames when only the group's sessions changed meanwhile", () => {
+      const { store } = setup({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      store.actions.openRenamePrompt("Backend");
+      // A new session lands in the group; its names did not change.
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta" }),
+        createMockSession({ id: "b2", project: "beta" }),
+      ]);
+      store.actions.setPaletteQuery("Zed");
+      store.actions.commitRenamePrompt();
+      expect(store.groupAliases()).toEqual({ project: { beta: "Zed" } });
+    });
+
+    it("cancels when another instance changed the grouping under it", () => {
+      const { store, writes } = setup();
+      store.actions.openRenamePrompt("beta");
+      // The watcher applies another picker's `b` while the prompt is up.
+      store.actions.reloadUIState({ groupBy: "session" });
+      store.actions.setPaletteQuery("Backend");
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({});
+      expect(writes.some((w) => "groupAliases" in w)).toBe(false);
+      expect(store.state.toastMessage).toContain("Grouping changed");
+    });
+
+    it("opens in the sidebar, where the command palette does not", () => {
+      const { store } = setup({ sidebar: true });
+      store.actions.openPalette();
+      expect(store.state.palette).toBeNull();
+      store.actions.openRenamePrompt("beta");
+      expect(store.state.palette?.rename?.groupKey).toBe("beta");
+    });
+
+    it("previews the group a typed name merges into", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      expect(store.renameMergeTarget()).toBeNull();
+      store.actions.setPaletteQuery("alpha");
+      expect(store.renameMergeTarget()).toBe("alpha");
+      store.actions.setPaletteQuery("Backend");
+      expect(store.renameMergeTarget()).toBeNull();
+      // Its own name is no merge.
+      store.actions.setPaletteQuery("beta");
+      expect(store.renameMergeTarget()).toBeNull();
+    });
+
+    it("previews a merge by a full path past the cap, by its label", () => {
+      const deep = (leaf: string) =>
+        `/srv/${"nested-directory/".repeat(5)}${leaf}`;
+      const store = createTUIStore({ groupBy: "cwd" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", paneCwd: deep("alpha") }),
+        createMockSession({ id: "b", paneCwd: deep("beta") }),
+      ]);
+      store.actions.openRenamePrompt(deep("alpha"));
+      store.actions.setPaletteQuery(deep("beta"));
+      expect(store.renameMergeTarget()).toBe(deep("beta"));
+    });
+
+    it("commits the typed name and closes", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.setPaletteQuery("Backend");
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({ project: { beta: "Backend" } });
+    });
+
+    it("changes nothing when an over-long label is committed untouched", () => {
+      // A deep cwd key is wider than a name may be; committing it unedited
+      // must not alias the key to a truncated copy of itself.
+      const deep = `/srv/${"nested-directory/".repeat(5)}project`;
+      const writes: Record<string, unknown>[] = [];
+      const store = createTUIStore({
+        groupBy: "cwd",
+        onPersistState: (updates) => {
+          writes.push(updates as Record<string, unknown>);
+        },
+      });
+      store.actions.setSessions([
+        createMockSession({ id: "d", paneCwd: deep }),
+      ]);
+      store.actions.openRenamePrompt(deep);
+      expect(store.state.palette?.query).toBe(deep);
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({});
+      expect(writes).toEqual([]);
+    });
+
+    it("treats an empty name as a cancel", () => {
+      const { store, writes } = setup();
+      store.actions.openRenamePrompt("beta");
+      store.actions.setPaletteQuery("  ");
+      store.actions.commitRenamePrompt();
+      expect(store.state.palette).toBeNull();
+      expect(store.groupAliases()).toEqual({});
+      expect(writes).toEqual([]);
+    });
+
+    it("refuses a synthetic header and no grouping with a toast", () => {
+      const { store } = setup();
+      store.actions.openRenamePrompt(NEEDS_YOU_GROUP_KEY);
+      expect(store.state.palette).toBeNull();
+      expect(store.state.toastMessage).toBeTruthy();
+      store.actions.setGroupBy("none");
+      store.actions.openRenamePrompt("");
+      expect(store.state.palette).toBeNull();
+    });
   });
 });

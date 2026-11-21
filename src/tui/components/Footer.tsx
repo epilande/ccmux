@@ -29,6 +29,8 @@ interface FooterProps {
   copyDialogMode?: boolean;
   /** The `:` palette is open. */
   paletteMode?: boolean;
+  /** The palette is the group rename prompt. */
+  renameMode?: boolean;
   /** The view whose keys a focused preview takes: Sessions sends them to the
    *  pane, Worktrees and Start scroll the preview. */
   view?: View;
@@ -133,6 +135,9 @@ export const SEARCH_HINTS =
 /** The `:` palette's keys. */
 export const PALETTE_HINTS =
   "type to filter · ↑/↓ or ^n/^p move · enter run · esc close";
+
+/** The group rename prompt's keys. */
+const RENAME_HINTS = "type a name · enter rename · empty or esc cancels";
 
 /**
  * A focused preview's keys. Sessions hands every other key to the pane, so
@@ -294,6 +299,9 @@ export const Footer: Component<FooterProps> = (props) => {
       <Switch>
         <Match when={props.helpMode}>
           <Text fg={theme.subtext}>? or Esc close</Text>
+        </Match>
+        <Match when={props.renameMode}>
+          <Text fg={theme.subtext}>{RENAME_HINTS}</Text>
         </Match>
         <Match when={props.paletteMode}>
           <Text fg={theme.subtext}>{PALETTE_HINTS}</Text>

@@ -30,7 +30,7 @@ import type {
   ColumnHeaderMode,
 } from "../lib/preferences";
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
-import { setUIState, type UIState } from "../lib/state";
+import { setUIState, type MergeRecord, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import {
   DESTINATION_OPTIONS,
@@ -50,16 +50,28 @@ import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
+  mergedToast,
+  renamedToast,
+  resetToast,
+  TOAST_TEXT_WIDTH,
+} from "./utils/group-copy";
+import {
   buildFlatItems,
   isSyntheticGroupKey,
-  getGroupKey,
+  aliasedRawKey,
+  groupKeyOf,
   groupSessions,
+  normalizeGroupAliases,
+  normalizeGroupLayouts,
+  resolveGroupName,
   sortGroups,
   VALID_GROUP_BY,
   DEFAULT_GROUP_BY,
   type FlatItem,
   type GroupBy,
   type FilteredSession,
+  type GroupAliases,
+  type GroupLayouts,
   type MatchSource,
 } from "./utils/grouping";
 
@@ -508,7 +520,23 @@ interface TUIState {
    * under it on every keystroke, and by position the highlight would ride
    * onto whatever command slid into its row.
    */
-  palette: { query: string; highlight: string | null } | null;
+  palette: {
+    query: string;
+    highlight: string | null;
+    /** Set while the palette is the rename prompt for one group: `query` is
+     *  then the name being typed, prefilled with `label`, and there is no
+     *  command list. One modal slot for both, so the prompt is a modal
+     *  everywhere the palette already is. */
+    rename?: {
+      groupKey: string;
+      label: string;
+      groupBy: GroupBy;
+      /** The raw keys the alias table put in the group when the prompt
+       *  opened (`aliasMembers`), to tell on Enter whether another instance
+       *  renamed, reset or merged it meanwhile. */
+      members: string[];
+    };
+  } | null;
   /**
    * The repo the CURRENT view is narrowed to, or null for all repos. It is
    * the view's own: `W`/`N` narrow only the view they open (see
@@ -702,6 +730,10 @@ interface TUIStoreOptions {
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
+  /** Group names, per groupBy mode (UIState `groupAliases`). */
+  groupAliases?: GroupAliases;
+  /** Merged-away groups' own layouts (UIState `groupLayouts`). */
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   /** Last agent spawned from the new-session dialog, restored from UIState. */
   lastSpawnAgent?: string;
@@ -723,11 +755,13 @@ function computePinnedFromOrder(
   desiredOrder: string[],
   filtered: FilteredSession[],
   groupBy: GroupBy,
+  aliases: GroupAliases,
 ): string[] {
   // Compute the natural order (no pins)
-  const naturalOrder = sortGroups(groupSessions(filtered, groupBy), []).map(
-    (g) => g.key,
-  );
+  const naturalOrder = sortGroups(
+    groupSessions(filtered, groupBy, aliases),
+    [],
+  ).map((g) => g.key);
 
   // Only keep keys that exist as current groups (prune stale entries)
   const activeKeys = new Set(naturalOrder);
@@ -749,6 +783,149 @@ function computePinnedFromOrder(
 
   // Pin everything from the start up to and including desiredIdx
   return cleaned.slice(0, desiredIdx + 1);
+}
+
+/** A selected header as {@link followGroupSelection} needs it. */
+interface HeaderSnapshot {
+  key: string;
+  rawKeys: string[];
+}
+
+/** `aliases` with mode `mode`'s map replaced by `entries` (dropped when
+ *  empty). A new object every time: aliases are written whole. Built with
+ *  `Object.fromEntries`, so a raw key spelled `__proto__` stays data. */
+function withModeAliases(
+  aliases: GroupAliases,
+  mode: GroupBy,
+  entries: Iterable<readonly [string, string]>,
+): GroupAliases {
+  const map = Object.fromEntries(entries);
+  const next: GroupAliases = { ...aliases };
+  if (Object.keys(map).length) next[mode] = map;
+  else delete next[mode];
+  return next;
+}
+
+/**
+ * `layouts` with mode `mode`'s record replaced by `record`, its `merged`
+ * keeping only keys `aliases` still renames in that mode (a key that is no
+ * longer merged away has no layout to get back). Dropped with the mode's
+ * last merge, so the next merge records the pins as they are then. A new
+ * object every time; `merged` is built with `Object.fromEntries`, so a raw
+ * key spelled `__proto__` stays data.
+ */
+function withModeLayouts(
+  layouts: GroupLayouts,
+  mode: GroupBy,
+  record: MergeRecord | undefined,
+  aliases: GroupAliases,
+): GroupLayouts {
+  const map = aliases[mode] ?? {};
+  const merged = Object.fromEntries(
+    Object.entries(record?.merged ?? {}).filter(([raw]) =>
+      Object.hasOwn(map, raw),
+    ),
+  );
+  const next: GroupLayouts = { ...layouts };
+  if (record && Object.keys(merged).length)
+    next[mode] = { pins: record.pins, merged };
+  else delete next[mode];
+  return next;
+}
+
+/**
+ * The raw keys the alias table folds into group `key`, sorted: every key
+ * renamed to it, plus `key` itself unless it is renamed away. Depends only
+ * on the aliases, never on which sessions exist, so it changes exactly when
+ * a rename, reset or merge changes what the group is.
+ */
+function aliasMembers(
+  key: string,
+  map: Readonly<Record<string, string>> | undefined,
+): string[] {
+  const aliased = map ?? {};
+  const members = Object.keys(aliased).filter((raw) => aliased[raw] === key);
+  if (!Object.hasOwn(aliased, key)) members.push(key);
+  return members.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * The raw keys that stand for pin `pin` in a `MergeRecord.pins`: the keys
+ * renamed to it without merging, or its own key where nothing was (and it
+ * is not itself renamed away). A key merged in from elsewhere has its own
+ * place in the record, and a name is not a raw key: a group renamed to
+ * `Beta` is `beta` here, so a different group named `Beta` later never
+ * takes its place. From the aliases and the merge record alone, never from
+ * which sessions are live, so a group is the same pin while its own key
+ * has no session.
+ */
+function ownKeys(
+  pin: string,
+  map: Readonly<Record<string, string>> | undefined,
+  merged: Readonly<Record<string, unknown>>,
+): string[] {
+  const aliased = map ?? {};
+  const renamed = Object.keys(aliased).filter(
+    (raw) => aliased[raw] === pin && !Object.hasOwn(merged, raw),
+  );
+  if (renamed.length) return renamed.sort((a, b) => a.localeCompare(b));
+  return Object.hasOwn(aliased, pin) ? [] : [pin];
+}
+
+/**
+ * `pinned`, each pin spelled by `spell`, with the raw keys `keys` laid in
+ * among them in one pass over `pins` (a `MergeRecord.pins`): each key right
+ * after the pin holding (`holds`) the nearest key before it in `pins`, or
+ * ahead of every pin where none does, in `pins` order. A key `pins` does
+ * not have is left out, and so is one a pin already holds (a pin it has now
+ * is newer than the record). The pins themselves keep their order, so one
+ * moved or added since `pins` was recorded stays where it is now.
+ */
+function layIn(
+  pinned: readonly string[],
+  holds: (pin: string) => readonly string[],
+  pins: readonly string[],
+  keys: Iterable<string>,
+  spell: (pin: string) => readonly string[],
+): string[] {
+  const holder = new Map<string, number>();
+  pinned.forEach((pin, i) => {
+    for (const raw of holds(pin)) holder.set(raw, i + 1);
+  });
+  // gaps[0] is ahead of every pin, gaps[i + 1] right after pinned[i].
+  const gaps: string[][] = pinned.map(() => []).concat([[]]);
+  const left = new Set(keys);
+  let gap = 0;
+  for (const raw of pins) {
+    const at = holder.get(raw);
+    if (at !== undefined) gap = at;
+    else if (left.delete(raw)) gaps[gap]!.push(raw);
+  }
+  return [
+    ...gaps[0]!,
+    ...pinned.flatMap((pin, i) => [...spell(pin), ...gaps[i + 1]!]),
+  ];
+}
+
+/** `keys` with `key` replaced in place by `replacement`, each key kept once
+ *  (its first place wins). */
+function spliceKey(
+  keys: readonly string[],
+  key: string,
+  replacement: readonly string[],
+): string[] {
+  const out: string[] = [];
+  for (const k of keys)
+    for (const next of k === key ? replacement : [k])
+      if (!out.includes(next)) out.push(next);
+  return out;
+}
+
+/** Whether two key lists hold the same keys, in any order. */
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((key) => set.has(key));
 }
 
 /**
@@ -886,6 +1063,25 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   const [pinnedGroups, setPinnedGroups] = createSignal<string[]>(
     options.pinnedGroups ?? [],
   );
+  /** Group names, per groupBy mode. Every group key the store derives goes
+   *  through these (`groupKeyOf`), and they are written whole, never one
+   *  mode's map: `setUIState` merges only one level deep. */
+  const [groupAliases, setGroupAliases] = createSignal<GroupAliases>(
+    normalizeGroupAliases(options.groupAliases),
+  );
+  /**
+   * The layout each merged-away raw key had of its own (pin index, collapse),
+   * recorded by a merge and spent by the reset that splits it back out, so a
+   * reset restores each source rather than handing it the target's layout.
+   * Per mode, written whole with the aliases, and pruned to keys that are
+   * still aliased.
+   */
+  const [groupLayouts, setGroupLayouts] = createSignal<GroupLayouts>(
+    normalizeGroupLayouts(options.groupLayouts),
+  );
+  /** The current grouping's key for `session`, renames applied. */
+  const sessionGroupKey = (session: EnrichedSession): string =>
+    groupKeyOf(session, state.groupBy, groupAliases());
   /**
    * The scope to return to, set while the current view was opened by a
    * `W`/`N` jump (or a return to one) narrowed to a repo other than the
@@ -939,6 +1135,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return Promise.resolve(persistStateFn(merged));
   }
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  /** How the current toast fits itself to the toast's columns, when it
+   *  shortens in a chosen order (`group-copy.ts`) rather than wrapping. */
+  const [toastFit, setToastFit] = createSignal<
+    ((width: number) => string) | null
+  >(null);
 
   /** Invocation ids currently in flight (every invoke, Claude included).
    *  Driven by invocation_started/finished SSE events; mirrors the daemon's
@@ -1247,6 +1448,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // other field covers; under project/cwd it mostly mirrors those fields,
     // and under "none" it is "" and can never match.
     const groupBy = state.groupBy;
+    const aliases = groupAliases();
     const results = fuzzysort.go(query, sorted, {
       keys: [
         "project",
@@ -1254,7 +1456,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         "gitBranch",
         "lastPrompt",
         (s: EnrichedSession) =>
-          groupBy === "none" ? "" : getGroupKey(s, groupBy),
+          groupBy === "none" ? "" : groupKeyOf(s, groupBy, aliases),
+        // A renamed group is still found by the key it was renamed from (the
+        // group preview shows it): a tmux session renamed `Office` is still
+        // the `work` session to tmux, and to the user.
+        (s: EnrichedSession) => aliasedRawKey(s, groupBy, aliases) ?? "",
       ],
       threshold: 0.3,
     });
@@ -1371,6 +1577,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
               fzResult[0]?.score ?? 0,
               fzResult[2]?.score ?? 0,
               fzResult[4]?.score ?? 0,
+              fzResult[5]?.score ?? 0,
             )
           : 0;
         const cwdFz = fzResult?.[1]?.score ?? 0;
@@ -1459,6 +1666,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       pinnedGroups(),
       attentionBand,
       outOfScopeWaiting(),
+      groupAliases(),
     );
   });
 
@@ -1591,21 +1799,124 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return attentionBand && session.status === "waiting";
   }
 
-  function activeGroupKeys(): Set<string> {
+  /** Every group a session maps to under `aliases` (the live ones by
+   *  default), waiting-only groups included. */
+  function activeGroupKeys(aliases = groupAliases()): Set<string> {
     return new Set(
       state.groupBy === "none"
         ? []
-        : state.sessions.map((session) => getGroupKey(session, state.groupBy)),
+        : state.sessions.map((session) =>
+            groupKeyOf(session, state.groupBy, aliases),
+          ),
     );
   }
 
   /** Include waiting-only home groups even while their headers are absent. */
   function orderedGroupKeys(): string[] {
     return sortGroups(
-      groupSessions(filteredSessions(), state.groupBy),
+      groupSessions(filteredSessions(), state.groupBy, groupAliases()),
       pinnedGroups(),
       state.searchQuery.trim().length > 0,
     ).map((group) => group.key);
+  }
+
+  /** Every session on the board grouped under `aliases`, filters aside. */
+  function boardGroups(aliases: GroupAliases) {
+    return groupSessions(
+      state.sessions.map((session) => ({ session, highlights: null })),
+      state.groupBy,
+      aliases,
+    );
+  }
+
+  /**
+   * The header the cursor is on and the raw keys behind it, so a change of
+   * names can put the cursor back on whichever group they fold into now.
+   * Read through `selectedFlatItem`, not `selectedHeaderKey`: with nothing
+   * chosen yet the cursor sits on the first row by fallback, and a rename
+   * that re-sorts that header must still take the cursor with it.
+   */
+  function selectedHeaderSnapshot(): HeaderSnapshot | null {
+    const item = selectedFlatItem();
+    return item?.type === "header" && item.rawKeys
+      ? { key: item.groupKey, rawKeys: item.rawKeys }
+      : null;
+  }
+
+  /**
+   * After the group names changed, keep the cursor on what it was on: the
+   * selected header moves to the group its raw keys now fold into (the first
+   * in display order, for a reset that split it), and a selected row a merge
+   * tucked into a collapsed group gives way to that group's header.
+   */
+  function followGroupSelection(before: HeaderSnapshot | null) {
+    const items = flatItems();
+    const headers = items.filter(
+      (item): item is Extract<FlatItem, { type: "header" }> =>
+        item.type === "header",
+    );
+    if (before) {
+      const holds = (header: (typeof headers)[number]) =>
+        header.rawKeys?.some((raw) => before.rawKeys.includes(raw)) ?? false;
+      // Still there under the same name: leave the selection as it was (an
+      // implicit first-row cursor stays implicit).
+      if (!headers.some((h) => h.groupKey === before.key && holds(h)))
+        setSelectedHeaderKey(headers.find(holds)?.groupKey ?? null);
+    }
+    const id = state.selectedSessionId;
+    if (!id) return;
+    if (
+      items.some(
+        (item) =>
+          item.type === "session" && item.filteredSession.session.id === id,
+      )
+    )
+      return;
+    const session = state.sessions.find((s) => s.id === id);
+    const key = session && sessionGroupKey(session);
+    if (key && headers.some((h) => h.groupKey === key)) {
+      setState("selectedSessionId", null);
+      setSelectedHeaderKey(key);
+    }
+  }
+
+  /**
+   * Apply a rename or a reset: the names and the layout they carry, at once.
+   * Written immediately and in ONE write, whole: `setUIState` merges only one
+   * level deep (so a partial `groupAliases` would erase the other modes), and
+   * a second instance must never read the new names with the old pins.
+   */
+  function commitGroupNames(
+    aliases: GroupAliases,
+    layouts: GroupLayouts,
+    pinned: string[],
+    collapsed: Set<string>,
+  ) {
+    const follow = selectedHeaderSnapshot();
+    batch(() => {
+      setGroupAliases(aliases);
+      setGroupLayouts(layouts);
+      setPinnedGroups(pinned);
+      setCollapsedGroups(collapsed);
+    });
+    followGroupSelection(follow);
+    const active = activeGroupKeys(aliases);
+    flushUIState({
+      groupAliases: aliases,
+      groupLayouts: layouts,
+      pinnedGroups: pinned,
+      collapsedGroups: [...collapsed].filter((key) => active.has(key)),
+    }).catch(() => {
+      actions.showToast("Could not save group names", 3_000);
+    });
+  }
+
+  /** What group `key`'s header says, or the key where no header draws it. */
+  function headerLabel(key: string): string {
+    const header = flatItems().find(
+      (item) => item.type === "header" && item.groupKey === key,
+    );
+    return header?.type === "header" ? header.label : key;
   }
 
   /** A waiting-only group is still active even while its header is absent. */
@@ -1634,7 +1945,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       return;
     }
     if (!attentionBand) return;
-    const key = getGroupKey(selected, state.groupBy);
+    const key = sessionGroupKey(selected);
     if (state.groupBy === "none" || !collapsedGroups().has(key)) return;
     const expanded = new Set(collapsedGroups());
     expanded.delete(key);
@@ -1836,6 +2147,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       }
     }
   }
+
+  /**
+   * While the rename prompt is up: the label of the existing group the typed
+   * name would merge into, or null when it would not merge. Resolved the way
+   * Enter resolves it (`resolveGroupName`, before the width cap), so the
+   * prompt can say a long full path merges rather than that it gets cut.
+   */
+  const renameMergeTarget = createMemo((): string | null => {
+    const open = state.palette;
+    if (!open?.rename || open.rename.groupBy !== state.groupBy) return null;
+    const groups = boardGroups(groupAliases());
+    const target = resolveGroupName(open.query, groups, state.groupBy);
+    if (!target || target === open.rename.groupKey) return null;
+    return groups.some((group) => group.key === target)
+      ? headerLabel(target)
+      : null;
+  });
 
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
@@ -2693,7 +3021,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     setPaletteQuery(query: string) {
       if (!state.palette) return;
       // A new query re-ranks the list, so the highlight goes back to its top.
-      setState("palette", { query, highlight: null });
+      batch(() => {
+        setState("palette", "query", query);
+        setState("palette", "highlight", null);
+      });
     },
 
     setPaletteHighlight(id: string | null) {
@@ -2818,24 +3149,71 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("notice", null);
     },
 
-    showToast(message: string, durationMs = 1500) {
+    /**
+     * Show `message` for `durationMs`. With `fit`, the toast draws
+     * `fit(columns)` for the columns its card has instead, and `message` is
+     * its full-width form.
+     */
+    showToast(
+      message: string,
+      durationMs = 1500,
+      fit?: (width: number) => string,
+    ) {
       setState("toastMessage", message);
+      setToastFit(() => fit ?? null);
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         setState("toastMessage", null);
+        setToastFit(null);
         toastTimer = null;
       }, durationMs);
     },
 
+    /** A toast fitted by `fit`, shown at its full toast width. */
+    showFittedToast(fit: (width: number) => string, durationMs = 1500) {
+      actions.showToast(fit(TOAST_TEXT_WIDTH), durationMs, fit);
+    },
+
+    /**
+     * Take another instance's writes from `state.json`. Every key this
+     * instance still has queued in the 300ms debounce is skipped: the file
+     * is older than that keypress, and applying it would undo a `b`, `f`,
+     * `p`, pin or collapse until the queued write lands. An unchanged value
+     * is skipped too, so the daemon's own writes to the file do not rebuild
+     * the list.
+     *
+     * Writes flushed at once (group names with their layout, the last
+     * spawned agent) are never queued, so that guard never applies to them.
+     * What keeps them is the watcher: this instance's own write is a change
+     * to the file, which re-arms its 200ms debounce, so the reload that
+     * follows reads the file with the write in it.
+     */
     reloadUIState(freshState: UIState) {
+      const queued = (key: keyof UIState) => Object.hasOwn(pendingUpdates, key);
+      const follow = selectedHeaderSnapshot();
       batch(() => {
-        if (freshState.collapsedGroups !== undefined) {
-          setCollapsedGroups(new Set(freshState.collapsedGroups));
+        const collapsed = freshState.collapsedGroups;
+        if (
+          collapsed !== undefined &&
+          !queued("collapsedGroups") &&
+          !sameKeys(collapsed, [...collapsedGroups()])
+        ) {
+          setCollapsedGroups(new Set(collapsed));
         }
-        if (freshState.groupBy !== undefined) {
+        if (freshState.groupAliases !== undefined && !queued("groupAliases")) {
+          const aliases = normalizeGroupAliases(freshState.groupAliases);
+          if (JSON.stringify(aliases) !== JSON.stringify(groupAliases()))
+            setGroupAliases(aliases);
+        }
+        if (freshState.groupLayouts !== undefined && !queued("groupLayouts")) {
+          const layouts = normalizeGroupLayouts(freshState.groupLayouts);
+          if (JSON.stringify(layouts) !== JSON.stringify(groupLayouts()))
+            setGroupLayouts(layouts);
+        }
+        if (freshState.groupBy !== undefined && !queued("groupBy")) {
           setState("groupBy", freshState.groupBy);
         }
-        if (freshState.hideIdle !== undefined) {
+        if (freshState.hideIdle !== undefined && !queued("hideIdle")) {
           setState("hideIdle", freshState.hideIdle);
         }
         // Only an explicit `promptDisplay` (written by the `p` key) syncs across
@@ -2843,26 +3221,253 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // default are resolved once at launch (picker.ts / sidebar.ts); re-running
         // the migration on reload without the config default would let a stale
         // `showPrompt: false` clobber a newer config `promptDisplay`.
-        if (freshState.promptDisplay !== undefined) {
+        if (
+          freshState.promptDisplay !== undefined &&
+          !queued("promptDisplay")
+        ) {
           setState("promptDisplay", freshState.promptDisplay);
         }
-        if (freshState.pinnedGroups !== undefined) {
-          setPinnedGroups(freshState.pinnedGroups);
+        const pinned = freshState.pinnedGroups;
+        if (
+          pinned !== undefined &&
+          !queued("pinnedGroups") &&
+          (pinned.length !== pinnedGroups().length ||
+            pinned.some((key, i) => key !== pinnedGroups()[i]))
+        ) {
+          setPinnedGroups(pinned);
         }
-        if (freshState.lastSpawnAgent !== undefined) {
+        if (
+          freshState.lastSpawnAgent !== undefined &&
+          !queued("lastSpawnAgent")
+        ) {
           setState("lastSpawnAgent", freshState.lastSpawnAgent);
         }
       });
+      followGroupSelection(follow);
     },
 
-    toggleGroupCollapse(groupKey: string) {
-      if (isSyntheticGroupKey(groupKey)) return;
+    /**
+     * Rename group `key` (a final name, as headers carry it) to `name`. Every
+     * raw key folding into it is re-aliased (one hop, never alias-to-alias);
+     * a raw key equal to the new name loses its alias instead. A name another
+     * group already has merges into it, and that group's pin and collapse
+     * win; a fresh name inherits this group's. An empty name, a synthetic
+     * header and `none` grouping change nothing.
+     */
+    renameGroup(key: string, rawName: string) {
+      const mode = state.groupBy;
+      if (mode === "none" || !key || isSyntheticGroupKey(key)) return;
+      const aliases = groupAliases();
+      const groups = boardGroups(aliases);
+      // A name an existing header shows (its key, or its label where those
+      // differ, as cwd's home-shortened paths do) means that group.
+      const name = resolveGroupName(rawName, groups, mode);
+      if (!name || name === key) return;
+      const map = aliases[mode] ?? {};
+      const members = new Set(
+        Object.keys(map).filter((raw) => map[raw] === key),
+      );
+      for (const raw of groups.find((g) => g.key === key)?.rawKeys ?? [])
+        members.add(raw);
+      if (members.size === 0) members.add(key);
+      const entries = Object.entries(map).filter(([raw]) => !members.has(raw));
+      for (const raw of members) if (raw !== name) entries.push([raw, name]);
+      const merging = activeGroupKeys(aliases).has(name);
+      const collapsed = new Set(collapsedGroups());
+      const wasCollapsed = collapsed.delete(key);
+      if (!merging) {
+        if (wasCollapsed) collapsed.add(name);
+        else collapsed.delete(name);
+      }
+      // A merge takes this group's layout away (the target's wins), so the
+      // record keeps what a reset gives back. The pins are recorded again,
+      // before this one goes: each by its own raw keys in the order they
+      // have now, with every key merged away earlier kept after the pin it
+      // followed. Each raw key this group holds records its collapse; a key
+      // that already has one keeps it, since it was merged in from
+      // elsewhere and its own layout is older than this group's.
+      const recorded = groupLayouts()[mode];
+      const merged = recorded?.merged ?? {};
+      let record = recorded;
+      if (merging) {
+        const added = [...members]
+          .filter((raw) => raw !== name && !Object.hasOwn(merged, raw))
+          .sort((a, b) => a.localeCompare(b));
+        const holds = (pin: string) => ownKeys(pin, map, merged);
+        // This group is spelled by every key it hands over, so each one it
+        // held (its own key beside the keys renamed to it, say) comes back
+        // pinned if it was.
+        const spell = (pin: string) =>
+          pin === key ? [...new Set([...holds(pin), ...added])] : holds(pin);
+        record = {
+          pins: layIn(
+            pinnedGroups(),
+            holds,
+            recorded?.pins ?? [],
+            Object.keys(merged),
+            spell,
+          ),
+          // Built with `Object.fromEntries`, never by assignment: a raw key
+          // spelled `__proto__` would otherwise set the map's prototype
+          // instead of recording a layout, and the record would vanish.
+          merged: Object.fromEntries([
+            ...Object.entries(merged),
+            ...added.map((raw) => [raw, { collapsed: wasCollapsed }] as const),
+          ]),
+        };
+      }
+      const nextAliases = withModeAliases(aliases, mode, entries);
+      commitGroupNames(
+        nextAliases,
+        withModeLayouts(groupLayouts(), mode, record, nextAliases),
+        merging
+          ? pinnedGroups().filter((k) => k !== key)
+          : spliceKey(pinnedGroups(), key, [name]),
+        collapsed,
+      );
+      // Named the way its header now reads (a merged cwd group's label, not
+      // its raw path). A merge says how to undo it, and stays up longer to
+      // be read.
+      const shown = headerLabel(name);
+      if (merging)
+        actions.showFittedToast((width) => mergedToast(shown, width), 4_000);
+      else actions.showFittedToast((width) => renamedToast(shown, width));
+    },
+
+    /**
+     * Undo every rename pointing at group `key` in the current grouping,
+     * splitting a merged group back into its raw groups. Each one inherits
+     * the group's pin (in its place) and collapse.
+     */
+    resetGroupName(key: string) {
+      const mode = state.groupBy;
+      if (mode === "none" || !key || isSyntheticGroupKey(key)) return;
+      const aliases = groupAliases();
+      const map = aliases[mode] ?? {};
+      const members = Object.keys(map)
+        .filter((raw) => map[raw] === key)
+        .sort((a, b) => a.localeCompare(b));
+      if (members.length === 0) {
+        actions.showToast("No custom name to reset");
+        return;
+      }
+      const next = withModeAliases(
+        aliases,
+        mode,
+        Object.entries(map).filter(([, name]) => name !== key),
+      );
+      const active = activeGroupKeys(next);
+      const record = groupLayouts()[mode];
+      const merged = record?.merged ?? {};
+      // A key with a record was merged in and gets its own layout back. One
+      // without carried this group's layout here (a plain rename, or a merge
+      // saved before records existed) and takes it with it, beside the
+      // group itself if that is still a group.
+      const restored = members.filter(
+        (k) => active.has(k) && Object.hasOwn(merged, k),
+      );
+      const carriers = [key, ...members].filter(
+        (k) => active.has(k) && !Object.hasOwn(merged, k),
+      );
+      const collapsed = new Set(collapsedGroups());
+      if (collapsed.delete(key)) for (const k of carriers) collapsed.add(k);
+      // A collapse the key has now is newer than its record and stands.
+      for (const k of restored) if (merged[k]!.collapsed) collapsed.add(k);
+      const layouts = withModeLayouts(groupLayouts(), mode, record, next);
+      // Every pin that came back goes in at once, after the pin it followed
+      // in the record, so the order holds whichever groups were merged away
+      // or reset first; the pins there now keep their order.
+      const stillMerged = layouts[mode]?.merged ?? {};
+      const pinned = layIn(
+        spliceKey(pinnedGroups(), key, carriers),
+        (pin) => ownKeys(pin, next[mode], stillMerged),
+        record?.pins ?? [],
+        restored,
+        (pin) => [pin],
+      );
+      commitGroupNames(next, layouts, pinned, collapsed);
+      // The groups that came back, by what their headers now say.
+      const split = [key, ...members].filter((k) => active.has(k));
+      const back = (split.length ? split : members).map(headerLabel);
+      actions.showFittedToast((width) => resetToast(back, width), 3_000);
+    },
+
+    /**
+     * Open the rename prompt for group `key`, prefilled with its label. It
+     * is the palette in its rename mode, and unlike the command list it
+     * opens in the sidebar too. A synthetic header or `none` grouping has
+     * nothing to rename and says so.
+     */
+    openRenamePrompt(key: string) {
+      if (state.groupBy === "none") {
+        actions.showToast("Grouping is off (b to group)");
+        return;
+      }
+      if (!key || isSyntheticGroupKey(key)) {
+        actions.showToast("Only a group can be renamed");
+        return;
+      }
+      const header = flatItems().find(
+        (item) => item.type === "header" && item.groupKey === key,
+      );
+      const label = header?.type === "header" ? header.label : key;
+      setState("palette", {
+        query: label,
+        highlight: null,
+        rename: {
+          groupKey: key,
+          label,
+          groupBy: state.groupBy,
+          members: aliasMembers(key, groupAliases()[state.groupBy]),
+        },
+      });
+    },
+
+    /** Enter in the rename prompt: close it and rename, unless the name is
+     *  empty or untouched (both cancel). */
+    commitRenamePrompt() {
+      const open = state.palette;
+      if (!open?.rename) return;
+      const { groupKey: key, label, groupBy } = open.rename;
+      const query = open.query;
+      setState("palette", null);
+      // Untouched is no rename. Compared on the raw text: a label wider than
+      // a name may be (a deep cwd key) would come back from the name rules
+      // truncated, look edited, and alias the key to a cut copy of itself.
+      if (query === label) return;
+      // Another instance changed the grouping while the prompt was up (the
+      // state watcher applied it). The key belongs to the old mode's
+      // namespace, so writing it now would name an unrelated group.
+      if (groupBy !== state.groupBy) {
+        actions.showToast("Grouping changed; rename cancelled", 3_000);
+        return;
+      }
+      // Another instance renamed, reset or merged this group while the
+      // prompt was up: the key no longer names what the user was looking
+      // at, and renaming it would write a phantom alias or rename some
+      // other set of groups while still reporting success. Sessions coming
+      // and going do not count; only the alias table does.
+      const now = aliasMembers(key, groupAliases()[groupBy]);
+      if (
+        now.length !== open.rename.members.length ||
+        now.some((raw, i) => raw !== open.rename!.members[i])
+      ) {
+        actions.showToast("Group changed; rename cancelled", 3_000);
+        return;
+      }
+      // Uncapped: renameGroup matches it against existing keys and labels
+      // (a full path past the cap still merges) before the name rules.
+      actions.renameGroup(key, query);
+    },
+
+    toggleGroupCollapse(key: string) {
+      if (isSyntheticGroupKey(key)) return;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
-        if (next.has(groupKey)) {
-          next.delete(groupKey);
+        if (next.has(key)) {
+          next.delete(key);
         } else {
-          next.add(groupKey);
+          next.add(key);
           // If collapsing and selected session belongs to this group, select the header
           if (state.selectedSessionId) {
             const session = state.sessions.find(
@@ -2871,10 +3476,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             if (
               session &&
               !inBand(session) &&
-              getGroupKey(session, state.groupBy) === groupKey
+              sessionGroupKey(session) === key
             ) {
               setState("selectedSessionId", null);
-              setSelectedHeaderKey(groupKey);
+              setSelectedHeaderKey(key);
             }
           }
         }
@@ -2913,13 +3518,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       if (!session) return;
       if (inBand(session)) return;
-      const groupKey = getGroupKey(session, state.groupBy);
-      if (state.groupBy === "none" || !groupKey) return;
+      const key = sessionGroupKey(session);
+      if (state.groupBy === "none" || !key) return;
       setState("selectedSessionId", null);
-      setSelectedHeaderKey(groupKey);
+      setSelectedHeaderKey(key);
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
-        next.add(groupKey);
+        next.add(key);
         persistCollapsedGroups(next);
         return next;
       });
@@ -2953,7 +3558,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         const session = state.sessions.find((s) => s.id === id);
         if (!session || !filteredSessions().some((fs) => fs.session.id === id))
           return false;
-        this.expandGroup(getGroupKey(session, state.groupBy));
+        this.expandGroup(sessionGroupKey(session));
         if (!drawn()) return false;
       }
       batch(() => {
@@ -2968,6 +3573,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         newOrder,
         filteredSessions(),
         state.groupBy,
+        groupAliases(),
       );
       setPinnedGroups(next);
       persistUIState({ pinnedGroups: next });
@@ -3047,6 +3653,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     selectedGroupSessions,
     collapsedGroups,
     pinnedGroups,
+    groupAliases,
+    groupLayouts,
+    toastFit,
+    renameMergeTarget,
+    /** Whether group `key` carries a name the user gave it (so Reset Name
+     *  has something to undo). */
+    groupHasAlias: (key: string) =>
+      state.groupBy !== "none" &&
+      Object.values(groupAliases()[state.groupBy] ?? {}).includes(key),
     actions,
     tick,
     bumpTick: () => setTick((t) => t + 1),
