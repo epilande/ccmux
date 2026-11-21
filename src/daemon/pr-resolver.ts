@@ -57,7 +57,15 @@ export interface RollupEntry {
   status?: string | null;
   conclusion?: string | null;
   state?: string | null;
+  /** A CheckRun's name. Read only where a check is listed by name. */
+  name?: string | null;
+  /** A StatusContext's name. */
+  context?: string | null;
 }
+
+/** One check's verdict, as a preview lists it. `skip` and `neutral` pass the
+ *  fold; they are kept apart only so a list can say which they were. */
+export type CheckState = "pass" | "fail" | "pending" | "skip" | "neutral";
 
 /** CheckRun conclusions that gh buckets as failing in its PR-status rollup
  * (cli/cli api/queries_pr.go, the verdict `gh pr view`/`gh pr status` show).
@@ -75,6 +83,27 @@ const FAILING_CONCLUSIONS = new Set([
 ]);
 
 /**
+ * One rollup entry's verdict. The single mapping both {@link foldChecks} and
+ * a per-check list read, so a check a preview lists as failing is one that
+ * turns the PR's badge red, and never only one of the two.
+ */
+export function checkState(c: RollupEntry): CheckState {
+  if (c.__typename === "StatusContext") {
+    if (c.state === "FAILURE" || c.state === "ERROR") return "fail";
+    if (c.state === "PENDING" || c.state === "EXPECTED") return "pending";
+    return "pass"; // SUCCESS
+  }
+  // CheckRun: conclusion is null until status === COMPLETED.
+  if (c.status !== "COMPLETED") return "pending";
+  const concl = c.conclusion ?? "";
+  if (FAILING_CONCLUSIONS.has(concl)) return "fail";
+  if (concl === "STALE" || concl === "STARTUP_FAILURE") return "pending";
+  if (concl === "SKIPPED") return "skip";
+  if (concl === "NEUTRAL") return "neutral";
+  return "pass"; // SUCCESS
+}
+
+/**
  * Fold a statusCheckRollup array to one CI signal. Any failing context
  * wins; else any pending; else passing. An empty/absent rollup is `"none"`
  * (no checks configured) — deliberately NOT `"passing"`, so an un-CI'd PR is
@@ -86,21 +115,9 @@ export function foldChecks(
   if (!rollup || rollup.length === 0) return "none";
   let sawPending = false;
   for (const c of rollup) {
-    if (c.__typename === "StatusContext") {
-      if (c.state === "FAILURE" || c.state === "ERROR") return "failing";
-      if (c.state === "PENDING" || c.state === "EXPECTED") sawPending = true;
-      // SUCCESS => passing
-    } else {
-      // CheckRun: conclusion is null until status === COMPLETED.
-      if (c.status !== "COMPLETED") {
-        sawPending = true;
-        continue;
-      }
-      const concl = c.conclusion ?? "";
-      if (FAILING_CONCLUSIONS.has(concl)) return "failing";
-      if (concl === "STALE" || concl === "STARTUP_FAILURE") sawPending = true;
-      // SUCCESS / NEUTRAL / SKIPPED => passing
-    }
+    const state = checkState(c);
+    if (state === "fail") return "failing";
+    if (state === "pending") sawPending = true;
   }
   return sawPending ? "pending" : "passing";
 }

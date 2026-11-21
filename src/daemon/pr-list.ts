@@ -207,9 +207,10 @@ function readPR(raw: unknown): OpenPR | null {
  *
  * An entry too malformed to read is DROPPED, which biases the fold towards
  * `"none"` — never towards `"passing"`, the one answer that would let an
- * un-verified PR wear a green tick.
+ * un-verified PR wear a green tick. Names are read too, for the PR detail's
+ * per-check list; the fold ignores them.
  */
-function readRollup(value: unknown): RollupEntry[] | null {
+export function readRollup(value: unknown): RollupEntry[] | null {
   if (!Array.isArray(value)) return null;
   const entries: RollupEntry[] = [];
   for (const item of value) {
@@ -222,6 +223,8 @@ function readRollup(value: unknown): RollupEntry[] | null {
       status: str("status"),
       conclusion: str("conclusion"),
       state: str("state"),
+      name: str("name"),
+      context: str("context"),
     });
   }
   return entries;

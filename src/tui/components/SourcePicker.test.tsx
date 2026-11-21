@@ -80,6 +80,8 @@ const json = (body: unknown) =>
 
 interface Handlers {
   prs?: () => Promise<Response>;
+  /** `GET /prs/detail`, matched ahead of the `/prs` list. */
+  prDetail?: (url: URL) => Promise<Response>;
   issues?: () => Promise<Response>;
   worktrees?: () => Promise<Response>;
 }
@@ -89,6 +91,9 @@ function installFetch(handlers: Handlers) {
     input: unknown,
   ) => {
     const url = String(input);
+    if (url.includes("/prs/detail") && handlers.prDetail) {
+      return handlers.prDetail(new URL(url));
+    }
     if (url.includes("/issues")) {
       return handlers.issues?.() ?? json({ repos: [], errors: [] });
     }
@@ -120,6 +125,8 @@ async function mount(
     initialFilter?: string;
     initialCursor?: string | null;
     compact?: boolean;
+    showPreview?: boolean;
+    prDetail?: Handlers["prDetail"];
     actions?: Pick<
       SourcePickerProps,
       "onReview" | "onKill" | "onRestart" | "onNew" | "onScope" | "onNavigate"
@@ -128,7 +135,7 @@ async function mount(
 ) {
   // BEFORE `testRender`, so the component's first load cannot reach a real
   // daemon.
-  installFetch(handlers);
+  installFetch({ prDetail: opts.prDetail, ...handlers });
   const picked: Picked = { prs: [], issues: [], worktrees: [], closes: 0 };
   setup = await testRender(
     () => (
@@ -142,6 +149,8 @@ async function mount(
         repo={opts.repo ?? "/repo"}
         cwd="/repo"
         compact={opts.compact}
+        showPreview={opts.showPreview}
+        previewWidth={50}
         initialFilter={opts.initialFilter}
         initialCursor={opts.initialCursor}
         onClose={() => {
@@ -207,6 +216,45 @@ async function mountSettled(
   await harness.frame();
   return harness;
 }
+
+describe("SourcePicker preview", () => {
+  it("re-reads a cached PR body past the daemon's cache on R", async () => {
+    const asked: string[] = [];
+    let version = 1;
+    const harness = await mountSettled({
+      prs: [openPR()],
+      showPreview: true,
+      width: 140,
+      prDetail: async (url) => {
+        asked.push(url.searchParams.get("refresh") ?? "0");
+        // The daemon's cache: only a refresh sees the new body.
+        if (url.searchParams.get("refresh") === "1") version = 2;
+        return json({
+          ok: true,
+          detail: {
+            number: 156,
+            body: `Body v${version}`,
+            truncated: false,
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            checks: [],
+          },
+        });
+      },
+    });
+    await new Promise((r) => setTimeout(r, 350));
+    expect(await harness.frame()).toContain("Body v1");
+    expect(asked).toEqual(["0"]);
+
+    harness.keys.pressKey("R");
+    await new Promise((r) => setTimeout(r, 400));
+    const frame = await harness.frame();
+    expect(asked).toEqual(["0", "1"]);
+    expect(frame).toContain("Body v2");
+  });
+});
 
 describe("SourcePicker", () => {
   it("ends the repo header's rule on the rows' last column", async () => {
