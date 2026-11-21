@@ -23,6 +23,14 @@ export const theme: SemanticColors & { ansi: Ansi16 } = {
   ansi: { ...BUILTIN_THEMES[DEFAULT_THEME_NAME]!.ansi },
 };
 
+/**
+ * How far a view behind a dialog fades toward the background (the `opacity`
+ * of its content): enough to read as not in play, not so far that the row
+ * under its cursor is lost. Blending keeps each color's hue, so it works
+ * with any theme.
+ */
+export const DIMMED_OPACITY = 0.45;
+
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
 export interface ThemeResolution {

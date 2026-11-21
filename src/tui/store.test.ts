@@ -4995,6 +4995,36 @@ describe("search over the agent's summary", () => {
 });
 
 describe("scope selection and mark lifetime", () => {
+  it("reveals a session only onto a row the list draws", () => {
+    const store = createTUIStore({
+      groupBy: "project",
+      collapsedGroups: ["beta"],
+    });
+    store.actions.setSessions([
+      createMockSession({ id: "a", project: "alpha", mainRepoRoot: "/a" }),
+      createMockSession({ id: "b", project: "beta", mainRepoRoot: "/a" }),
+      createMockSession({ id: "c", project: "gamma", mainRepoRoot: "/c" }),
+    ]);
+    store.actions.setScope("/a");
+    store.actions.setSelectedSessionId("a");
+    const highlighted = () => {
+      const item = store.selectedFlatItem();
+      return item?.type === "session" ? item.filteredSession.session.id : null;
+    };
+
+    // Out of scope: no row to put a cursor on, so nothing moves.
+    expect(store.actions.revealSession("c")).toBe(false);
+    expect(store.state.selectedSessionId).toBe("a");
+    expect(highlighted()).toBe("a");
+    expect(store.selectedSession()?.id).toBe("a");
+
+    // Behind a collapsed header: the group opens, then the cursor lands.
+    expect(store.actions.revealSession("b")).toBe(true);
+    expect(store.collapsedGroups().has("beta")).toBe(false);
+    expect(highlighted()).toBe("b");
+    expect(store.selectedSession()?.id).toBe("b");
+    expect(store.selectedHeaderKey()).toBeNull();
+  });
   it("reconciles hidden selection when s changes repository", () => {
     const store = createTUIStore({ groupBy: "none" });
     store.actions.setSessions([
