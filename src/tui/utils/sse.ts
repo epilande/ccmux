@@ -13,6 +13,16 @@ import type {
  */
 export type ConnectionState = "connected" | "reconnecting" | "disconnected";
 
+/** The line a connection failure shows. An unreachable daemon is an expected
+ *  state with its own wording, not the runtime's fetch error. */
+export function connectionErrorText(error: string): string {
+  return /unable to connect|econnrefused|connection ?refused|failed to fetch/i.test(
+    error,
+  )
+    ? "Daemon offline, reconnecting..."
+    : `Error: ${error}`;
+}
+
 /**
  * SSE client callbacks
  */

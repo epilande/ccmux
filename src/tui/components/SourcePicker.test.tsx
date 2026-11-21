@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { createMockKeys } from "@opentui/core/testing";
+import { createMockKeys, createMockMouse } from "@opentui/core/testing";
 import {
   deliverEscape,
   expectContentSizedThumb,
@@ -22,6 +22,7 @@ import {
   sourceRowHeight,
 } from "./SourcePicker";
 import { buildSourceRepos } from "./source-picker-rows";
+import { displayWidth } from "../utils/format";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -126,6 +127,11 @@ async function mount(
     initialCursor?: string | null;
     compact?: boolean;
     showPreview?: boolean;
+    enabled?: boolean;
+    /** A focused input beside the picker, standing in for a dialog's. */
+    dialogInput?: boolean;
+    openResult?: boolean;
+    copyResult?: boolean;
     prDetail?: Handlers["prDetail"];
     actions?: Pick<
       SourcePickerProps,
@@ -139,27 +145,36 @@ async function mount(
   const picked: Picked = { prs: [], issues: [], worktrees: [], closes: 0 };
   setup = await testRender(
     () => (
-      <SourcePicker
-        activeSessionId="s1"
-        {...opts.actions}
-        effects={{
-          openUrl: () => true,
-          copyText: () => ({ osc52: true, local: false }),
-        }}
-        repo={opts.repo ?? "/repo"}
-        cwd="/repo"
-        compact={opts.compact}
-        showPreview={opts.showPreview}
-        previewWidth={50}
-        initialFilter={opts.initialFilter}
-        initialCursor={opts.initialCursor}
-        onClose={() => {
-          picked.closes += 1;
-        }}
-        onPickPR={(target) => picked.prs.push(target)}
-        onPickIssue={(target) => picked.issues.push(target)}
-        onOpenWorktree={(target) => picked.worktrees.push(target)}
-      />
+      <box flexDirection="column" width="100%" height="100%">
+        <SourcePicker
+          activeSessionId="s1"
+          enabled={opts.enabled}
+          {...opts.actions}
+          effects={{
+            openUrl: () => opts.openResult ?? true,
+            copyText: () => ({
+              osc52: opts.copyResult ?? true,
+              local: false,
+            }),
+          }}
+          repo={opts.repo ?? "/repo"}
+          cwd="/repo"
+          compact={opts.compact}
+          showPreview={opts.showPreview}
+          previewWidth={50}
+          initialFilter={opts.initialFilter}
+          initialCursor={opts.initialCursor}
+          onClose={() => {
+            picked.closes += 1;
+          }}
+          onPickPR={(target) => picked.prs.push(target)}
+          onPickIssue={(target) => picked.issues.push(target)}
+          onOpenWorktree={(target) => picked.worktrees.push(target)}
+        />
+        {opts.dialogInput ? (
+          <input id="dialog-field" focused width={30} value="" />
+        ) : null}
+      </box>
     ),
     { width: opts.width ?? 90, height: opts.height ?? 24 },
   );
@@ -175,7 +190,14 @@ async function mount(
     deliverEscape(setup!.renderer);
     await setup!.renderOnce();
   };
-  return { picked, keys, escape, frame, spans: () => setup!.captureSpans() };
+  return {
+    picked,
+    keys,
+    mouse: createMockMouse(setup.renderer),
+    escape,
+    frame,
+    spans: () => setup!.captureSpans(),
+  };
 }
 
 /** Everything answered, with one PR and one issue. */
@@ -399,6 +421,26 @@ describe("SourcePicker", () => {
 });
 
 describe("SourcePicker keys", () => {
+  it("says what o and y did, or that they could not", async () => {
+    const done = await mountSettled({ prs: [openPR()] });
+    await done.keys.pressKey("o");
+    expect(await done.frame()).toContain("opened https://");
+    await done.keys.pressKey("y");
+    expect(await done.frame()).toContain("copied https://");
+    setup?.renderer.destroy();
+    setup = undefined;
+
+    const failed = await mountSettled({
+      prs: [openPR()],
+      openResult: false,
+      copyResult: false,
+    });
+    await failed.keys.pressKey("o");
+    expect(await failed.frame()).toContain("no browser opener here");
+    await failed.keys.pressKey("y");
+    expect(await failed.frame()).toContain("copy needs OSC 52 or pbcopy");
+  });
+
   it("moves the cursor with j and k", async () => {
     const harness = await mountSettled({
       prs: [openPR(), openPR({ number: 155, title: "second" })],
@@ -783,6 +825,35 @@ describe("SourcePicker keys", () => {
 });
 
 describe("SourcePicker filter", () => {
+  // Behind a dialog the filter is still drawn, and OpenTUI focuses whatever a
+  // left click lands on: typing meant for the dialog's field would edit the
+  // hidden filter instead.
+  it("keeps a dialog's focus when the disabled filter is clicked", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [],
+      initialFilter: "park",
+      enabled: false,
+      dialogInput: true,
+    });
+    const focused = () =>
+      (
+        setup!.renderer as unknown as {
+          currentFocusedRenderable?: { id?: string } | null;
+        }
+      ).currentFocusedRenderable?.id;
+    expect(focused()).toBe("dialog-field");
+    const row = (await harness.frame())
+      .split("\n")
+      .findIndex((line) => line.includes("/ park"));
+    expect(row).toBeGreaterThanOrEqual(0);
+    await harness.mouse.click(10, row);
+    await harness.frame();
+    expect(focused()).toBe("dialog-field");
+    await harness.keys.typeText("zz");
+    expect(await harness.frame()).not.toContain("/ parkzz");
+  });
+
   it("narrows to what was typed, across both kinds at once", async () => {
     const harness = await mountSettled({
       prs: [openPR({ title: "auto-detect nested tmux" })],
@@ -1505,7 +1576,7 @@ describe("Start key convergence", () => {
   });
 });
 
-it("keeps the PR number and checkout arrow readable in a compact overlay", async () => {
+it("keeps the PR number, title and checkout arrow in a compact overlay", async () => {
   const h = await mountSettled({
     width: 30,
     height: 30,
@@ -1513,9 +1584,13 @@ it("keeps the PR number and checkout arrow readable in a compact overlay", async
     prs: [openPR()],
     worktrees: [worktreeRow({ tip: "sha-156" })],
   });
-  const frame = await h.frame();
-  expect(frame).toContain("#156");
-  expect(frame).toContain("→ a");
+  const line = (await h.frame()).split("\n").find((l) => l.includes("#156"));
+  expect(line).toBeDefined();
+  // The checkout's name gives way to the title at this width; the arrow,
+  // which changes what Enter does, stays.
+  expect(line).toContain("#156 park the");
+  expect(line).toContain("→");
+  expect(line).not.toContain("→ a");
 });
 
 it("preserves branch, draft, review, checks and every label at picker width", async () => {
@@ -1547,6 +1622,111 @@ it("preserves branch, draft, review, checks and every label at picker width", as
   const title = lines.findIndex((line) => line.includes("#156"));
   expect(lines[title]).toContain("CI ✗");
   expect(lines[title]).toContain("feature/metadata");
+});
+
+// The fixed cells are sized for the whole list, so one approved PR with
+// checks would spend the default sidebar's room on cells and leave every
+// row's title (number included) a lone ellipsis.
+for (const width of [30, 26]) {
+  it(`keeps every PR's number and title at a ${width}-column compact Start`, async () => {
+    const day = 86_400_000;
+    const h = await mountSettled({
+      width,
+      compact: true,
+      prs: [
+        openPR({
+          number: 201,
+          ciStatus: "passing",
+          reviewDecision: "APPROVED",
+          createdAt: new Date(Date.now() - 12 * day).toISOString(),
+        }),
+        openPR({
+          number: 202,
+          createdAt: new Date(Date.now() - 3 * day).toISOString(),
+        }),
+      ],
+      issues: [],
+    });
+    const frame = await h.frame();
+    for (const number of ["#201", "#202"]) {
+      const line = frame.split("\n").find((l) => l.includes(number));
+      expect(line).toBeDefined();
+      // The number and the start of the title, not just the number.
+      expect(line).toContain(`${number} p`);
+    }
+  });
+}
+
+// A checked-out source carries a `→ name` suffix as well. It used to take
+// half the title's room (#156 cut to `#1…`), and then, with the number
+// reserved, it still took the title down to `f…`. The number is the row's
+// identity and the title is what it says, so both outrank the checkout's
+// name: at a narrow width the suffix collapses to a bare `→` first.
+const TITLE = "fix(tui): Address the redesign review findings";
+/** The title text a row draws after its number, without the checkout. */
+const titleAfter = (line: string, number: number) =>
+  line
+    .slice(line.indexOf(`#${number} `) + `#${number} `.length)
+    .split(" →")[0]!
+    .split("  ")[0]!
+    .trim();
+async function checkedOutBesideUnchecked(width: number) {
+  const day = 86_400_000;
+  const h = await mountSettled({
+    width,
+    compact: true,
+    prs: [
+      openPR({
+        number: 259,
+        title: TITLE,
+        headRefOid: "sha-259",
+        ciStatus: "passing",
+        reviewDecision: "APPROVED",
+        createdAt: new Date(Date.now() - 12 * day).toISOString(),
+      }),
+      openPR({
+        number: 258,
+        title: TITLE,
+        headRefOid: "sha-258",
+        ciStatus: "passing",
+        reviewDecision: "APPROVED",
+        createdAt: new Date(Date.now() - 12 * day).toISOString(),
+      }),
+    ],
+    issues: [],
+    worktrees: [worktreeRow({ name: "parking", tip: "sha-259" })],
+  });
+  const lines = (await h.frame()).split("\n");
+  return {
+    checkedOut: lines.find((l) => l.includes("#259"))!,
+    unchecked: lines.find((l) => l.includes("#258"))!,
+  };
+}
+
+// Up to mid widths the checkout's name waits until the title has twice its
+// readable minimum, so a checked-out title is only the marker's two columns
+// short of its neighbour's.
+for (const width of [23, 30, 40]) {
+  it(`gives a checked-out PR's title all but the marker's columns at ${width}`, async () => {
+    const { checkedOut, unchecked } = await checkedOutBesideUnchecked(width);
+    expect(checkedOut).toMatch(/#259 \S/);
+    expect(checkedOut).toContain("→");
+    expect(checkedOut).not.toContain("→ p");
+    expect(unchecked).toMatch(/#258 \S/);
+    const mine = displayWidth(titleAfter(checkedOut, 259));
+    const theirs = displayWidth(titleAfter(unchecked, 258));
+    expect(mine).toBeGreaterThanOrEqual(theirs - 2);
+    expect(titleAfter(checkedOut, 259)).toMatch(/^fix/);
+  });
+}
+
+// Wide enough for both, the name shows, beside a title still at least twice
+// its readable minimum (`fix(tui): Add…`).
+it("shows a checked-out PR's checkout name at 60 columns", async () => {
+  const { checkedOut } = await checkedOutBesideUnchecked(60);
+  expect(checkedOut).toMatch(/#259 \S/);
+  expect(checkedOut).toContain("→ park");
+  expect(displayWidth(titleAfter(checkedOut, 259))).toBeGreaterThanOrEqual(13);
 });
 
 it("keeps failing checks ahead of a long author and branch in compact Start", async () => {

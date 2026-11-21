@@ -340,6 +340,11 @@ const ROW_PREFIX = 6;
 /** Widest the name and branch columns grow; longer cells truncate. */
 const NAME_COLUMN_MAX = 28;
 const BRANCH_COLUMN_MAX = 32;
+/** A branch cut below this says nothing, so its column drops instead. */
+const BRANCH_COLUMN_MIN = 6;
+/** The gap before the branch column, and the spacer before the facts. */
+const BRANCH_GAP = 2;
+const FACTS_GAP = 2;
 
 /** A row's name cell, worktree marker included: `name+`, attached the way
  *  the session list attaches it to a worktree's branch. */
@@ -395,12 +400,87 @@ export function resetScanCache(): void {
   lastCompletedScan = null;
 }
 
-export function describeRemoval(worktrees: number, branches: number): string {
+/**
+ * Why `x` refused. Only a mark can be "adjusted", so a row without one gets
+ * its own reason: the same sentence the row and preview would give, or what
+ * is missing when the scan found nothing to say about it.
+ */
+/** Where the removal classification stands. A failed scan is not a pending
+ *  one: nothing will arrive until `R`, so it must not read as "scanning". */
+export type ScanState = "pending" | "failed" | "done";
+
+/** Why a row cannot be removed, in the words the row and preview use. */
+function notRemovableReason(
+  entry: Pick<WorktreePanelRow, "row" | "skip">,
+  scan: ScanState,
+): string {
+  if (entry.skip?.reason) return entry.skip.reason;
+  if (scan === "pending") return "still scanning";
+  if (scan === "failed") return "removal scan failed; R retries";
+  return "its branch has not been merged";
+}
+
+/**
+ * Why `x` refused. A refused mark names the row, since marks outlive refreshes
+ * and view switches and a row marked earlier can stop being removable. A row
+ * without a mark gets its own reason.
+ */
+export function removalRefusal(
+  blocked: Pick<WorktreePanelRow, "row" | "skip">[],
+  target: "marks" | "row",
+  scan: ScanState,
+): string {
+  // The main checkout never can go, so a linked row is the one worth naming.
+  const entry = blocked.find((r) => !r.row.isMain) ?? blocked[0];
+  if (!entry) return "Nothing removable selected";
+  if (target === "marks") {
+    const more = blocked.length > 1 ? ` (+${blocked.length - 1} more)` : "";
+    return entry.row.isMain
+      ? `Marked main checkout${more} cannot be removed; Space clears its mark`
+      : `Marked ${entry.row.name}${more} is not removable: ${notRemovableReason(entry, scan)}; Space clears its mark`;
+  }
+  if (entry.row.isMain) return "The main checkout cannot be removed";
+  return `Not removable: ${notRemovableReason(entry, scan)}`;
+}
+
+/** What `a` just did in Worktrees, where it marks only removable rows. */
+export function markAllNote(
+  rows: Pick<WorktreePanelRow, "row" | "candidate">[],
+  scan: ScanState,
+): string {
+  const marked = rows.filter((r) => r.candidate);
+  if (!marked.length) {
+    if (scan === "pending") return "Waiting for removal classification";
+    if (scan === "failed") return "Removal scan failed; R retries";
+    return "Nothing here is removable";
+  }
+  const ending = marked.filter((r) => endsSessions(r.candidate)).length;
+  const others = rows.filter((r) => !r.candidate && !r.row.isMain).length;
+  return [
+    `marked ${marked.length} removable`,
+    ending ? ` (${ending} ${ending === 1 ? "ends an idle agent" : "end idle agents"})` : "",
+    others ? `; ${others} not removable` : "",
+  ].join("");
+}
+
+/** A short list of names: the first three, then a count. */
+function nameList(names: string[]): string {
+  const shown = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} +${names.length - 3} more` : shown;
+}
+
+export function describeRemoval(
+  worktrees: number,
+  branches: number,
+  /** The one worktree's name. Several are listed by `removalTargets`. */
+  name?: string,
+): string {
+  const target = worktrees === 1 && name ? name : null;
   if (branches === 0) {
-    return `Delete ${plural(worktrees, "worktree", "worktrees")}?`;
+    return `Delete ${target ?? plural(worktrees, "worktree", "worktrees")}?`;
   }
   if (worktrees === 1 && branches === 1) {
-    return "Delete 1 worktree and its branch?";
+    return `Delete ${target ?? "1 worktree"} and its branch?`;
   }
   return `Delete ${plural(worktrees, "worktree", "worktrees")} and ${plural(
     branches,
@@ -409,12 +489,19 @@ export function describeRemoval(worktrees: number, branches: number): string {
   )}?`;
 }
 
+/** The detail line naming a multi-row removal. One name is in the headline. */
+export function removalTargets(names: string[]): string[] {
+  return names.length < 2 ? [] : [nameList(names)];
+}
+
 export function removalDetails(opts: {
   includedDirty: number;
   blockedDirty: number;
   ignoredFiles: number;
   /** Idle agent sessions the removal will end, counted across the selection. */
   endingSessions: number;
+  /** The worktrees those sessions sit in. */
+  endingIn?: string[];
 }): string[] {
   const lines: string[] = [];
   if (opts.includedDirty > 0) {
@@ -427,8 +514,9 @@ export function removalDetails(opts: {
   // transcript file survives, so the red border stays with the one case that
   // loses work outright.
   if (opts.endingSessions > 0) {
+    const where = opts.endingIn?.length ? ` in ${nameList(opts.endingIn)}` : "";
     lines.push(
-      `ending ${plural(opts.endingSessions, "idle agent session", "idle agent sessions")}`,
+      `ending ${plural(opts.endingSessions, "idle agent session", "idle agent sessions")}${where}`,
     );
   }
   if (opts.blockedDirty > 0) {
@@ -444,22 +532,66 @@ export function removalDetails(opts: {
   return lines;
 }
 
+/** The confirm's rows besides its text: border, title, two spacers, Y/N. */
+const CONFIRM_CHROME = 6;
+
 const RemovalConfirm: Component<{
   headline: string;
+  /** Lines naming the targets: the first text to give way to a short panel. */
+  targets?: string[];
+  /** Consequences, kept whole while anything else can give. */
   details: string[];
+  /** `details` with the names left out, for a panel too short for them. */
+  compactDetails?: string[];
   destructive: boolean;
   confirmLabel?: string;
   cancelLabel?: string;
   width: number;
+  /** Rows the panel can give the box. */
+  height: number;
   onConfirm: () => void;
   onCancel: () => void;
 }> = (props) => {
   const boxWidth = () => Math.max(24, Math.min(56, props.width));
-  const headline = createMemo(() => wrapText(props.headline, boxWidth() - 2));
-  const details = createMemo(() =>
-    props.details.flatMap((line) => wrapText(line, boxWidth() - 2)),
-  );
-  const boxHeight = () => 6 + headline().length + details().length;
+  /**
+   * The headline, targets and consequences, fitted to the rows the panel has
+   * left after the frame, the title, the two spacers and the Y/N row: a box
+   * taller than the panel loses its title and its buttons off the edges.
+   * Names give way first, since a consequence (ignored files going, agents
+   * ending) may be disclosed nowhere else: the consequences drop the names
+   * they repeat from the target list, then that list shrinks to one row,
+   * then it goes. Only a panel too short even for that cuts the tail, the
+   * last line kept ending in an ellipsis.
+   */
+  const body = createMemo(() => {
+    const width = boxWidth() - 2;
+    const room = Math.max(1, props.height - CONFIRM_CHROME);
+    const wrapped = (lines: string[]) =>
+      lines.flatMap((line) => wrapText(line, width));
+    const unwrapped = (lines: string[]) =>
+      lines.map((line) => truncateText(line, width));
+    const targets = props.targets ?? [];
+    const compact = props.compactDetails ?? props.details;
+    const headline = wrapped([props.headline]);
+    const tagged = (head: string[], rest: string[]) => [
+      ...head.map((text) => ({ text, head: true })),
+      ...rest.map((text) => ({ text, head: false })),
+    ];
+    for (const rest of [
+      [...wrapped(targets), ...wrapped(props.details)],
+      [...wrapped(targets), ...wrapped(compact)],
+      [...unwrapped(targets), ...wrapped(compact)],
+      wrapped(compact),
+    ])
+      if (headline.length + rest.length <= room) return tagged(headline, rest);
+    const tight = tagged(unwrapped([props.headline]), unwrapped(compact));
+    if (tight.length <= room) return tight;
+    const kept = tight.slice(0, room);
+    const last = kept[room - 1]!;
+    last.text = truncateText(`${last.text}…`, width);
+    return kept;
+  });
+  const boxHeight = () => CONFIRM_CHROME + body().length;
   return (
     <box
       position="absolute"
@@ -482,13 +614,20 @@ const RemovalConfirm: Component<{
       <box height={1} />
       {/* Red only when uncommitted work is actually going, so the one
           irreversible case does not read like the routine one. */}
-      <For each={headline()}>
+      <For each={body()}>
         {(line) => (
-          <Text fg={props.destructive ? theme.red : theme.subtext}>{line}</Text>
+          <Text
+            fg={
+              !line.head
+                ? theme.overlay
+                : props.destructive
+                  ? theme.red
+                  : theme.subtext
+            }
+          >
+            {line.text}
+          </Text>
         )}
-      </For>
-      <For each={details()}>
-        {(line) => <Text fg={theme.overlay}>{line}</Text>}
       </For>
       <box height={1} />
       <box flexDirection="row">
@@ -619,6 +758,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const [repos, setRepos] = createSignal<WorktreeListResponse["repos"]>([]);
   const [scan, setScan] = createSignal<PruneScan | null>(null);
   const [scanError, setScanError] = createSignal<string | null>(null);
+  const scanState = (): ScanState =>
+    scan() ? "done" : scanError() ? "failed" : "pending";
   const [scope, setScope] = createSignal(
     props.scope !== undefined ? props.scope : props.repo,
   );
@@ -626,6 +767,8 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     props.initialCursor ?? props.memory?.cursor ?? null,
   );
   const [marks, setMarks] = createSignal(new Set<string>(props.memory?.marks));
+  /** Dirty rows answered "skip" in the current removal, for its confirm. */
+  const [declinedDirty, setDeclinedDirty] = createSignal(0);
   const [collapsed, setCollapsed] = createSignal(
     new Set<string>(props.memory?.collapsed),
   );
@@ -890,7 +1033,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       ? marks()
       : new Set(
           item?.kind === "header"
-            ? item.rows.map((r) => r.key)
+            ? item.rows.filter((r) => r.candidate).map((r) => r.key)
             : item
               ? [item.key]
               : [],
@@ -898,23 +1041,30 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const candidates = groups()
       .flatMap((g) => g.rows)
       .filter((r) => targets.has(r.key));
-    if (candidates.some((r) => !r.candidate)) {
-      setNote("Some marked rows are not removable; clear or adjust marks");
+    const blocked = candidates.filter((r) => !r.candidate);
+    if (blocked.length) {
+      setNote(
+        removalRefusal(blocked, marks().size ? "marks" : "row", scanState()),
+      );
       return;
     }
     const pending = candidates.flatMap((r) =>
       r.candidate ? [r.candidate] : [],
     );
     if (!pending.length) {
+      const state = scanState();
       setNote(
-        scan()
+        state === "done"
           ? "No removable worktree selected"
-          : "Waiting for removal classification",
+          : state === "failed"
+            ? "Removal scan failed; R retries"
+            : "Waiting for removal classification",
       );
       return;
     }
     setChosen(pending);
     setDirtyOk(new Set<string>());
+    setDeclinedDirty(0);
     const dirty = pending.filter((c) => c.dirty);
     setDirtyQueue(dirty);
     setPhase(dirty.length ? "dirty" : "confirm");
@@ -923,7 +1073,10 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     const candidate = dirtyQueue()[0];
     if (!candidate) return;
     if (include) setDirtyOk((prev) => new Set(prev).add(candidate.path));
-    else setChosen((prev) => prev.filter((c) => c.path !== candidate.path));
+    else {
+      setChosen((prev) => prev.filter((c) => c.path !== candidate.path));
+      setDeclinedDirty((n) => n + 1);
+    }
     const rest = dirtyQueue().slice(1);
     setDirtyQueue(rest);
     if (!rest.length) setPhase(chosen().length ? "confirm" : "list");
@@ -1056,9 +1209,28 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         break;
       case "a":
       case "A":
+        // Marks only ever feed removal, and `x` refuses a mark it cannot act
+        // on, so "all" means all that can go. Every repo holds a main checkout
+        // that never can, which would otherwise make this a dead end.
+        if (key === "A" || event.shift) {
+          setMarks(new Set<string>());
+          break;
+        }
+        // Until classification answers there is nothing to mark from, and
+        // trading the marks for that nothing would drop a selection `x` still
+        // acts on. Say why instead; A remains the way to clear them.
+        if (scanState() !== "done") {
+          flash(markAllNote([], scanState()));
+          break;
+        }
         setMarks(
-          new Set(key === "A" || event.shift ? [] : rows().map((r) => r.key)),
+          new Set(
+            rows()
+              .filter((r) => r.candidate)
+              .map((r) => r.key),
+          ),
         );
+        flash(markAllNote(rows(), scanState()));
         break;
       case "x":
       case "X":
@@ -1176,6 +1348,23 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   };
   /** Embedded and not the key owner: App's footer shows through instead. */
   const footerYielded = () => !!props.embedded && props.enabled === false;
+  /** Rows inside the panel, where the removal confirm is centred: the view
+   *  below the strip (less App's footer when it shows through), or the
+   *  overlay inside its border. */
+  const confirmHeight = () =>
+    props.embedded
+      ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+      : dims().height - 2;
+  /** What the final confirmation discloses about the chosen worktrees. */
+  const removalSummary = (): Parameters<typeof removalDetails>[0] => ({
+    includedDirty: dirtyOk().size,
+    blockedDirty: declinedDirty(),
+    ignoredFiles: chosen().reduce((n, c) => n + c.ignoredFiles.length, 0),
+    endingSessions: chosen().reduce((n, c) => n + c.sessions.length, 0),
+    endingIn: chosen()
+      .filter(endsSessions)
+      .map((c) => c.name),
+  });
   const footerNote = () =>
     note() || scanError() || (!scan() ? "scanning…" : undefined);
   /** The agents cell's text for a row, at this width. */
@@ -1200,18 +1389,30 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         texts.reduce((n, t) => Math.max(n, displayWidth(t)), 0),
       );
     const agents = widest(visible.map(agentsText), Math.floor(listWidth() / 3));
-    const room = Math.max(
-      0,
-      listWidth() - ROW_PREFIX - (agents ? agents + 1 : 0),
+    // What the name and branch share: the row less its prefix, the spacer
+    // before the facts, and the agents cell. A row that overruns this is
+    // squeezed by flex, which clips the prefix and the agent count first.
+    const room = Math.max(0, listWidth() - ROW_PREFIX - FACTS_GAP - agents);
+    const name = Math.min(
+      room,
+      widest(
+        visible.map(nameText),
+        Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
+      ),
     );
-    const name = widest(
-      visible.map(nameText),
-      Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
-    );
-    const branch = widest(
-      visible.map(branchText),
+    const branches = visible.map(branchText);
+    let branch = widest(
+      branches,
       Math.min(BRANCH_COLUMN_MAX, Math.floor(room * 0.3)),
     );
+    // The branch gives way before the name or the count: it drops when it
+    // does not fit beside the name with its gap, or when the cap cuts it
+    // below what still reads as a branch.
+    if (
+      name + BRANCH_GAP + branch > room ||
+      branch < Math.min(BRANCH_COLUMN_MIN, widest(branches, Infinity))
+    )
+      branch = 0;
     return { name, branch, agents, room };
   });
   /** The preview's facts line for a row: what the list says beside the
@@ -1338,13 +1539,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           </Text>
         </box>
         <Show when={columns().branch}>
-          <box width={columns().branch + 2} flexShrink={0} paddingLeft={2}>
+          <box
+            width={columns().branch + BRANCH_GAP}
+            flexShrink={0}
+            paddingLeft={BRANCH_GAP}
+          >
             <Text fg={theme.subtext}>
               {truncateText(branchText(entry), columns().branch)}
             </Text>
           </box>
         </Show>
-        <box width={2} flexShrink={0} />
+        <box width={FACTS_GAP} flexShrink={0} />
         <For each={facts()}>
           {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
         </For>
@@ -1571,6 +1776,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             ]}
             destructive
             width={width()}
+            height={confirmHeight()}
             onConfirm={() => answerDirty(true)}
             onCancel={() => answerDirty(false)}
           />
@@ -1582,18 +1788,17 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             chosen().length,
             chosen().filter((c) => c.branch && c.branchDeletion !== "none")
               .length,
+            chosen()[0]?.name,
           )}
-          details={removalDetails({
-            includedDirty: dirtyOk().size,
-            blockedDirty: 0,
-            ignoredFiles: chosen().reduce(
-              (n, c) => n + c.ignoredFiles.length,
-              0,
-            ),
-            endingSessions: chosen().reduce((n, c) => n + c.sessions.length, 0),
+          targets={removalTargets(chosen().map((c) => c.name))}
+          details={removalDetails(removalSummary())}
+          compactDetails={removalDetails({
+            ...removalSummary(),
+            endingIn: undefined,
           })}
           destructive={dirtyOk().size > 0}
           width={width()}
+          height={confirmHeight()}
           onConfirm={() => void runPrune()}
           onCancel={() => setPhase("list")}
         />

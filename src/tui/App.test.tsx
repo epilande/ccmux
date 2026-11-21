@@ -1976,6 +1976,40 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
+  it("kills the menu's group on its x, whatever is marked elsewhere", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", tmuxPane: "%1" }),
+          mockEnrichedSession({ id: "b", project: "beta", tmuxPane: "%2" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // alpha header, a, beta header, b: mark b, then open alpha's menu.
+      for (const key of ["g", "g", "j", "j", "j", " ", "g", "g", "m"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).toMatch(/Kill group\s+x/);
+      // The advertised key does what clicking the item does: this group.
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("alpha");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => c.url.split("/sessions/")[1]),
+      ).toEqual(["a/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
   it("keeps the flat list's sessions header inert: x, the menu, and Enter reach no group action", async () => {
     const { calls, restore } = captureFetch();
     try {
@@ -2112,7 +2146,7 @@ describe("App kill/restart dispatch routing", () => {
         await setup.renderOnce();
       }
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Marked sessions (2 sessions)");
+      expect(frame).toContain("2 sessions · ");
     } finally {
       restore();
     }
@@ -6899,6 +6933,9 @@ describe("App row menu (m)", () => {
       // The group menu's own items, and none of the row menu's.
       expect(frame).toContain("Pin to top");
       expect(frame).toContain("Kill group");
+      // Hints name the list's keys: `X` there kills everything, Space marks.
+      expect(frame).toMatch(/Kill group\s+x/);
+      expect(frame).toMatch(/Collapse\s+enter/);
       expect(frame).not.toContain("Attach");
     } finally {
       restore();
@@ -9689,6 +9726,73 @@ describe("App worktrees panel (W)", () => {
         expect(spawned).toHaveLength(1);
         // Sessions now, though the new row has not arrived yet.
         expect(isActiveTab("Sessions")).toBe(true);
+        arrive("myapp");
+        await frame();
+        expect(cursorLine()).toContain("dev:2.1");
+      } finally {
+        restore();
+      }
+    });
+
+    // Preview focus types into the selected session's pane, so a row that
+    // arrived and took the cursor mid-typing would send the rest of the keys
+    // to a different agent. Focusing the preview is a choice of pane.
+    it("keeps the keys on the focused pane when the new session arrives", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, {
+          groupBy: "none",
+          persistent: true,
+          initialPreview: true,
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        setup.mockInput.pressTab();
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("a");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+        arrive("myapp");
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("b");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+      } finally {
+        restore();
+      }
+    });
+
+    // The cursor opens on the first waiting row without committing to it,
+    // and any session event pins that fallback; the pin is not the user
+    // moving, so it must not cancel the new row's claim on the cursor.
+    it("moves the cursor to the new session from the waiting row's fallback", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        const waiting = mockEnrichedSession({
+          id: "w1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          mainRepoRoot: "/code/myapp",
+          tmuxPane: "%2",
+          tmuxTarget: "dev:1.2",
+          status: "waiting",
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1), waiting], null);
+        await frame();
+        expect(cursorLine()).toContain("dev:1.2");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
         arrive("myapp");
         await frame();
         expect(cursorLine()).toContain("dev:2.1");

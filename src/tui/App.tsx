@@ -50,7 +50,7 @@ import {
   type HunkReviewNote,
 } from "./utils/review";
 import { copyToClipboard } from "./utils/clipboard";
-import { SSEClient } from "./utils/sse";
+import { connectionErrorText, SSEClient } from "./utils/sse";
 import {
   switchToPane,
   sendKeys,
@@ -2538,7 +2538,7 @@ export function App(props: AppProps) {
         // the group collapsed underneath.
         id: "collapse",
         label: isCollapsed ? "Expand" : "Collapse",
-        hint: "space",
+        hint: "enter",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
       },
@@ -2592,7 +2592,11 @@ export function App(props: AppProps) {
       {
         id: "kill-group",
         label: "Kill group",
-        hint: "X",
+        // Menu-local (`key`): on the list `x` kills the marked sessions when
+        // any are marked, which may sit in another group, so the fall-through
+        // could disagree with clicking this item. (`X` kills all in view.)
+        hint: "x",
+        key: "x",
         color: theme.red,
         action: groupContextMenuKill,
       },
@@ -3158,7 +3162,8 @@ export function App(props: AppProps) {
    * A spawn's pane, until its session row arrives over SSE and takes the
    * cursor. The row comes from the daemon's next scan, not the spawn reply,
    * so the selection waits for it, but not forever (`SPAWN_SELECT_MS`), and
-   * never over the user: a cursor moved in the meantime wins.
+   * never over the user: a cursor moved in the meantime, or a preview
+   * focused, wins.
    */
   const [pendingSpawn, setPendingSpawn] = createSignal<{
     paneId: string;
@@ -3166,6 +3171,10 @@ export function App(props: AppProps) {
     headerKey: string | null;
   } | null>(null);
   function selectWhenArrives(paneId: string) {
+    // Any session event pins a cursor resting on the band's fallback (the
+    // spawned row's own arrival among them), and the check below would take
+    // that pin for the user moving. Pin it first, so the snapshot holds it.
+    store.actions.commitBandFallback();
     const pending = {
       paneId,
       sessionId: store.state.selectedSessionId,
@@ -3180,7 +3189,11 @@ export function App(props: AppProps) {
   createEffect(() => {
     const pending = pendingSpawn();
     if (!pending) return;
+    // Preview focus is a choice of pane too: it types into the selected
+    // session's, so a row that took the cursor now would send the rest of
+    // the user's keys to an agent they did not pick.
     if (
+      store.state.previewFocused ||
       store.state.selectedSessionId !== pending.sessionId ||
       store.selectedHeaderKey() !== pending.headerKey
     ) {
@@ -4342,14 +4355,16 @@ export function App(props: AppProps) {
           const marked = store
             .filteredSessions()
             .filter((s) => store.state.markedSessions.has(s.session.id))
-            .map((s) => s.session.id);
+            .map((s) => s.session);
           const sessionToKill = store.selectedSession();
           if (marked.length) {
             store.actions.showConfirmDialog(
               null,
               "kill-group",
-              marked,
-              "Marked sessions",
+              marked.map((s) => s.id),
+              marked
+                .map((s) => s.tmuxTarget ?? s.tmuxPane ?? s.project)
+                .join(", "),
             );
             break;
           }
@@ -4651,7 +4666,9 @@ export function App(props: AppProps) {
 
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
-            <Text fg={theme.red}>Error: {store.state.error}</Text>
+            <Text fg={theme.red}>
+              {connectionErrorText(store.state.error ?? "")}
+            </Text>
           </box>
         </Show>
 

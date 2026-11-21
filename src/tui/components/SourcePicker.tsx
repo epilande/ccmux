@@ -4,7 +4,6 @@ import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
 import type { PanelEffects } from "./WorktreesPanel";
 import { useRenderer } from "@opentui/solid";
-import { displayWidth } from "../utils/format";
 import type { Component } from "solid-js";
 import {
   For,
@@ -17,7 +16,7 @@ import {
   onCleanup,
 } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
-import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
+import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { IssueListResponse } from "../../daemon/issue-list";
 import type { PRListResponse } from "../../daemon/pr-list";
 import type { WorktreeListResponse } from "../../daemon/worktree-list";
@@ -37,11 +36,15 @@ import {
   checkedOutPathFor,
   emptyStateText,
   filterRepos,
+  fitSourceCellWidths,
+  fitSourceLabel,
   fitSourceRow,
   hasRows,
   isIssueRowKey,
   pickerRows,
   sourceCellWidths,
+  sourceCheckoutSuffix,
+  sourceLabelMin,
   sourceRowCells,
   sourceRowDim,
   sourceRowLabel,
@@ -156,6 +159,9 @@ export interface SourcePickerProps {
 
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
+/** Columns a row spends before its label: the active bar, the index and its
+ *  space, and the status glyph and its space. */
+const ROW_PREFIX = 5;
 /** The column between the list and the preview's border, so a row's
  *  right-aligned age cell does not touch it. */
 const PREVIEW_GAP = 1;
@@ -812,8 +818,20 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         const row = cursorRow();
         if (row) {
           const url = row.kind === "pr" ? row.pr.url : row.issue.url;
-          if (key === "o") props.effects.openUrl(url);
-          else props.effects.copyText(url, renderer);
+          if (key === "o")
+            setNote(
+              props.effects.openUrl(url)
+                ? `opened ${url}`
+                : "no browser opener here",
+            );
+          else {
+            const copied = props.effects.copyText(url, renderer);
+            setNote(
+              copied.osc52 || copied.local
+                ? `copied ${url}`
+                : "copy needs OSC 52 or pbcopy",
+            );
+          }
         }
         break;
       }
@@ -889,16 +907,23 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       />
     </Show>
   );
-  /** One width per fixed right cell across every visible row. */
+  /** One width per fixed right cell across every visible row, minus the
+   *  cells the title cannot spare at this width. */
   const cellWidths = createMemo(() =>
-    sourceCellWidths(
-      rows().map((row) =>
-        sourceRowCells(
-          row,
-          sourceAge(row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt),
-          false,
+    fitSourceCellWidths(
+      sourceCellWidths(
+        rows().map((row) =>
+          sourceRowCells(
+            row,
+            sourceAge(
+              row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt,
+            ),
+            false,
+          ),
         ),
       ),
+      listWidth() - ROW_PREFIX,
+      rows().reduce((n, row) => Math.max(n, sourceLabelMin(row)), 0),
     ),
   );
   const fixedCellsWidth = () => {
@@ -943,26 +968,14 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     // session list's right-side columns; labels, branch and author are the
     // flexible middle and yield first (`fitSourceRow`), before the title.
     const fitted = createMemo(() => {
-      const checkout = row.checkedOutName
-        ? ` → ${row.checkedOutName}${row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : ""}`
-        : "";
       const title = `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`;
       const fit = fitSourceRow(
-        title + checkout,
+        title + sourceCheckoutSuffix(row),
         cells().middle,
-        Math.max(1, listWidth() - 6 - fixedCellsWidth()),
+        Math.max(1, listWidth() - ROW_PREFIX - fixedCellsWidth()),
       );
-      // The checkout suffix changes what Enter does, so it keeps up to half
-      // the title's room and the title truncates before it.
-      const suffix = checkout
-        ? truncateText(checkout, Math.floor(fit.titleRoom / 2))
-        : "";
       return {
-        label:
-          truncateText(
-            title,
-            Math.max(1, fit.titleRoom - displayWidth(suffix)),
-          ) + suffix,
+        label: fitSourceLabel(row, title, fit.titleRoom),
         middle: fit.middle,
       };
     });
@@ -1081,6 +1094,12 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
               // with the filter still up, and two focused inputs would both
               // take the keystrokes.
               focused={props.enabled !== false}
+              // `focused` only applies on change, and OpenTUI focuses what a
+              // left click lands on: behind a dialog, a click here would move
+              // the dialog's typing into this hidden filter.
+              onMouseDown={(event: MouseEvent) => {
+                if (props.enabled === false) event.preventDefault();
+              }}
               placeholder="Filter pull requests and issues..."
               placeholderColor={theme.overlay}
               textColor={theme.text}

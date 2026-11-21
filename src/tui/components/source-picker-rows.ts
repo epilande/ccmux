@@ -567,6 +567,110 @@ export function sourceCellWidths(cells: SourceRowCells[]): {
   };
 }
 
+/** Title text a label keeps beside the number before anything else gets
+ *  room: a space, five characters, the ellipsis (`⊙ #259 fix(t…`). Narrower
+ *  reads as a stub; wider would drop CI from a default sidebar's list. */
+const TITLE_TEXT_MIN = 7;
+/** What says a source is checked out once its name has no room. */
+const CHECKOUT_MARKER = " →";
+/** The narrowest checkout name worth drawing beside the marker: ` p…`. */
+const CHECKOUT_NAME_MIN = 3;
+
+/** A row's identity: its marker and its whole number (`⊙ #156`). */
+function sourceRowIdentity(row: SourceRow): string {
+  const number = row.kind === "pr" ? row.pr.number : row.issue.number;
+  return `${sourceRowMarker(row)} #${number}`;
+}
+
+/** What follows the marker on a checked-out row: ` parking`, and for an
+ *  issue checked out more than once, ` parking (+1 more)`. */
+function checkoutName(row: SourceRow): string {
+  if (!row.checkedOutName) return "";
+  const more =
+    row.kind === "issue" && row.siblings ? ` (+${row.siblings} more)` : "";
+  return ` ${row.checkedOutName}${more}`;
+}
+
+/** A checked-out row's whole suffix, `→ name` and all. */
+export function sourceCheckoutSuffix(row: SourceRow): string {
+  return row.checkedOutName ? CHECKOUT_MARKER + checkoutName(row) : "";
+}
+
+/**
+ * The columns a row's label needs before any metadata: the marker and the
+ * WHOLE number (the row's identity), the title's readable minimum, and, for
+ * a checked-out source, the bare `→`. The checkout's name is not counted:
+ * it is the first thing a narrow label gives up.
+ */
+export function sourceLabelMin(row: SourceRow): number {
+  return (
+    displayWidth(sourceRowIdentity(row)) +
+    TITLE_TEXT_MIN +
+    (row.checkedOutName ? displayWidth(CHECKOUT_MARKER) : 0)
+  );
+}
+
+/**
+ * Drop fixed cells, least telling first (review, then age, then CI), while
+ * they would leave the label fewer than `labelMin` of `room` columns (the
+ * widest {@link sourceLabelMin} in view). The widths are list-wide, so
+ * without this one approved PR with checks empties every row's title in a
+ * narrow sidebar.
+ */
+export function fitSourceCellWidths(
+  widths: { ci: number; review: number; age: number },
+  room: number,
+  labelMin: number,
+): { ci: number; review: number; age: number } {
+  const fitted = { ...widths };
+  const used = () =>
+    [fitted.ci, fitted.review, fitted.age].reduce(
+      (n, w) => n + (w ? w + 1 : 0),
+      0,
+    );
+  for (const cell of ["review", "age", "ci"] as const)
+    if (room - used() < labelMin) fitted[cell] = 0;
+  return fitted;
+}
+
+/**
+ * Fit a row's label (`title` starts with its identity) into `room`. The
+ * claims, in order: the whole number, since it is what tells two rows apart;
+ * the bare `→` on a checked-out row, since it changes what Enter does; the
+ * title, to twice its readable minimum (or whole, if shorter); and only then
+ * the checkout's name, up to half the room, dropped whole when it would be
+ * cut below ` p…`. Past all of that the title takes the rest. Until a row is
+ * wide enough for both, a checked-out title is just the marker's columns
+ * short of an unchecked neighbour's (`⊙ #259 fix(tui): A… →`).
+ */
+export function fitSourceLabel(
+  row: SourceRow,
+  title: string,
+  room: number,
+): string {
+  const identityWidth = displayWidth(sourceRowIdentity(row));
+  const marker = row.checkedOutName ? CHECKOUT_MARKER : "";
+  const name = checkoutName(row);
+  const titleWidth = displayWidth(title);
+  const markerWidth = displayWidth(marker);
+  // What the title and the name share once the number and marker are paid.
+  const shared = Math.max(0, room - identityWidth - markerWidth);
+  const titleFirst = Math.min(titleWidth - identityWidth, 2 * TITLE_TEXT_MIN);
+  let nameRoom = Math.min(
+    displayWidth(name),
+    Math.floor(room / 2) - markerWidth,
+    shared - titleFirst,
+  );
+  if (nameRoom < Math.min(CHECKOUT_NAME_MIN, displayWidth(name))) nameRoom = 0;
+  const fittedTitle = truncateText(
+    title,
+    Math.max(identityWidth, identityWidth + shared - nameRoom),
+  );
+  return (
+    fittedTitle + marker + (nameRoom > 0 ? truncateText(name, nameRoom) : "")
+  );
+}
+
 /** Columns between the title and the middle, and between middle phrases. */
 const MIDDLE_GAP = 2;
 const MIDDLE_SEP = " · ";

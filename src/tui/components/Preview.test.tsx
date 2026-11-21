@@ -40,7 +40,9 @@ mock.module("../utils/tmux", () => ({
   notifyActivePane: () => {},
 }));
 
-const { Preview, metadataSegments } = await import("./Preview");
+const { Preview, metadataSegments, trimTrailingBlankLines } = await import(
+  "./Preview",
+);
 const { setDaemonSocketPath } = await import("../utils/server-guard");
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -463,6 +465,38 @@ describe("Preview header rows (issue #200)", () => {
     // The name is what gives instead.
     expect(headerRow!).toContain("…");
     expect(headerRow!).not.toContain(longProject);
+  });
+});
+
+describe("trimTrailingBlankLines", () => {
+  it("drops the blank rows below short pane output", () => {
+    expect(trimTrailingBlankLines("one\ntwo\n\n\n\n")).toBe("one\ntwo");
+  });
+
+  it("drops blank rows that only carry styling", () => {
+    expect(trimTrailingBlankLines("one\n\x1b[0m\n  \n\x1b[39;49m\n")).toBe(
+      "one",
+    );
+  });
+
+  it("drops blank rows styled with colon-form SGR parameters", () => {
+    // tmux -e writes subparameters with colons: curly underline, and an
+    // underline color whose empty color-space id leaves `::` behind.
+    const capture =
+      "one\n" + "\x1b[4:3m\n".repeat(25) + "\x1b[58:2::255:0:0m  \n";
+    expect(trimTrailingBlankLines(capture)).toBe("one");
+  });
+
+  it("keeps colon-styled text at the end", () => {
+    expect(trimTrailingBlankLines("one\n\x1b[4:3mtwo\x1b[0m\n\n")).toBe(
+      "one\n\x1b[4:3mtwo\x1b[0m",
+    );
+  });
+
+  it("keeps blank rows between lines and styled text at the end", () => {
+    expect(trimTrailingBlankLines("one\n\n\x1b[31mtwo\x1b[0m\n")).toBe(
+      "one\n\n\x1b[31mtwo\x1b[0m",
+    );
   });
 });
 
