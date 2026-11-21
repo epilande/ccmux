@@ -290,7 +290,9 @@ it.skipIf(!tmuxBinary)("passes a shell-metacharacter start directory to the spli
   // injected command writes a tmux environment variable, observable without
   // creating a file at a relative path.
   const dir = join(home, "weird x$(tmux set-environment -g CCMUX_INJECTED 1)");
+  const otherDir = join(home, "other window cwd");
   mkdirSync(dir);
+  mkdirSync(otherDir);
 
   function tmux(...args: string[]): string {
     const result = Bun.spawnSync(
@@ -305,11 +307,16 @@ it.skipIf(!tmuxBinary)("passes a shell-metacharacter start directory to the spli
     tmux("-f", "/dev/null", "new-session", "-d", "-s", "seed", "-x", "160", "-y", "40", "sleep 60");
     tmux("set-hook", "-g", "after-new-session[99]", sessionAutoOpenHookCommand(30, "left"));
     tmux("new-session", "-d", "-s", "meta", "-x", "160", "-y", "40", "-c", dir, "sleep 60");
+    // Switch the session's current window during the wait: split-window
+    // resolves a `-c` format against the current window, so the hook must use
+    // the fire-time snapshot of the captured pane, not a live expansion.
+    tmux("new-window", "-d", "-t", "meta:", "-c", otherDir, "sleep 60");
+    tmux("select-window", "-t", "meta:1");
     for (let i = 0; i < 30; i++) {
-      if (tmux("list-panes", "-t", "meta:", "-F", "#{pane_id}").split("\n").filter(Boolean).length === 2) break;
+      if (tmux("list-panes", "-t", "meta:0", "-F", "#{pane_id}").split("\n").filter(Boolean).length === 2) break;
       await Bun.sleep(200);
     }
-    const paths = tmux("list-panes", "-t", "meta:", "-F", "#{pane_current_path}").split("\n").sort();
+    const paths = tmux("list-panes", "-t", "meta:0", "-F", "#{pane_current_path}").split("\n").sort();
     const real = realpathSync(dir);
     expect(paths).toEqual([real, real]);
     expect(tmux("show-environment", "-g").split("\n").some((line) => line.startsWith("CCMUX_INJECTED"))).toBe(false);
