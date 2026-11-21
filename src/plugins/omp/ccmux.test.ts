@@ -40,7 +40,8 @@ function makeCtx(
 
 /**
  * A ctx whose managed-timer and isIdle surface is fake but controllable:
- * `tick()` runs every reconcile callback that has not been cleared.
+ * `tick()` runs every reconcile callback that has not been cleared and
+ * awaits the marker write each one queues.
  */
 function makeTimedCtx(
   sessionId: string | undefined,
@@ -65,8 +66,8 @@ function makeTimedCtx(
     setIdle: (idle: boolean) => {
       live.idle = idle;
     },
-    tick: () => {
-      for (const fn of [...timers]) fn?.();
+    tick: async () => {
+      for (const fn of [...timers]) await fn?.();
     },
   };
 }
@@ -801,8 +802,8 @@ describe("omp ccmux extension", () => {
 
       // agent_end never arrives; the session is idle in truth.
       setIdle(true);
-      tick();
-      await waitForMarkerState(markersDir, "S1", "idle");
+      await tick();
+      expect(readMarker("S1").state).toBe("idle");
     });
 
     it("keeps a compaction reason alive across idle ticks", async () => {
@@ -817,8 +818,8 @@ describe("omp ccmux extension", () => {
       // compaction; a long one must outlive any number of reconcile
       // ticks. Only its own end event delivers idle.
       setIdle(true);
-      tick();
-      tick();
+      await tick();
+      await tick();
       expect(readMarker("S1").state).toBe("working");
 
       await fire("auto_compaction_end", null, ctx);
@@ -841,7 +842,7 @@ describe("omp ccmux extension", () => {
       // The turn is gone but omp still reads busy when the approval lands;
       // the busy fallback must not bury the wait under `working`.
       setIdle(false);
-      tick();
+      await tick();
       expect(readMarker("S1").state).toBe("waiting_permission");
       expect(readMarker("S1").pending_tool).toBe("bash");
     });
@@ -858,10 +859,36 @@ describe("omp ccmux extension", () => {
         ctx,
       );
       setIdle(true);
-      tick();
+      await tick();
 
       expect(readMarker("S1").state).toBe("waiting_permission");
       expect(readMarker("S1").pending_tool).toBe("bash");
+    });
+
+    it("keeps an explicitly continuing turn across idle ticks", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      // omp waits on async work before continuing the turn; nothing is
+      // streaming, so the context reads idle while it waits.
+      await fire(
+        "agent_end",
+        { willContinue: true, awaitingAsyncWork: true },
+        ctx,
+        { settleIdle: false },
+      );
+      setIdle(true);
+      await tick();
+      await tick();
+      expect(readMarker("S1").state).toBe("working");
+
+      // The continuation runs and finishes; only the terminal end (or a
+      // rebind) clears the parked reason.
+      await fire("agent_start", null, ctx);
+      await fire("agent_end", null, ctx);
+      expect(readMarker("S1").state).toBe("idle");
     });
 
     it("leans a busy session with no reason on record toward working", async () => {
@@ -876,13 +903,13 @@ describe("omp ccmux extension", () => {
       // omp is running again but no event said so (a continuation the
       // event model cannot see): lift the row rather than leave it idle.
       setIdle(false);
-      tick();
-      await waitForMarkerState(markersDir, "S1", "working");
+      await tick();
+      expect(readMarker("S1").state).toBe("working");
 
       // And settle it back once the context reads idle, disarming itself.
       setIdle(true);
-      tick();
-      await waitForMarkerState(markersDir, "S1", "idle");
+      await tick();
+      expect(readMarker("S1").state).toBe("idle");
     });
   });
 });

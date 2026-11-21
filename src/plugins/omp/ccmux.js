@@ -72,11 +72,13 @@ export function makeExtension({
    */
   const pendingApprovals = new Map();
   /**
-   * Activity reasons (`turn` / `compaction` / `retry`) currently holding
-   * each session `working`. Handlers never write the state directly: they
-   * flip a reason and publish the derived state, so overlapping and
-   * repeated start events are idempotent and a state can only leak when an
-   * end event is lost (which the reconcile timer below heals).
+   * Activity reasons (`turn` / `continuing` / `compaction` / `retry`)
+   * currently holding each session `working`. Handlers never write the
+   * state directly: they flip a reason and publish the derived state, so
+   * overlapping and repeated start events are idempotent and a state can
+   * only leak when an end event is lost (which the reconcile timer below
+   * heals — for the `turn` reason alone; `continuing`, `compaction`, and
+   * `retry` are trusted to their own clearing events).
    * @type {Map<string, Set<string>>}
    */
   const activityReasons = new Map();
@@ -256,12 +258,14 @@ export function makeExtension({
           (pendingApprovals.get(sessionId)?.size ?? 0) === 0 &&
           reasons.delete("turn")
         ) {
-          void publishState(sessionId);
+          // Return the queued write so a caller that inspects the marker
+          // can await it (omp's timer ignores the return value).
+          return publishState(sessionId);
         }
       } else if (idle) {
         stopReconcile(sessionId);
         if (sessionState.get(sessionId)?.state !== "idle")
-          void publishState(sessionId);
+          return publishState(sessionId);
       } else if (
         (pendingApprovals.get(sessionId)?.size ?? 0) === 0 &&
         sessionState.get(sessionId)?.state !== "working"
@@ -269,7 +273,7 @@ export function makeExtension({
         // Busy with no reason on record (an event we never saw): lean the
         // row toward working rather than let it read idle while omp runs,
         // but never over an approval wait.
-        void queue(() =>
+        return queue(() =>
           writeMerged(sessionId, { state: "working", pending_tool: undefined }),
         );
       }
@@ -347,19 +351,29 @@ export function makeExtension({
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
       // A user turn cannot start while an approval dialog is open, so any
-      // approval still pending here is stale from an aborted turn.
+      // approval still pending here is stale from an aborted turn. It also
+      // supersedes a parked continuation from an earlier async wait.
       pendingApprovals.delete(sessionId);
+      activityReasons.get(sessionId)?.delete("continuing");
       return startActivity(sessionId, "turn", ctx);
     });
 
     omp.on("agent_end", async (event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
-      if (event?.willContinue === true) return;
+      if (event?.willContinue === true) {
+        // omp is waiting on async work before continuing this turn, and
+        // nothing is streaming while it waits, so `ctx.isIdle()` reads
+        // true and the reconcile must not flatten the turn. Park an
+        // explicit continuation reason that only the next agent_start,
+        // the terminal agent_end, or a rebind clears.
+        return startActivity(sessionId, "continuing", ctx);
+      }
       void (async () => {
         // Drop the turn reason first; a compaction or retry that outlived
         // the turn keeps the row working until its own end event.
         activityReasons.get(sessionId)?.delete("turn");
+        activityReasons.get(sessionId)?.delete("continuing");
         if ((activityReasons.get(sessionId)?.size ?? 0) > 0) {
           pendingApprovals.delete(sessionId);
           return publishState(sessionId);
