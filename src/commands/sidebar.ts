@@ -153,6 +153,8 @@ export function createSidebarCommand(): Command {
           ensureDaemon(),
           getUIState(),
           import("../tui"),
+          selfPane ? repinSidebarPaneWidth(selfPane, width) : Promise.resolve(),
+          repairResizeHook(width),
         ]);
         markStartup("daemon_ready");
 
@@ -351,6 +353,33 @@ async function handleResize(width: number, socket?: string): Promise<void> {
   );
 }
 
+/**
+ * One-shot boot re-pin: force this pane to the configured width.
+ *
+ * A sidebar pane can settle at the wrong width with no later resize event to
+ * correct it: a window resized between pane creation and this process setting
+ * its title evades `window-resized[99]`'s title filter (the pane is still
+ * untitled), and a server left mid-upgrade can lack that hook entirely, since
+ * a pre-`after-new-session` build's toggle-off removed only the hooks it
+ * knew. Re-pin here so the pane converges on boot regardless of how it was
+ * resized.
+ */
+export async function repinSidebarPaneWidth(
+  paneId: string,
+  width: number,
+): Promise<void> {
+  try {
+    const current = Number.parseInt(
+      await tmux("display-message", "-p", "-t", paneId, "#{pane_width}"),
+      10,
+    );
+    if (!Number.isInteger(current) || current === width) return;
+    await tmux("resize-pane", "-t", paneId, "-x", String(width));
+  } catch {
+    // Pane died mid-boot; nothing to pin.
+  }
+}
+
 /** Bounds on widths persisted from manual pane resizes. */
 const MIN_APPLY_WIDTH = 10;
 const MAX_APPLY_WIDTH = 500;
@@ -475,6 +504,22 @@ async function isResizeHookRegistered(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Repair a hook set left lopsided by a mixed-version upgrade: a build from
+ * before `after-new-session[99]` existed unregisters only the hook names it
+ * knows, so its toggle-off leaves that new hook live with no
+ * `window-resized[99]` left to re-pin widths after window resizes. Every
+ * sidebar boot re-arms the resize hook on such a server; a standalone
+ * sidebar (no auto-open hooks) still installs nothing.
+ */
+export async function repairResizeHook(width: number): Promise<void> {
+  const [autoOpen, resize] = await Promise.all([
+    isAutoOpenHookRegistered(),
+    isResizeHookRegistered(),
+  ]);
+  if (autoOpen && !resize) await registerResizeHook(width);
 }
 
 async function handleToggle(
