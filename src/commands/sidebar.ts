@@ -61,7 +61,7 @@ export function spawnDelaySeconds(backgroundIndex: number): number {
   const batch = Math.floor(backgroundIndex / SPAWN_BATCH_SIZE);
   return SPAWN_BASE_DELAY_S + SPAWN_HEAD_START_S + batch * SPAWN_BATCH_STEP_S;
 }
-const AUTO_OPEN_HOOK = "after-new-window[99]";
+const AUTO_OPEN_HOOKS = ["after-new-window[99]", "after-new-session[99]"];
 // window-resized fires on any actual size change (client attach, session
 // switch with window-size=latest, terminal resize). The previous hook name,
 // after-resize-window, only fired after an explicit resize-window COMMAND,
@@ -190,7 +190,7 @@ function hasHookLine(output: string, hookName: string): boolean {
 
 /** Check if auto-open hook is registered from tmux show-hooks output */
 export function parseAutoOpenHook(output: string): boolean {
-  return hasHookLine(output, AUTO_OPEN_HOOK);
+  return AUTO_OPEN_HOOKS.some((hook) => hasHookLine(output, hook));
 }
 
 /** Parse pane IDs of sidebar panes from "#{pane_id}<sep>#{pane_title}" format */
@@ -381,8 +381,7 @@ async function handleApplyWidth(
 
   await Promise.all([
     ...paneIds.map((id) => tmux("resize-pane", "-t", id, "-x", String(width))),
-    // Both hooks bake the width into their commands; refresh them, but only
-    // when registered (a lone `ccmux sidebar` never installs hooks).
+    // Auto-open and resize hooks bake in the width; a standalone sidebar has neither.
     ...(autoOpenRegistered ? [registerAutoOpenHook(width, position)] : []),
     ...(resizeHookRegistered ? [registerResizeHook(width)] : []),
   ]);
@@ -399,11 +398,24 @@ async function registerAutoOpenHook(
   const splitArgs =
     position === "left" ? `-fhbd -l ${width}` : `-fhd -l ${width}`;
   const cmd = `split-window ${splitArgs} -c '#{pane_current_path}' '${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}'`;
-  await tmux("set-hook", "-g", AUTO_OPEN_HOOK, cmd);
+  await Promise.all(
+    AUTO_OPEN_HOOKS.map((hook) =>
+      tmux(
+        "set-hook",
+        "-g",
+        hook,
+        hook === "after-new-session[99]"
+          ? `if-shell -F '#{||:#{==:#{session_grouped},0},#{==:#{session_group_size},1}}' "${cmd}"`
+          : cmd,
+      ),
+    ),
+  );
 }
 
 async function unregisterAutoOpenHook(): Promise<void> {
-  await tmux("set-hook", "-g", "-u", AUTO_OPEN_HOOK);
+  await Promise.all(
+    AUTO_OPEN_HOOKS.map((hook) => tmux("set-hook", "-g", "-u", hook)),
+  );
 }
 
 /**
@@ -469,10 +481,7 @@ async function handleToggle(
   width: number,
   position: SidebarPosition,
 ): Promise<void> {
-  const [state, hookRegistered] = await Promise.all([
-    getAllPaneState(),
-    isAutoOpenHookRegistered(),
-  ]);
+  const state = await getAllPaneState();
 
   const allWindows = [...state.windows.keys()];
 
@@ -510,7 +519,7 @@ async function handleToggle(
         state.windows.get(w),
       ),
     ),
-    ...(!hookRegistered ? [registerAutoOpenHook(width, position)] : []),
+    registerAutoOpenHook(width, position),
     registerResizeHook(width),
   ]);
 }
