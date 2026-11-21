@@ -434,11 +434,50 @@ async function registerAutoOpenHook(
         "-g",
         hook,
         hook === "after-new-session[99]"
-          ? `if-shell -F '#{||:#{==:#{session_grouped},0},#{==:#{session_group_size},1}}' "${cmd}"`
+          ? sessionAutoOpenHookCommand(width, position)
           : cmd,
       ),
     ),
   );
+}
+
+/** Polls before giving up on a client and splitting at the current size. */
+const ATTACH_WAIT_POLLS = 10;
+
+/**
+ * The `after-new-session[99]` body: a bounded wait for the session's first
+ * client, then the sidebar split.
+ *
+ * Unlike `after-new-window[99]`, this hook fires while the initial window
+ * may still be at its pre-client size: a detached `new-session` starts at
+ * default-size, and the attaching client resizes it moments later, which
+ * redistributes pane widths proportionally. Splitting at the pre-attach
+ * size balloons the sidebar (a 47-column pane at 80 columns rescales to
+ * ~140 at a 270-column client) until a re-pin lands, a visible flash. So the
+ * body waits for `session_attached` and splits into the now-client-sized
+ * window; sessions never attached still get their sidebar after the wait.
+ *
+ * Format escaping follows `resizeHookCommand`: the body is single-quoted at
+ * the tmux layer and deliberately contains no quote of its own, so it cannot
+ * nest inside an `if-shell` argument without a second escaping level — the
+ * session-group guard therefore reads the same two formats from the shell.
+ * `#{pane_id}`, `#{socket_path}`, and `#{pane_current_path}` are baked when
+ * the hook fires; `##{...}` survives that expansion as the literal the inner
+ * tmux calls must interpret at run time.
+ */
+export function sessionAutoOpenHookCommand(
+  width: number,
+  position: SidebarPosition,
+): string {
+  const splitArgs =
+    position === "left" ? `-fhbd -l ${width}` : `-fhd -l ${width}`;
+  const inner = [
+    `g=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_grouped}:##{session_group_size}" 2>/dev/null) || exit 0`,
+    `[ "\${g%%:*}" = "1" ] && [ "\${g#*:}" != "1" ] && exit 0`,
+    `i=0; while [ $i -lt ${ATTACH_WAIT_POLLS} ] && [ "$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_attached}" 2>/dev/null)" = "0" ]; do i=$((i+1)); sleep 0.1; done`,
+    `tmux -S "#{socket_path}" split-window ${splitArgs} -c "#{pane_current_path}" -t "#{pane_id}" "${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}"`,
+  ].join("; ");
+  return `run-shell -b '${inner}'`;
 }
 
 async function unregisterAutoOpenHook(): Promise<void> {
