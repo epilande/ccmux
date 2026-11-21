@@ -461,9 +461,11 @@ const ATTACH_WAIT_POLLS = 10;
  * the tmux layer and deliberately contains no quote of its own, so it cannot
  * nest inside an `if-shell` argument without a second escaping level — the
  * session-group guard therefore reads the same two formats from the shell.
- * `#{pane_id}`, `#{socket_path}`, and `#{pane_current_path}` are baked when
- * the hook fires; `##{...}` survives that expansion as the literal the inner
- * tmux calls must interpret at run time.
+ * `#{pane_id}` and `#{socket_path}` are baked when the hook fires (`%N` ids
+ * and socket paths carry no shell syntax), but the start directory travels
+ * as `##{pane_current_path}` and is expanded by the inner `split-window`
+ * against the target pane: a baked path would pass through the shell, so a
+ * directory whose name contains `$(...)` would execute.
  */
 export function sessionAutoOpenHookCommand(
   width: number,
@@ -475,7 +477,7 @@ export function sessionAutoOpenHookCommand(
     `g=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_grouped}:##{session_group_size}" 2>/dev/null) || exit 0`,
     `[ "\${g%%:*}" = "1" ] && [ "\${g#*:}" != "1" ] && exit 0`,
     `i=0; while [ $i -lt ${ATTACH_WAIT_POLLS} ] && [ "$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_attached}" 2>/dev/null)" = "0" ]; do i=$((i+1)); sleep 0.1; done`,
-    `tmux -S "#{socket_path}" split-window ${splitArgs} -c "#{pane_current_path}" -t "#{pane_id}" "${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}"`,
+    `tmux -S "#{socket_path}" split-window ${splitArgs} -c "##{pane_current_path}" -t "#{pane_id}" "${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}"`,
   ].join("; ");
   return `run-shell -b '${inner}'`;
 }
