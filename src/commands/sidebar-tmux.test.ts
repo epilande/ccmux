@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { sessionAutoOpenHookCommand } from "./sidebar";
 import { tmuxArgvFor } from "../lib/tmux-exec";
 
 const tmuxBinary = Bun.which("tmux");
@@ -49,14 +50,23 @@ Bun.spawnSync(tmuxArgv("wait-for", "sidebar-exit"));
   }
 
   async function expectSidebar(target: string, width: number): Promise<void> {
-    expect(tmux("list-panes", "-t", target, "-F", "#{pane_id}").split("\n")).toHaveLength(2);
     const window = tmux("display-message", "-p", "-t", target, "#{window_id}");
     const ready = Bun.spawn(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "wait-for", `sidebar-ready-${window}`), { env, timeout: 5000 });
+    // The after-new-session split waits out the pre-attach window, so arrival
+    // is bounded rather than immediate: poll for the pane, then its shape.
+    let panes = 0;
+    for (let i = 0; i < 30 && panes !== 2; i++) {
+      panes = tmux("list-panes", "-t", target, "-F", "#{pane_id}")
+        .split("\n")
+        .filter(Boolean).length;
+      if (panes !== 2) await Bun.sleep(200);
+    }
+    expect(panes).toBe(2);
     expect(await ready.exited).toBe(0);
     const expected = `ccmux-sidebar:${width}`;
-    const panes = tmux("list-panes", "-t", target, "-F", "#{pane_title}:#{pane_width}").split("\n");
-    expect(panes.filter((pane) => pane === expected)).toHaveLength(1);
-    expect(panes).toHaveLength(2);
+    const shapes = tmux("list-panes", "-t", target, "-F", "#{pane_title}:#{pane_width}").split("\n");
+    expect(shapes.filter((pane) => pane === expected)).toHaveLength(1);
+    expect(shapes).toHaveLength(2);
     expect(tmux("display-message", "-p", "-t", target, "#{pane_title}")).not.toBe("ccmux-sidebar");
   }
 
@@ -96,7 +106,7 @@ Bun.spawnSync(tmuxArgv("wait-for", "sidebar-exit"));
     Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
     rmSync(home, { recursive: true, force: true });
   }
-}, 15000);
+}, 30000);
 
 it.skipIf(!tmuxBinary)("repins a sidebar pane to the configured width when it settled wrong", async () => {
   const home = mkdtempSync(join(tmpdir(), "ccmux-sidebar-"));
@@ -194,6 +204,69 @@ it.skipIf(!tmuxBinary)("re-arms the resize hook when a mixed-version upgrade orp
     tmux("set-hook", "-g", "after-new-session[99]", "split-window -fhbd 'sleep 60 && exec ccmux sidebar'");
     repair(30);
     expect(resizeHookBody()).toContain("-x 30");
+  } finally {
+    Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 15000);
+
+it.skipIf(!tmuxBinary)("waits out the pre-attach window before splitting the initial sidebar", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ccmux-sidebar-"));
+  const socket = `/tmp/ccmux-sidebar-${crypto.randomUUID()}`;
+  const bin = join(home, "bin");
+  const env = {
+    ...process.env,
+    CCMUX_HOME: home,
+    CCMUX_TMUX_SOCKET: socket,
+    TMUX: `${socket},0,0`,
+    PATH: `${bin}:${process.env.PATH}`,
+  };
+  mkdirSync(bin);
+  // A stand-in that keeps the pane alive: the hook's spawn command must not
+  // boot a real ccmux inside the test server.
+  writeFileSync(join(bin, "ccmux"), "#!/bin/sh\nsleep 300\n", { mode: 0o755 });
+
+  function tmux(...args: string[]): string {
+    const result = Bun.spawnSync(
+      tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, ...args),
+      { env },
+    );
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  }
+
+  const paneWidths = (target: string): string[] =>
+    tmux("list-panes", "-t", target, "-F", "#{pane_left}:#{pane_width}")
+      .split("\n")
+      .sort();
+
+  try {
+    tmux("-f", "/dev/null", "new-session", "-d", "-s", "seed", "-x", "80", "-y", "24", "sleep 60");
+    tmux("set-hook", "-g", "after-new-session[99]", sessionAutoOpenHookCommand(30, "left"));
+
+    // The attaching client resizes the window during the bounded wait; the
+    // split must land at the resized window, not the pre-attach default that
+    // tmux would then redistribute proportionally.
+    tmux("new-session", "-d", "-s", "flash", "-x", "80", "-y", "24", "sleep 60");
+    tmux("resize-window", "-t", "flash:", "-x", "220", "-y", "50");
+    // The bounded attach-wait runs in tmux's real shell against the platform
+    // clock, so the deferral window can only be observed as real time; the
+    // polls below watch the actual pane count rather than a fixed duration.
+    for (let i = 0; i < 25; i++) {
+      if (tmux("list-panes", "-t", "flash:", "-F", "#{pane_id}").split("\n").length === 2) break;
+      await Bun.sleep(200);
+    }
+    expect(paneWidths("flash:")).toEqual(["0:30", "31:189"]);
+
+    // A session nobody attaches still gets its sidebar, just after the wait.
+    tmux("new-session", "-d", "-s", "lonely", "-x", "80", "-y", "24", "sleep 60");
+    await Bun.sleep(300);
+    expect(tmux("list-panes", "-t", "lonely:", "-F", "#{pane_id}").split("\n")).toHaveLength(1);
+    for (let i = 0; i < 25; i++) {
+      if (tmux("list-panes", "-t", "lonely:", "-F", "#{pane_id}").split("\n").length === 2) break;
+      await Bun.sleep(200);
+    }
+    expect(paneWidths("lonely:")).toEqual(["0:30", "31:49"]);
   } finally {
     Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
     rmSync(home, { recursive: true, force: true });
