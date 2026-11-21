@@ -4995,25 +4995,130 @@ describe("search over the agent's summary", () => {
 });
 
 describe("scope selection and mark lifetime", () => {
-  for (const via of ["scope", "worktrees", "start"] as const) {
-    it(`reconciles hidden selection when ${via} changes repository`, () => {
+  it("reconciles hidden selection when s changes repository", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", mainRepoRoot: "/a" }),
+      createMockSession({ id: "b", mainRepoRoot: "/b" }),
+    ]);
+    store.actions.setSelectedSessionId("a");
+    store.actions.setScope("/b");
+    expect(store.selectedSession()?.id).toBe("b");
+    expect(store.selectedFlatItem()?.type).toBe("session");
+    expect(store.state.selectedSessionId).toBeNull();
+    store.actions.setSelectedSessionId("b");
+    store.actions.setScope(null);
+    expect(store.selectedSession()?.id).toBe("b");
+  });
+  for (const via of ["worktrees", "start"] as const) {
+    const open = (store: ReturnType<typeof createTUIStore>, repo: string) =>
+      via === "worktrees"
+        ? store.actions.showWorktrees(repo)
+        : store.actions.showSourcePicker(repo);
+    const close = (store: ReturnType<typeof createTUIStore>) =>
+      via === "worktrees"
+        ? store.actions.hideWorktrees()
+        : store.actions.hideSourcePicker();
+
+    it(`narrows only the ${via} view a jump opens, and restores on leaving`, () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([
         createMockSession({ id: "a", mainRepoRoot: "/a" }),
         createMockSession({ id: "b", mainRepoRoot: "/b" }),
       ]);
       store.actions.setSelectedSessionId("a");
-      if (via === "scope") store.actions.setScope("/b");
-      else if (via === "worktrees") store.actions.showWorktrees("/b");
-      else store.actions.showSourcePicker("/b");
-      expect(store.selectedSession()?.id).toBe("b");
-      expect(store.selectedFlatItem()?.type).toBe("session");
-      expect(store.state.selectedSessionId).toBeNull();
-      store.actions.setSelectedSessionId("b");
+      open(store, "/b");
+      // The jumped view is narrowed; the session list it returns to is not.
+      expect(store.state.scope).toBe("/b");
+      expect(store.baseScope()).toBeNull();
+      expect(store.filteredSessions().map((s) => s.session.id)).toEqual([
+        "a",
+        "b",
+      ]);
+      expect(store.state.selectedSessionId).toBe("a");
+      close(store);
+      expect(store.state.scope).toBeNull();
+      expect(store.selectedSession()?.id).toBe("a");
+    });
+
+    it(`restores a narrowed base after a ${via} jump to another repo`, () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", mainRepoRoot: "/a" }),
+        createMockSession({ id: "b", mainRepoRoot: "/b" }),
+      ]);
+      store.actions.setScope("/a");
+      open(store, "/b");
+      expect(store.state.scope).toBe("/b");
+      expect(store.baseScope()).toBe("/a");
+      expect(store.filteredSessions().map((s) => s.session.id)).toEqual(["a"]);
+      close(store);
+      expect(store.state.scope).toBe("/a");
+    });
+
+    it(`keeps an explicit s made inside a ${via} jump`, () => {
+      const store = createTUIStore({ groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", mainRepoRoot: "/a" }),
+        createMockSession({ id: "b", mainRepoRoot: "/b" }),
+      ]);
+      open(store, "/b");
       store.actions.setScope(null);
-      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.baseScope()).toBeNull();
+      store.actions.setScope("/b");
+      expect(store.baseScope()).toBe("/b");
+      close(store);
+      expect(store.state.scope).toBe("/b");
+      expect(store.filteredSessions().map((s) => s.session.id)).toEqual(["b"]);
     });
   }
+
+  it("ends a jump when another view opens on the base scope", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.showWorktrees("/b");
+    // `h`/`l` open the next view on the base scope.
+    store.actions.showSourcePicker(store.baseScope());
+    expect(store.state.scope).toBeNull();
+    store.actions.hideSourcePicker();
+    expect(store.state.scope).toBeNull();
+  });
+
+  it("re-establishes a jump on a return to the jumped view", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.showWorktrees("/b");
+    // A dialog opened from the panel hides it (Sessions, base scope) ...
+    store.actions.hideWorktrees();
+    expect(store.state.scope).toBeNull();
+    // ... and its cancel reopens it on the scope it carried out.
+    store.actions.showWorktrees("/b", { isReturn: true });
+    expect(store.state.scope).toBe("/b");
+    store.actions.hideWorktrees();
+    expect(store.state.scope).toBeNull();
+  });
+
+  it("tells the needs-attention band about waiting sessions the scope hides", () => {
+    const store = createTUIStore({ groupBy: "none" });
+    store.actions.setSessions([
+      createMockSession({ id: "a", mainRepoRoot: "/a", status: "idle" }),
+      createMockSession({ id: "w1", mainRepoRoot: "/b", status: "waiting" }),
+      createMockSession({ id: "w2", mainRepoRoot: "/b", status: "waiting" }),
+    ]);
+    store.actions.setScope("/a");
+    const band = store.flatItems()[0];
+    expect(band).toMatchObject({
+      type: "header",
+      label: "needs attention",
+      count: 0,
+      hiddenWaiting: 2,
+    });
+    // A `W` jump to /b leaves the Sessions scope, and so the notice, alone.
+    store.actions.showWorktrees("/b");
+    expect(store.flatItems()[0]).toMatchObject({ hiddenWaiting: 2 });
+    store.actions.hideWorktrees();
+    store.actions.setScope(null);
+    expect(store.flatItems()[0]).toMatchObject({ count: 2 });
+    expect(store.flatItems()[0]).not.toHaveProperty("hiddenWaiting");
+  });
   it("drops a hidden header and does not revive it when widening", () => {
     const store = createTUIStore({ groupBy: "project" });
     store.actions.setSessions([

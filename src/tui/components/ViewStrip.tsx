@@ -129,9 +129,12 @@ export function rightSegments(
  * them: its rule stub is the accent bar (`━━` in `theme.blue` where the
  * others are `──` in `theme.border`), its name is bold, and its name is the
  * text color where the others are subtext. The count rides after the name in
- * the overlay color (`·2`, or `·2/8` while `f` or a search hides rows) so the
- * name reads alone. The scope carries a `scope:` prefix because bare at the
- * right edge it read as a column label over the last column.
+ * the overlay color (`·2`, or `·2/8` while a scope, `f` or a search hides
+ * rows) so the name reads alone. Each count is taken in its OWN view's scope:
+ * a `W`/`N` jump narrows only the view it opened, so the other tabs count in
+ * the base scope they will show when reached. The scope carries a `scope:`
+ * prefix because bare at the right edge it read as a column label over the
+ * last column; it names the current view's scope.
  *
  * Board-wide signals (see `StripStatus`) sit inside the rule's right end,
  * ahead of `scope:` and joined to it by the same ` · `: `──── ● reconnecting
@@ -141,40 +144,62 @@ export function rightSegments(
 export const ViewStrip: Component<
   StripStatus & {
     view: View;
+    /** The current view's scope. */
     scope: string | null;
+    /** The scope every other view uses: differs from `scope` only while the
+     *  current view is a `W`/`N` jump. Defaults to `scope`. */
+    baseScope?: string | null;
+    /** Sessions in the Sessions view's own scope and filters. */
     sessions: number;
-    /** Sessions before `f` or a search filter hid any; shown as `·n/total`. */
+    /** Sessions before a scope, `f` or a search hid any; shown as
+     *  `·n/total`. */
     total?: number;
     facts: RepoFacts[];
     onView: (view: View) => void;
   }
 > = (props) => {
   const dims = useSharedTerminalDimensions();
-  const repos = () =>
-    props.facts.filter((r) => !props.scope || r.repoRoot === props.scope);
+  const scopeOf = (view: View) =>
+    view === props.view
+      ? props.scope
+      : props.baseScope === undefined
+        ? props.scope
+        : props.baseScope;
+  const repos = (view: View) => {
+    const scope = scopeOf(view);
+    return props.facts.filter((r) => !scope || r.repoRoot === scope);
+  };
+  const sum = (view: View, from: RepoFacts[]): number | undefined => {
+    // A repo that never answered (no GitHub remote, say) must not blank the
+    // total for every other repo; it only makes the sum partial, see `stale`.
+    const values = from.flatMap((r) =>
+      view === "worktrees"
+        ? r.worktrees
+          ? [r.worktrees.value.worktrees.length]
+          : []
+        : r.counts
+          ? [r.counts.value.prs + r.counts.value.issues]
+          : [],
+    );
+    return values.length ? values.reduce((n, v) => n + v, 0) : undefined;
+  };
   const count = (view: View): number | string | undefined => {
     if (view === "sessions")
       return props.total == null
         ? props.sessions
         : `${props.sessions}/${props.total}`;
-    // A repo that never answered (no GitHub remote, say) must not blank the
-    // total for every other repo; it only makes the sum partial, see `stale`.
-    const values = view === "worktrees" ? worktreeFacts() : countFacts();
-    if (!values.length) return undefined;
-    return values.reduce((n, value) => n + value, 0);
+    const shown = sum(view, repos(view));
+    if (shown === undefined || !scopeOf(view)) return shown;
+    // Scoped: the total says how much the scope is hiding, the same way
+    // the Sessions count does.
+    return `${shown}/${sum(view, props.facts) ?? shown}`;
   };
-  const worktreeFacts = () =>
-    repos().flatMap((r) =>
-      r.worktrees ? [r.worktrees.value.worktrees.length] : [],
-    );
-  const countFacts = () =>
-    repos().flatMap((r) =>
-      r.counts ? [r.counts.value.prs + r.counts.value.issues] : [],
-    );
+  // Over every repo whose fact the count draws on, which is all of them
+  // once a scoped count shows its total.
   const stale = (view: View) =>
     view === "sessions"
       ? false
-      : repos().some((r) => {
+      : (scopeOf(view) ? props.facts : repos(view)).some((r) => {
           const fact = view === "worktrees" ? r.worktrees : r.counts;
           return !fact || fact.stale;
         });
