@@ -97,3 +97,105 @@ Bun.spawnSync(tmuxArgv("wait-for", "sidebar-exit"));
     rmSync(home, { recursive: true, force: true });
   }
 }, 15000);
+
+it.skipIf(!tmuxBinary)("repins a sidebar pane to the configured width when it settled wrong", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ccmux-sidebar-"));
+  const socket = `/tmp/ccmux-sidebar-${crypto.randomUUID()}`;
+  const env = {
+    ...process.env,
+    CCMUX_HOME: home,
+    CCMUX_TMUX_SOCKET: socket,
+    TMUX: `${socket},0,0`,
+  };
+
+  function tmux(...args: string[]): string {
+    const result = Bun.spawnSync(
+      tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, ...args),
+      { env },
+    );
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  }
+
+  // The boot re-pin runs inside the sidebar process, so drive it through a
+  // subprocess: this test process may itself sit in tmux, where ambient
+  // resolution ignores CCMUX_TMUX_SOCKET and the call would miss the socket.
+  const driver = join(home, "repin-driver.ts");
+  writeFileSync(
+    driver,
+    `import { repinSidebarPaneWidth } from ${JSON.stringify(join(root, "src/commands/sidebar.ts"))};\nawait repinSidebarPaneWidth(process.argv[2], Number(process.argv[3]));\n`,
+  );
+  function repin(paneId: string, width: number): void {
+    const result = Bun.spawnSync([process.execPath, driver, paneId, String(width)], { env });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  }
+
+  const paneWidth = (paneId: string): string =>
+    tmux("display-message", "-p", "-t", paneId, "#{pane_width}");
+
+  try {
+    tmux("-f", "/dev/null", "new-session", "-d", "-s", "repin", "-x", "160", "-y", "40", "sleep 60");
+    const pane = tmux("split-window", "-h", "-d", "-t", "repin:", "-P", "-F", "#{pane_id}", "-l", "100", "sleep 60");
+    expect(paneWidth(pane)).toBe("100");
+
+    repin(pane, 30);
+    expect(paneWidth(pane)).toBe("30");
+
+    repin(pane, 30);
+    expect(paneWidth(pane)).toBe("30");
+  } finally {
+    Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 15000);
+
+it.skipIf(!tmuxBinary)("re-arms the resize hook when a mixed-version upgrade orphaned the auto-open hooks", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ccmux-sidebar-"));
+  const socket = `/tmp/ccmux-sidebar-${crypto.randomUUID()}`;
+  const env = {
+    ...process.env,
+    CCMUX_HOME: home,
+    CCMUX_TMUX_SOCKET: socket,
+    TMUX: `${socket},0,0`,
+  };
+
+  function tmux(...args: string[]): string {
+    const result = Bun.spawnSync(
+      tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, ...args),
+      { env },
+    );
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  }
+
+  const driver = join(home, "repair-driver.ts");
+  writeFileSync(
+    driver,
+    `import { repairResizeHook } from ${JSON.stringify(join(root, "src/commands/sidebar.ts"))};\nawait repairResizeHook(Number(process.argv[2]));\n`,
+  );
+  function repair(width: number): void {
+    const result = Bun.spawnSync([process.execPath, driver, String(width)], { env });
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  }
+
+  const resizeHookBody = (): string =>
+    tmux("show-hooks", "-gw")
+      .split("\n")
+      .find((line) => line.includes("window-resized[99]")) ?? "";
+
+  try {
+    tmux("-f", "/dev/null", "new-session", "-d", "-s", "repair", "-x", "160", "-y", "40", "sleep 60");
+
+    repair(30);
+    expect(resizeHookBody()).toBe("");
+
+    // A pre-`after-new-session` build's toggle-off leaves the new hook live
+    // while removing the hooks it knew, including `window-resized[99]`.
+    tmux("set-hook", "-g", "after-new-session[99]", "split-window -fhbd 'sleep 60 && exec ccmux sidebar'");
+    repair(30);
+    expect(resizeHookBody()).toContain("-x 30");
+  } finally {
+    Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 15000);
