@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { sessionAutoOpenHookCommand } from "./sidebar";
@@ -267,6 +267,52 @@ it.skipIf(!tmuxBinary)("waits out the pre-attach window before splitting the ini
       await Bun.sleep(200);
     }
     expect(paneWidths("lonely:")).toEqual(["0:30", "31:49"]);
+  } finally {
+    Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 15000);
+
+it.skipIf(!tmuxBinary)("passes a shell-metacharacter start directory to the split without executing it", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ccmux-sidebar-"));
+  const socket = `/tmp/ccmux-sidebar-${crypto.randomUUID()}`;
+  const bin = join(home, "bin");
+  const env = {
+    ...process.env,
+    CCMUX_HOME: home,
+    CCMUX_TMUX_SOCKET: socket,
+    TMUX: `${socket},0,0`,
+    PATH: `${bin}:${process.env.PATH}`,
+  };
+  mkdirSync(bin);
+  writeFileSync(join(bin, "ccmux"), "#!/bin/sh\nsleep 300\n", { mode: 0o755 });
+  // No slashes: the metacharacters must stay a single directory name. The
+  // injected command writes a tmux environment variable, observable without
+  // creating a file at a relative path.
+  const dir = join(home, "weird x$(tmux set-environment -g CCMUX_INJECTED 1)");
+  mkdirSync(dir);
+
+  function tmux(...args: string[]): string {
+    const result = Bun.spawnSync(
+      tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, ...args),
+      { env },
+    );
+    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  }
+
+  try {
+    tmux("-f", "/dev/null", "new-session", "-d", "-s", "seed", "-x", "160", "-y", "40", "sleep 60");
+    tmux("set-hook", "-g", "after-new-session[99]", sessionAutoOpenHookCommand(30, "left"));
+    tmux("new-session", "-d", "-s", "meta", "-x", "160", "-y", "40", "-c", dir, "sleep 60");
+    for (let i = 0; i < 30; i++) {
+      if (tmux("list-panes", "-t", "meta:", "-F", "#{pane_id}").split("\n").filter(Boolean).length === 2) break;
+      await Bun.sleep(200);
+    }
+    const paths = tmux("list-panes", "-t", "meta:", "-F", "#{pane_current_path}").split("\n").sort();
+    const real = realpathSync(dir);
+    expect(paths).toEqual([real, real]);
+    expect(tmux("show-environment", "-g").split("\n").some((line) => line.startsWith("CCMUX_INJECTED"))).toBe(false);
   } finally {
     Bun.spawnSync(tmuxArgvFor(tmuxBinary ?? "tmux", "-S", socket, "kill-server"), { env });
     rmSync(home, { recursive: true, force: true });
