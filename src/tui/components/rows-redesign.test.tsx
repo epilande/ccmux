@@ -527,7 +527,7 @@ describe("rows redesign", () => {
     );
     await setup.renderOnce();
     const lines = setup.captureCharFrame().split("\n");
-    expect(lines[0]).toContain("▶ … (42)");
+    expect(lines[0]).toContain("▸ … (42)");
     expect(lines[0]).toContain("● 1");
     expect(lines[1].trim()).toBe("");
   });
