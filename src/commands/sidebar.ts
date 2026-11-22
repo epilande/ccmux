@@ -34,9 +34,15 @@ export function ccmuxPortEnvPrefix(): string {
   return `env CCMUX_PORT=${port} `;
 }
 
-/** Shell command for spawning a sidebar pane (used by split-window and auto-open hook). */
-export function sidebarSpawnCmd(delaySeconds: number): string {
-  return `sleep ${delaySeconds.toFixed(2)} && exec ${ccmuxPortEnvPrefix()}ccmux sidebar`;
+/**
+ * Shell command for spawning a sidebar pane (used by split-window and
+ * auto-open hook). The resolved width travels with the child: a plain
+ * `ccmux sidebar` would re-resolve it from preferences, and the child's boot
+ * re-pin would then drag a pane split at a `--width` override back to the
+ * stored one, disagreeing with the split and the resize hook.
+ */
+export function sidebarSpawnCmd(delaySeconds: number, width: number): string {
+  return `sleep ${delaySeconds.toFixed(2)} && exec ${ccmuxPortEnvPrefix()}ccmux sidebar --width ${width}`;
 }
 
 /** Base pty-settle delay before the sidebar process boots (seconds). */
@@ -153,6 +159,8 @@ export function createSidebarCommand(): Command {
           ensureDaemon(),
           getUIState(),
           import("../tui"),
+          selfPane ? repinSidebarPaneWidth(selfPane, width) : Promise.resolve(),
+          repairResizeHook(width),
         ]);
         markStartup("daemon_ready");
 
@@ -315,7 +323,7 @@ async function spawnSidebarInWindow(
   cwd?: string,
 ): Promise<void> {
   const splitFlag = position === "left" ? "-fhbd" : "-fhd";
-  const spawnCmd = sidebarSpawnCmd(delaySeconds);
+  const spawnCmd = sidebarSpawnCmd(delaySeconds, width);
 
   // The sidebar process sets its own pane title on startup (via select-pane
   // -t $TMUX_PANE -T). We avoid setting the title from here because
@@ -349,6 +357,33 @@ async function handleResize(width: number, socket?: string): Promise<void> {
       tmuxWithSocket(socket, "resize-pane", "-t", id, "-x", String(width)),
     ),
   );
+}
+
+/**
+ * One-shot boot re-pin: force this pane to the configured width.
+ *
+ * A sidebar pane can settle at the wrong width with no later resize event to
+ * correct it: a window resized between pane creation and this process setting
+ * its title evades `window-resized[99]`'s title filter (the pane is still
+ * untitled), and a server left mid-upgrade can lack that hook entirely, since
+ * a pre-`after-new-session` build's toggle-off removed only the hooks it
+ * knew. Re-pin here so the pane converges on boot regardless of how it was
+ * resized.
+ */
+export async function repinSidebarPaneWidth(
+  paneId: string,
+  width: number,
+): Promise<void> {
+  try {
+    const current = Number.parseInt(
+      await tmux("display-message", "-p", "-t", paneId, "#{pane_width}"),
+      10,
+    );
+    if (!Number.isInteger(current) || current === width) return;
+    await tmux("resize-pane", "-t", paneId, "-x", String(width));
+  } catch {
+    // Pane died mid-boot; nothing to pin.
+  }
 }
 
 /** Bounds on widths persisted from manual pane resizes. */
@@ -397,7 +432,7 @@ async function registerAutoOpenHook(
 ): Promise<void> {
   const splitArgs =
     position === "left" ? `-fhbd -l ${width}` : `-fhd -l ${width}`;
-  const cmd = `split-window ${splitArgs} -c '#{pane_current_path}' '${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}'`;
+  const cmd = `split-window ${splitArgs} -c '#{pane_current_path}' '${sidebarSpawnCmd(SPAWN_BASE_DELAY_S, width)}'`;
   await Promise.all(
     AUTO_OPEN_HOOKS.map((hook) =>
       tmux(
@@ -405,11 +440,57 @@ async function registerAutoOpenHook(
         "-g",
         hook,
         hook === "after-new-session[99]"
-          ? `if-shell -F '#{||:#{==:#{session_grouped},0},#{==:#{session_group_size},1}}' "${cmd}"`
+          ? sessionAutoOpenHookCommand(width, position)
           : cmd,
       ),
     ),
   );
+}
+
+/** Polls before giving up on a client and splitting at the current size. */
+const ATTACH_WAIT_POLLS = 10;
+
+/**
+ * The `after-new-session[99]` body: a bounded wait for the session's first
+ * client, then the sidebar split.
+ *
+ * Unlike `after-new-window[99]`, this hook fires while the initial window
+ * may still be at its pre-client size: a detached `new-session` starts at
+ * default-size, and the attaching client resizes it moments later, which
+ * redistributes pane widths proportionally. Splitting at the pre-attach
+ * size balloons the sidebar (a 47-column pane at 80 columns rescales to
+ * ~140 at a 270-column client) until a re-pin lands, a visible flash. So the
+ * body waits for `session_attached` and splits into the now-client-sized
+ * window; sessions never attached still get their sidebar after the wait.
+ *
+ * Format escaping follows `resizeHookCommand`: the body is single-quoted at
+ * the tmux layer and deliberately contains no quote of its own, so it cannot
+ * nest inside an `if-shell` argument without a second escaping level — the
+ * session-group guard therefore reads the same two formats from the shell.
+ * `#{pane_id}` and `#{socket_path}` are baked when the hook fires (`%N` ids
+ * and socket paths carry no shell syntax). The start directory is read just
+ * before the split, by `display-message` against the captured pane:
+ * `split-window` resolves a `-c` format against the session's *current*
+ * window (a window switch during the wait would pick the wrong pane), the
+ * fire-time snapshot is empty on tmux versions that have not started the
+ * pane's process yet, and a baked path would pass through the shell where a
+ * directory whose name contains `$(...)` would execute. The captured value
+ * travels as a shell variable — data, never re-parsed — and `-c` is dropped
+ * entirely when the capture comes back empty.
+ */
+export function sessionAutoOpenHookCommand(
+  width: number,
+  position: SidebarPosition,
+): string {
+  const splitArgs =
+    position === "left" ? `-fhbd -l ${width}` : `-fhd -l ${width}`;
+  const inner = [
+    `g=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_grouped}:##{session_group_size}" 2>/dev/null) || exit 0`,
+    `[ "\${g%%:*}" = "1" ] && [ "\${g#*:}" != "1" ] && exit 0`,
+    `i=0; while [ $i -lt ${ATTACH_WAIT_POLLS} ] && [ "$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_attached}" 2>/dev/null)" = "0" ]; do i=$((i+1)); sleep 0.1; done`,
+    `d=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{pane_current_path}" 2>/dev/null); if [ -n "$d" ]; then set -- -c "$d"; else set --; fi; tmux -S "#{socket_path}" split-window ${splitArgs} "$@" -t "#{pane_id}" "${sidebarSpawnCmd(SPAWN_BASE_DELAY_S, width)}"`,
+  ].join("; ");
+  return `run-shell -b '${inner}'`;
 }
 
 async function unregisterAutoOpenHook(): Promise<void> {
@@ -475,6 +556,22 @@ async function isResizeHookRegistered(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Repair a hook set left lopsided by a mixed-version upgrade: a build from
+ * before `after-new-session[99]` existed unregisters only the hook names it
+ * knows, so its toggle-off leaves that new hook live with no
+ * `window-resized[99]` left to re-pin widths after window resizes. Every
+ * sidebar boot re-arms the resize hook on such a server; a standalone
+ * sidebar (no auto-open hooks) still installs nothing.
+ */
+export async function repairResizeHook(width: number): Promise<void> {
+  const [autoOpen, resize] = await Promise.all([
+    isAutoOpenHookRegistered(),
+    isResizeHookRegistered(),
+  ]);
+  if (autoOpen && !resize) await registerResizeHook(width);
 }
 
 async function handleToggle(
