@@ -7,14 +7,18 @@ const TIMEOUT_MS = 4000;
 // The poll is the guarantee; the watcher just makes the common case fast.
 const POLL_MS = 25;
 
-export async function waitForIdleMarker(directory: string, id: string) {
+export async function waitForMarkerState(
+  directory: string,
+  id: string,
+  state: string,
+) {
   const file = join(directory, `omp-${id}.json`);
   const { promise, resolve, reject } = Promise.withResolvers<void>();
   let lastState: unknown;
   const check = () => {
     try {
       lastState = JSON.parse(readFileSync(file, "utf8")).state;
-      if (lastState === "idle") resolve();
+      if (lastState === state) resolve();
     } catch {}
   };
   let watcher: FSWatcher | undefined;
@@ -28,7 +32,7 @@ export async function waitForIdleMarker(directory: string, id: string) {
     () =>
       reject(
         new Error(
-          `timed out after ${TIMEOUT_MS}ms waiting for ${file} to be idle (last state: ${JSON.stringify(lastState)})`,
+          `timed out after ${TIMEOUT_MS}ms waiting for ${file} to be ${state} (last state: ${JSON.stringify(lastState)})`,
         ),
       ),
     TIMEOUT_MS,
@@ -41,4 +45,8 @@ export async function waitForIdleMarker(directory: string, id: string) {
     clearTimeout(timeout);
     watcher?.close();
   }
+}
+
+export function waitForIdleMarker(directory: string, id: string) {
+  return waitForMarkerState(directory, id, "idle");
 }
