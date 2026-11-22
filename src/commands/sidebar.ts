@@ -34,9 +34,15 @@ export function ccmuxPortEnvPrefix(): string {
   return `env CCMUX_PORT=${port} `;
 }
 
-/** Shell command for spawning a sidebar pane (used by split-window and auto-open hook). */
-export function sidebarSpawnCmd(delaySeconds: number): string {
-  return `sleep ${delaySeconds.toFixed(2)} && exec ${ccmuxPortEnvPrefix()}ccmux sidebar`;
+/**
+ * Shell command for spawning a sidebar pane (used by split-window and
+ * auto-open hook). The resolved width travels with the child: a plain
+ * `ccmux sidebar` would re-resolve it from preferences, and the child's boot
+ * re-pin would then drag a pane split at a `--width` override back to the
+ * stored one, disagreeing with the split and the resize hook.
+ */
+export function sidebarSpawnCmd(delaySeconds: number, width: number): string {
+  return `sleep ${delaySeconds.toFixed(2)} && exec ${ccmuxPortEnvPrefix()}ccmux sidebar --width ${width}`;
 }
 
 /** Base pty-settle delay before the sidebar process boots (seconds). */
@@ -317,7 +323,7 @@ async function spawnSidebarInWindow(
   cwd?: string,
 ): Promise<void> {
   const splitFlag = position === "left" ? "-fhbd" : "-fhd";
-  const spawnCmd = sidebarSpawnCmd(delaySeconds);
+  const spawnCmd = sidebarSpawnCmd(delaySeconds, width);
 
   // The sidebar process sets its own pane title on startup (via select-pane
   // -t $TMUX_PANE -T). We avoid setting the title from here because
@@ -426,7 +432,7 @@ async function registerAutoOpenHook(
 ): Promise<void> {
   const splitArgs =
     position === "left" ? `-fhbd -l ${width}` : `-fhd -l ${width}`;
-  const cmd = `split-window ${splitArgs} -c '#{pane_current_path}' '${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}'`;
+  const cmd = `split-window ${splitArgs} -c '#{pane_current_path}' '${sidebarSpawnCmd(SPAWN_BASE_DELAY_S, width)}'`;
   await Promise.all(
     AUTO_OPEN_HOOKS.map((hook) =>
       tmux(
@@ -482,7 +488,7 @@ export function sessionAutoOpenHookCommand(
     `g=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_grouped}:##{session_group_size}" 2>/dev/null) || exit 0`,
     `[ "\${g%%:*}" = "1" ] && [ "\${g#*:}" != "1" ] && exit 0`,
     `i=0; while [ $i -lt ${ATTACH_WAIT_POLLS} ] && [ "$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{session_attached}" 2>/dev/null)" = "0" ]; do i=$((i+1)); sleep 0.1; done`,
-    `d=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{pane_current_path}" 2>/dev/null); if [ -n "$d" ]; then set -- -c "$d"; else set --; fi; tmux -S "#{socket_path}" split-window ${splitArgs} "$@" -t "#{pane_id}" "${sidebarSpawnCmd(SPAWN_BASE_DELAY_S)}"`,
+    `d=$(tmux -S "#{socket_path}" display-message -p -t "#{pane_id}" -F "##{pane_current_path}" 2>/dev/null); if [ -n "$d" ]; then set -- -c "$d"; else set --; fi; tmux -S "#{socket_path}" split-window ${splitArgs} "$@" -t "#{pane_id}" "${sidebarSpawnCmd(SPAWN_BASE_DELAY_S, width)}"`,
   ].join("; ");
   return `run-shell -b '${inner}'`;
 }

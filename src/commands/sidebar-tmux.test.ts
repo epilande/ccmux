@@ -74,6 +74,7 @@ Bun.spawnSync(tmuxArgv("wait-for", "sidebar-exit"));
     tmux("-f", "/dev/null", "new-session", "-d", "-s", "seed", "-x", "160", "-y", "40", "sleep 60");
     tmux("set-option", "-g", "default-shell", "/bin/sh");
     sidebar("--toggle", "--width", "30");
+    expect(tmux("show-hooks", "-g")).toContain("--width 30");
     await expectSidebar("seed:", 30);
 
     tmux("new-session", "-d", "-s", "fresh", "-x", "160", "-y", "40", "sleep 60");
