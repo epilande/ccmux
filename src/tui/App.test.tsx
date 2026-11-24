@@ -1141,6 +1141,147 @@ describe("App sidebar mode", () => {
     }
   });
 
+  describe("pending click activation", () => {
+    /** Renders two grouped sessions and clicks alpha, leaving its state POST
+     *  in flight. Later POSTs answer immediately. */
+    async function clickAlphaWithPendingPost() {
+      let releasePost!: () => void;
+      let failPost!: (error: Error) => void;
+      let postCount = 0;
+      spyOn(globalThis, "fetch").mockImplementation(
+        Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const isPost =
+              String(input).includes("/sidebar-state") &&
+              init?.method === "POST";
+            if (!isPost || ++postCount > 1) return Response.json({});
+            return new Promise<Response>((resolve, reject) => {
+              releasePost = () => resolve(Response.json({}));
+              failPost = reject;
+              const signal = init?.signal;
+              signal?.addEventListener("abort", () => reject(signal.reason));
+            });
+          },
+          { preconnect: () => {} },
+        ),
+      );
+
+      await renderApp(60, 20, { sidebar: true, groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+
+      await setup.mockMouse.click(5, rowOf("alpha") + 1);
+      await settle();
+      // Both halves of "pending": the POST left, and nothing has switched yet.
+      expect(postCount).toBe(1);
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+
+      return { releasePost, failPost };
+    }
+
+    /** Screen row of a project's group header. */
+    function rowOf(project: string): number {
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => new RegExp(`[▼▶] ${project}`).test(line));
+      expect(row).toBeGreaterThan(0);
+      return row;
+    }
+
+    async function settle() {
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+    }
+
+    it("activates once the POST settles", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
+    });
+
+    it("activates when the POST fails and nothing superseded it", async () => {
+      const { failPost } = await clickAlphaWithPendingPost();
+      failPost(new Error("daemon unreachable"));
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
+    });
+
+    it("drops a click superseded by a group header click", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      await setup.mockMouse.click(5, rowOf("beta"));
+      await settle();
+      releasePost();
+      await settle();
+      expect(setup.captureCharFrame()).toContain("▶ beta");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("activates only the latest of two clicked sessions", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      await setup.mockMouse.click(5, rowOf("beta") + 1);
+      await settle();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%20"]]);
+    });
+
+    it("drops a click superseded by keyboard navigation", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      setup.mockInput.pressKey("j");
+      await settle();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by an overlay, even one closed again", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      setup.mockInput.pressKey("?");
+      await settle();
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+      setup.mockInput.pressKey("?");
+      await settle();
+      expect(setup.captureCharFrame()).not.toContain("Keyboard Shortcuts");
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by a row menu", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      await setup.mockMouse.click(5, rowOf("alpha") + 1, MouseButtons.RIGHT);
+      await settle();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a pending click on dispose", async () => {
+      await clickAlphaWithPendingPost();
+      setup.renderer.destroy();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+  });
+
   it("Escape does not exit in sidebar mode", async () => {
     const exitSpy = mock(() => {});
     const originalExit = process.exit;

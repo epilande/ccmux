@@ -330,6 +330,9 @@ export function App(props: AppProps) {
   });
   markStartup("store_created");
   let readSidebarScrollTop: (() => number) | null = null;
+  /** Identifies the latest user action. A sidebar click holds its value across
+   *  the state flush and activates only if nothing has superseded it since. */
+  let activationToken = 0;
   let suppressFlashOnce = false;
   function withoutPaneFlash(fn: () => void): void {
     suppressFlashOnce = true;
@@ -404,9 +407,13 @@ export function App(props: AppProps) {
       // Flush selection + current scrollTop to the daemon BEFORE switching
       // windows so the destination sidebar renders the exact same viewport
       // offset without a post-switch jump.
-      void store
-        .flushSidebarStateNow(readSidebarScrollTop?.())
-        .finally(() => activateSession(item.filteredSession.session));
+      const token = ++activationToken;
+      void store.flushSidebarStateNow(readSidebarScrollTop?.()).finally(() => {
+        // The overlay check covers one that opened without input, such as a
+        // notice from a spawn that was still in flight.
+        if (token !== activationToken || modalOverlayOpen()) return;
+        activateSession(item.filteredSession.session);
+      });
       return;
     }
     activateSession(item.filteredSession.session);
@@ -1186,6 +1193,7 @@ export function App(props: AppProps) {
   }
 
   function handleRowActivate(item: FlatItem, index: number) {
+    activationToken++;
     if (modalOverlayOpen()) {
       return;
     }
@@ -1282,6 +1290,7 @@ export function App(props: AppProps) {
     index: number,
     event: MouseEvent,
   ) {
+    activationToken++;
     if (modalOverlayOpen() || store.state.handoffPick) {
       return;
     }
@@ -3632,6 +3641,7 @@ export function App(props: AppProps) {
   }
 
   onCleanup(() => {
+    activationToken++;
     hydrationAbort?.abort();
     sseClient?.disconnect();
     if (tickTimerId) untrackInterval(tickTimerId);
@@ -3664,6 +3674,7 @@ export function App(props: AppProps) {
   let pendingZ = false;
 
   useKeyboard((event: KeyEvent) => {
+    activationToken++;
     // The daemon suppresses `active_pane` for ccmux-titled panes, so a sidebar
     // that is its own window's active pane never gets the event that would
     // unhide it; a keypress is the only signal that it is being looked at.
