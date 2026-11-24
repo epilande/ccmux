@@ -2693,6 +2693,7 @@ export function App(props: AppProps) {
   /** Acknowledge whatever the notice was reporting, then do what it was
    *  holding up. */
   function dismissNotice(): void {
+    activationToken++;
     const next = afterNotice;
     afterNotice = null;
     store.actions.dismissNotice();

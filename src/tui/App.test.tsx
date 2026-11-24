@@ -1145,9 +1145,14 @@ describe("App sidebar mode", () => {
   describe("pending click activation", () => {
     /** Renders alpha, beta and any extra rows, then clicks alpha, leaving its
      *  state POST in flight. Later POSTs answer immediately. `scrollTop` is
-     *  applied as a peer's sync, which posts nothing of its own. */
+     *  applied as a peer's sync, which posts nothing of its own. `spawn`
+     *  answers a spawn submitted before the click, from a dialog then closed. */
     async function clickAlphaWithPendingPost(
-      opts: { extraRows?: number; scrollTop?: number } = {},
+      opts: {
+        extraRows?: number;
+        scrollTop?: number;
+        spawn?: Promise<Response>;
+      } = {},
     ) {
       let releasePost!: () => void;
       let failPost!: (error: Error) => void;
@@ -1155,9 +1160,16 @@ describe("App sidebar mode", () => {
       spyOn(globalThis, "fetch").mockImplementation(
         Object.assign(
           async (input: string | URL | Request, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith("/agents")) {
+              const claude = { name: "claude", displayName: "Claude" };
+              return Response.json({
+                agents: [{ ...claude, shortCode: "CC", supportsPrompt: true }],
+              });
+            }
+            if (url.endsWith("/spawn") && opts.spawn) return opts.spawn;
             const isPost =
-              String(input).includes("/sidebar-state") &&
-              init?.method === "POST";
+              url.includes("/sidebar-state") && init?.method === "POST";
             if (!isPost || ++postCount > 1) return Response.json({});
             return new Promise<Response>((resolve, reject) => {
               releasePost = () => resolve(Response.json({}));
@@ -1202,6 +1214,17 @@ describe("App sidebar mode", () => {
         sseCallbacks!.onSidebarState!("s1", null, 1, "peer", opts.scrollTop);
         await settle();
         expect(scrollTop()).toBe(opts.scrollTop);
+      }
+
+      if (opts.spawn) {
+        setup.mockInput.pressKey("n");
+        await settle();
+        expect(setup.captureCharFrame()).toContain("New session");
+        setup.mockInput.pressEnter();
+        await settle();
+        deliverEscape(setup.renderer);
+        await settle();
+        expect(setup.captureCharFrame()).not.toContain("New session");
       }
 
       await setup.mockMouse.click(5, alphaRow);
@@ -1322,6 +1345,45 @@ describe("App sidebar mode", () => {
       releasePost();
       await settle();
       expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
+    });
+
+    /** A pending click, then a notice raised with no input: the answer to a
+     *  spawn that was still in flight. */
+    async function clickAlphaThenNotice() {
+      let answerSpawn!: (response: Response) => void;
+      const { releasePost } = await clickAlphaWithPendingPost({
+        spawn: new Promise((resolve) => (answerSpawn = resolve)),
+      });
+      answerSpawn(
+        Response.json(
+          { error: "could not restore", stashSha: "abc123" },
+          { status: 500 },
+        ),
+      );
+      await settle();
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("any key to dismiss"));
+      expect(row).toBeGreaterThan(0);
+      return { releasePost, noticeRow: row };
+    }
+
+    it("drops a click whose POST settles under a notice", async () => {
+      const { releasePost } = await clickAlphaThenNotice();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by a notice dismissed with the pointer", async () => {
+      const { releasePost, noticeRow } = await clickAlphaThenNotice();
+      await setup.mockMouse.click(30, noticeRow);
+      await settle();
+      expect(setup.captureCharFrame()).not.toContain("any key to dismiss");
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
     });
 
     it("drops a pending click on dispose", async () => {
