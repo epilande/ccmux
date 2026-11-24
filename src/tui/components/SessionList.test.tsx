@@ -1077,6 +1077,83 @@ describe("SessionList", () => {
   });
 });
 
+describe("SessionList user scroll", () => {
+  const rows = (n: number): FlatItem[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeSessionItem(`s${i}`, "g", {
+        project: `row-${i}`,
+        cwd: `/code/row-${i}`,
+      }),
+    );
+
+  async function mount(count: number) {
+    const [items, setItems] = createSignal(rows(count));
+    const [index, setIndex] = createSignal(0);
+    const userScrolls: number[] = [];
+    const moves: number[] = [];
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items()}
+            selectedIndex={index()}
+            previewWidth={0}
+            onUserScroll={(top) => userScrolls.push(top)}
+            onScrollMoved={(top) => moves.push(top)}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 60, height: 12 },
+    );
+    await frames();
+    const [box] = findScrollBoxes(setup.renderer);
+    return {
+      box: box!,
+      items,
+      setItems,
+      setIndex,
+      userScrolls,
+      moves,
+      mouse: createMockMouse(setup.renderer),
+    };
+  }
+
+  async function frames() {
+    for (let i = 0; i < 3; i++) await setup.renderOnce();
+  }
+
+  it("reports a wheel notch", async () => {
+    const { mouse, userScrolls } = await mount(50);
+    await mouse.scroll(5, 5, "down");
+    await frames();
+    expect(userScrolls).toEqual([1]);
+  });
+
+  it("reports a scrollbar press", async () => {
+    const { mouse, box, userScrolls } = await mount(50);
+    await mouse.click(box.x + box.width - 1, box.y + box.height - 1);
+    await frames();
+    expect(box.scrollTop).toBeGreaterThan(0);
+    expect(userScrolls).toContain(box.scrollTop);
+  });
+
+  it("records a layout clamp without reporting it as user scroll", async () => {
+    const { box, items, setItems, userScrolls, moves, mouse } = await mount(50);
+    await mouse.scroll(5, 5, "down");
+    await frames();
+    expect(box.scrollTop).toBe(1);
+    userScrolls.length = 0;
+    moves.length = 0;
+
+    setItems(items().slice(0, 10));
+    await frames();
+
+    expect(box.scrollTop).toBe(0);
+    expect(moves).toEqual([0]);
+    expect(userScrolls).toEqual([]);
+  });
+});
+
 describe("isActivePaneRow", () => {
   it("never marks a paneless invoke row active, even when activePaneId is null", () => {
     // The bug this guards: tmuxPane null === activePaneId null would be true,

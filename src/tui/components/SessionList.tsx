@@ -347,7 +347,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
   let prevSyncGeneration = 0;
   let pendingLayoutScroll = false;
   let suppressSelectionScroll = false;
-  let programmaticScrolling = false;
+  let scrollInputActive = false;
+
+  /** Marks scroll changes as the user's while one input event is dispatched.
+   *  OpenTUI scrolls synchronously on input, but also moves the offset itself
+   *  when layout shrinks, and emits the same `change` for both. */
+  function markScrollInput(): void {
+    scrollInputActive = true;
+    queueMicrotask(() => {
+      scrollInputActive = false;
+    });
+  }
 
   createEffect(() => {
     // Re-run once the scrollbox gets real dimensions (and on later resizes).
@@ -383,12 +393,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       prevSelectedKey = selectedKey;
       pendingLayoutScroll = false;
       suppressSelectionScroll = false;
-      programmaticScrolling = true;
-      try {
-        scrollboxRef.scrollTo(sync.top);
-      } finally {
-        programmaticScrolling = false;
-      }
+      scrollboxRef.scrollTo(sync.top);
       return;
     }
 
@@ -458,12 +463,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (target === null) {
       pendingLayoutScroll = false;
     } else {
-      programmaticScrolling = true;
-      try {
-        scrollboxRef.scrollTo(target);
-      } finally {
-        programmaticScrolling = false;
-      }
+      scrollboxRef.scrollTo(target);
       pendingLayoutScroll = contentHeight < target + viewportHeight;
     }
   });
@@ -623,7 +623,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             props.onScrollTopReader?.(() => r.scrollTop);
             r.verticalScrollBar.on("change", () => {
               props.onScrollMoved?.(r.scrollTop);
-              if (!programmaticScrolling) {
+              if (scrollInputActive) {
                 pendingLayoutScroll = false;
                 props.onUserScroll?.(r.scrollTop);
               }
@@ -635,6 +635,18 @@ export const SessionList: Component<SessionListProps> = (props) => {
             r.content.on("resize", bump);
           }}
           flexGrow={1}
+          onMouse={(event) => {
+            // Wheel notches, and presses and drags on the scrollbar.
+            if (
+              event.type === "scroll" ||
+              event.type === "down" ||
+              event.type === "drag" ||
+              event.type === "up"
+            ) {
+              markScrollInput();
+            }
+          }}
+          onKeyDown={markScrollInput}
         >
           <For each={props.items}>
             {(item, index) => renderItem(item, index)}
