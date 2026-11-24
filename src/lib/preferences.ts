@@ -249,6 +249,8 @@ export interface NotificationsConfig {
 export interface StatusBarConfig {
   /** Default true; false disables publishing. Settings require a daemon restart. */
   enabled?: boolean;
+  /** Opt-in working spinner on tmux 3.8+; requires #{E:@ccmux_state_mark}. */
+  animateWorking?: boolean;
   /** Override the shared iconStyle glyphs (dot defaults: ■ / ●). */
   waitingIcon?: string;
   unreadIcon?: string;

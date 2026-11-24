@@ -116,6 +116,12 @@ describe("parseAutoOpenHook", () => {
     expect(parseAutoOpenHook(output)).toBe(true);
   });
 
+  it("recognizes a surviving session hook for width updates", () => {
+    const output =
+      "after-new-session[99] split-window -fhbd -l 30 'sleep 0.1 && exec ccmux sidebar'";
+    expect(parseAutoOpenHook(output)).toBe(true);
+  });
+
   it("returns false when hook is absent", () => {
     const output = "after-new-session[0] -> run-shell 'some command'";
     expect(parseAutoOpenHook(output)).toBe(false);
@@ -298,17 +304,19 @@ describe("ccmuxPortEnvPrefix", () => {
     }
   });
 
-  it("bakes the forwarded port into the spawn command", () => {
+  it("bakes the forwarded port and the resolved width into the spawn command", () => {
     withPort("2270", () =>
-      expect(sidebarSpawnCmd(0.1)).toBe(
-        "sleep 0.10 && exec env CCMUX_PORT=2270 ccmux sidebar",
+      expect(sidebarSpawnCmd(0.1, 40)).toBe(
+        "sleep 0.10 && exec env CCMUX_PORT=2270 ccmux sidebar --width 40",
       ),
     );
   });
 
-  it("leaves the spawn command bare when no port is forwarded", () => {
+  it("leaves the spawn command bare except the width when no port is forwarded", () => {
     withPort(undefined, () =>
-      expect(sidebarSpawnCmd(0.6)).toBe("sleep 0.60 && exec ccmux sidebar"),
+      expect(sidebarSpawnCmd(0.6, 30)).toBe(
+        "sleep 0.60 && exec ccmux sidebar --width 30",
+      ),
     );
   });
 });
