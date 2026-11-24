@@ -9,11 +9,12 @@ import {
   spyOn,
 } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { MouseButtons } from "@opentui/core/testing";
+import { createMockMouse, MouseButtons } from "@opentui/core/testing";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import {
   deliverEscape,
+  findScrollBoxes,
   mockEnrichedSession,
   squish,
 } from "./components/test-helpers";
@@ -1142,9 +1143,12 @@ describe("App sidebar mode", () => {
   });
 
   describe("pending click activation", () => {
-    /** Renders two grouped sessions and clicks alpha, leaving its state POST
-     *  in flight. Later POSTs answer immediately. */
-    async function clickAlphaWithPendingPost() {
+    /** Renders alpha, beta and any extra rows, then clicks alpha, leaving its
+     *  state POST in flight. Later POSTs answer immediately. `scrollTop` is
+     *  applied as a peer's sync, which posts nothing of its own. */
+    async function clickAlphaWithPendingPost(
+      opts: { extraRows?: number; scrollTop?: number } = {},
+    ) {
       let releasePost!: () => void;
       let failPost!: (error: Error) => void;
       let postCount = 0;
@@ -1181,18 +1185,36 @@ describe("App sidebar mode", () => {
             cwd: "/code/beta",
             tmuxPane: "%20",
           }),
+          ...Array.from({ length: opts.extraRows ?? 0 }, (_, i) =>
+            mockEnrichedSession({
+              id: `extra-${i}`,
+              project: "beta",
+              cwd: "/code/beta",
+              tmuxPane: `%${100 + i}`,
+            }),
+          ),
         ],
         null,
       );
-      await setup.renderOnce();
+      await settle();
+      const alphaRow = rowOf("alpha") + 1 - (opts.scrollTop ?? 0);
+      if (opts.scrollTop !== undefined) {
+        sseCallbacks!.onSidebarState!("s1", null, 1, "peer", opts.scrollTop);
+        await settle();
+        expect(scrollTop()).toBe(opts.scrollTop);
+      }
 
-      await setup.mockMouse.click(5, rowOf("alpha") + 1);
+      await setup.mockMouse.click(5, alphaRow);
       await settle();
       // Both halves of "pending": the POST left, and nothing has switched yet.
       expect(postCount).toBe(1);
       expect(switchToPaneSpy).not.toHaveBeenCalled();
 
       return { releasePost, failPost };
+    }
+
+    function scrollTop(): number {
+      return findScrollBoxes(setup.renderer)[0]!.scrollTop;
     }
 
     /** Screen row of a project's group header. */
@@ -1207,7 +1229,7 @@ describe("App sidebar mode", () => {
 
     async function settle() {
       await new Promise((r) => setTimeout(r, 0));
-      await setup.renderOnce();
+      for (let i = 0; i < 3; i++) await setup.renderOnce();
     }
 
     it("activates once the POST settles", async () => {
@@ -1272,6 +1294,34 @@ describe("App sidebar mode", () => {
       releasePost();
       await settle();
       expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by a wheel scroll, whose sync aborts its POST", async () => {
+      await clickAlphaWithPendingPost({ extraRows: 30 });
+      await createMockMouse(setup.renderer).scroll(5, 10, "down");
+      await settle();
+      expect(scrollTop()).toBe(1);
+      // Past the 100ms debounce, after which the scroll's own POST aborts the
+      // click's.
+      await new Promise((r) => setTimeout(r, 150));
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("activates when only layout moved the scroll offset", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost({
+        extraRows: 30,
+        scrollTop: 1,
+      });
+      for (let i = 0; i < 30; i++) sseCallbacks!.onSessionRemoved(`extra-${i}`);
+      await settle();
+      expect(scrollTop()).toBe(0);
+      // Nor may the clamp's own sync abort the POST behind the click's back.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
     });
 
     it("drops a pending click on dispose", async () => {

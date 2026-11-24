@@ -4317,7 +4317,10 @@ export function App(props: AppProps) {
             }
             onUserScroll={
               props.sidebar
-                ? (top) => store.actions.syncSidebarScroll(top)
+                ? (top) => {
+                    activationToken++;
+                    store.actions.syncSidebarScroll(top);
+                  }
                 : undefined
             }
             onScrollTopReader={(fn) => {
