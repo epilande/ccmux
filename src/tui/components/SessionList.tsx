@@ -33,6 +33,7 @@ import {
   NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
   scrollTarget,
+  itemVisualHeight,
   toVisualLine,
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
@@ -344,11 +345,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
   let prevItems: FlatItem[] | undefined;
   let prevSelectedIndex = -1;
   let prevSelectedKey: string | null = null;
+  let prevSelectedSpan = "";
   let prevSyncGeneration = 0;
   let pendingLayoutScroll = false;
   let suppressSelectionScroll = false;
   /** The user, here or in a peer sidebar, chose an offset for the current
-   *  selection, so a resort that moves the selected row must not override it. */
+   *  selection, so a layout that moves the selected row must not override it. */
   let userScrolled = false;
   let scrollInputActive = false;
 
@@ -384,6 +386,11 @@ export const SessionList: Component<SessionListProps> = (props) => {
 
     const validIndex = index >= 0 && index < items.length;
     const selectedKey = validIndex ? flatItemIdentity(items[index]!) : null;
+    // The lines the selected row occupies. They move on a resort, but also
+    // under an unchanged index when rows above it, or the row itself, grow.
+    const selectedSpan = validIndex
+      ? `${toVisualLine(items, index, sessionLines)}:${itemVisualHeight(items, index, sessionLines)}`
+      : "";
 
     if (sync && sync.generation !== prevSyncGeneration) {
       prevSyncGeneration = sync.generation;
@@ -396,6 +403,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       const selectionUnchanged = selectedKey === prevSelectedKey;
       if (!selectionUnchanged) userScrolled = false;
       prevSelectedKey = selectedKey;
+      prevSelectedSpan = selectedSpan;
       pendingLayoutScroll = false;
       suppressSelectionScroll = false;
       const topBefore = scrollboxRef.scrollTop;
@@ -432,6 +440,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       prevSelectedIndex = index;
       if (selectedKey !== prevSelectedKey) userScrolled = false;
       prevSelectedKey = selectedKey;
+      prevSelectedSpan = selectedSpan;
       return;
     }
 
@@ -448,7 +457,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
         : selectedKey !== prevSelectedKey);
     if (selectionChanged) userScrolled = false;
     const selectedRowMoved =
-      !isInitialLayout && index !== prevSelectedIndex && !userScrolled;
+      !isInitialLayout && selectedSpan !== prevSelectedSpan && !userScrolled;
 
     if (layoutChanged) {
       pendingLayoutScroll = true;
@@ -464,6 +473,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
     prevItems = items;
     prevSelectedIndex = index;
     prevSelectedKey = selectedKey;
+    prevSelectedSpan = selectedSpan;
 
     if (
       !isInitialLayout &&

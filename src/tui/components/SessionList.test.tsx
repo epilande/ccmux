@@ -1086,9 +1086,9 @@ describe("SessionList user scroll", () => {
       }),
     );
 
-  async function mount(count: number) {
+  async function mount(count: number, selected = 0) {
     const [items, setItems] = createSignal(rows(count));
-    const [index, setIndex] = createSignal(0);
+    const [index, setIndex] = createSignal(selected);
     const [scrollSync, setScrollSync] = createSignal<{
       top: number;
       generation: number;
@@ -1102,6 +1102,7 @@ describe("SessionList user scroll", () => {
             items={items()}
             selectedIndex={index()}
             previewWidth={0}
+            promptLines={3}
             scrollSync={scrollSync()}
             onUserScroll={(top) => userScrolls.push(top)}
             onScrollMoved={(top) => moves.push(top)}
@@ -1126,6 +1127,21 @@ describe("SessionList user scroll", () => {
           setItems(next);
           setIndex(to);
         });
+        await frames();
+      },
+      /** Give the rows in [from, to) a prompt, and so a wrapped block. */
+      async growRows(from: number, to: number) {
+        setItems(
+          items().map((item, i) =>
+            i >= from && i < to
+              ? makeSessionItem(`s${i}`, "g", {
+                  project: `row-${i}`,
+                  cwd: `/code/row-${i}`,
+                  lastPrompt: "wrapped prompt text ".repeat(12),
+                })
+              : item,
+          ),
+        );
         await frames();
       },
       userScrolls,
@@ -1167,6 +1183,53 @@ describe("SessionList user scroll", () => {
     expect(box.scrollTop).toBe(0);
     expect(moves).toEqual([0]);
     expect(userScrolls).toEqual([]);
+  });
+
+  describe("when rows change height under an unchanged selection", () => {
+    const rowIsVisible = (n: number) =>
+      new RegExp(`row-${n}\\b`).test(setup.captureCharFrame());
+
+    it("keeps the selected row in view as rows above it grow", async () => {
+      const { growRows, box, userScrolls } = await mount(30, 8);
+      expect(rowIsVisible(8)).toBe(true);
+      const before = box.scrollTop;
+      await growRows(0, 8);
+      expect(box.scrollTop).toBeGreaterThan(before);
+      expect(rowIsVisible(8)).toBe(true);
+      expect(userScrolls).toEqual([]);
+    });
+
+    it("keeps the selected row whole as it grows itself", async () => {
+      const { growRows, box } = await mount(30, 11);
+      const before = box.scrollTop;
+      await growRows(11, 12);
+      expect(box.scrollTop).toBe(before + 3);
+      expect(rowIsVisible(11)).toBe(true);
+    });
+
+    it("leaves the offset alone when only rows below it grow", async () => {
+      const { growRows, box } = await mount(30, 8);
+      const before = box.scrollTop;
+      await growRows(9, 30);
+      expect(box.scrollTop).toBe(before);
+    });
+
+    it("leaves the offset alone after a user scroll", async () => {
+      const { growRows, box, mouse } = await mount(30, 8);
+      await mouse.scroll(5, 5, "down");
+      await frames();
+      const before = box.scrollTop;
+      await growRows(0, 8);
+      expect(box.scrollTop).toBe(before);
+    });
+
+    it("leaves the offset alone after a peer sidebar's scroll", async () => {
+      const { growRows, box, setScrollSync } = await mount(30, 8);
+      setScrollSync({ top: 15, generation: 1 });
+      await frames();
+      await growRows(0, 8);
+      expect(box.scrollTop).toBe(15);
+    });
   });
 
   describe("when a resort moves the selected row", () => {
