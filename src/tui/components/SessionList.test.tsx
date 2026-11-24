@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockMouse, MouseButtons } from "@opentui/core/testing";
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
 import {
@@ -1089,6 +1089,10 @@ describe("SessionList user scroll", () => {
   async function mount(count: number) {
     const [items, setItems] = createSignal(rows(count));
     const [index, setIndex] = createSignal(0);
+    const [scrollSync, setScrollSync] = createSignal<{
+      top: number;
+      generation: number;
+    } | null>(null);
     const userScrolls: number[] = [];
     const moves: number[] = [];
     setup = await testRender(
@@ -1098,6 +1102,7 @@ describe("SessionList user scroll", () => {
             items={items()}
             selectedIndex={index()}
             previewWidth={0}
+            scrollSync={scrollSync()}
             onUserScroll={(top) => userScrolls.push(top)}
             onScrollMoved={(top) => moves.push(top)}
           />
@@ -1112,6 +1117,17 @@ describe("SessionList user scroll", () => {
       items,
       setItems,
       setIndex,
+      setScrollSync,
+      /** Resort the list so the row at `from` lands at `to`, still selected. */
+      async moveSelected(from: number, to: number) {
+        const next = [...items()];
+        next.splice(to, 0, ...next.splice(from, 1));
+        batch(() => {
+          setItems(next);
+          setIndex(to);
+        });
+        await frames();
+      },
       userScrolls,
       moves,
       mouse: createMockMouse(setup.renderer),
@@ -1151,6 +1167,78 @@ describe("SessionList user scroll", () => {
     expect(box.scrollTop).toBe(0);
     expect(moves).toEqual([0]);
     expect(userScrolls).toEqual([]);
+  });
+
+  describe("when a resort moves the selected row", () => {
+    const rowIsVisible = () => /row-0\b/.test(setup.captureCharFrame());
+
+    it("keeps it in view", async () => {
+      const { moveSelected, userScrolls } = await mount(30);
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(0, 29);
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(29, 0);
+      expect(rowIsVisible()).toBe(true);
+      expect(userScrolls).toEqual([]);
+    });
+
+    it("keeps it in view when new rows push it past the old content", async () => {
+      const { setItems, items, setIndex } = await mount(15);
+      batch(() => {
+        const [selected, ...rest] = items();
+        setItems([...rest, ...rows(30).slice(15), selected!]);
+        setIndex(29);
+      });
+      await frames();
+      expect(rowIsVisible()).toBe(true);
+    });
+
+    it("leaves the offset alone after a user scroll, until the selection changes", async () => {
+      const { moveSelected, mouse, box, setIndex } = await mount(30);
+      await mouse.scroll(5, 5, "down");
+      await frames();
+      await moveSelected(0, 29);
+      expect(box.scrollTop).toBe(1);
+
+      setIndex(2);
+      await frames();
+      setIndex(29);
+      await frames();
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(29, 0);
+      expect(rowIsVisible()).toBe(true);
+    });
+
+    it("leaves the offset alone after a peer sidebar's scroll", async () => {
+      const { moveSelected, box, setScrollSync } = await mount(30);
+      setScrollSync({ top: 9, generation: 1 });
+      await frames();
+      expect(rowIsVisible()).toBe(false);
+      await moveSelected(0, 29);
+      expect(box.scrollTop).toBe(9);
+    });
+
+    it("leaves the offset alone after a peer scroll that kept it in view", async () => {
+      const { moveSelected, box, setIndex, setScrollSync } = await mount(30);
+      setIndex(5);
+      await frames();
+      setScrollSync({ top: 2, generation: 1 });
+      await frames();
+      expect(setup.captureCharFrame()).toMatch(/row-5\b/);
+      await moveSelected(5, 29);
+      expect(box.scrollTop).toBe(2);
+    });
+
+    it("follows again once a resize has overridden the user's scroll", async () => {
+      const { moveSelected, mouse } = await mount(30);
+      await mouse.scroll(5, 5, "down");
+      await frames();
+      setup.resize(60, 14);
+      await frames();
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(0, 29);
+      expect(rowIsVisible()).toBe(true);
+    });
   });
 });
 

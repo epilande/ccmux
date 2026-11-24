@@ -347,6 +347,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
   let prevSyncGeneration = 0;
   let pendingLayoutScroll = false;
   let suppressSelectionScroll = false;
+  /** The user, here or in a peer sidebar, chose an offset for the current
+   *  selection, so a resort that moves the selected row must not override it. */
+  let userScrolled = false;
   let scrollInputActive = false;
 
   /** Marks scroll changes as the user's while one input event is dispatched.
@@ -390,10 +393,24 @@ export const SessionList: Component<SessionListProps> = (props) => {
       prevBlockKey = currentBlockKey;
       prevItems = items;
       prevSelectedIndex = index;
+      const selectionUnchanged = selectedKey === prevSelectedKey;
+      if (!selectionUnchanged) userScrolled = false;
       prevSelectedKey = selectedKey;
       pendingLayoutScroll = false;
       suppressSelectionScroll = false;
+      const topBefore = scrollboxRef.scrollTop;
       scrollboxRef.scrollTo(sync.top);
+      // A sync does not say why the peer is at this offset. With the selection
+      // out of view, or unchanged while the offset moved, the peer scrolled.
+      const top = scrollboxRef.scrollTop;
+      if (
+        (selectionUnchanged && top !== topBefore) ||
+        (validIndex &&
+          scrollTarget(items, index, top, viewportHeight, sessionLines) !==
+            null)
+      ) {
+        userScrolled = true;
+      }
       return;
     }
 
@@ -413,6 +430,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       prevBlockKey = currentBlockKey;
       prevItems = items;
       prevSelectedIndex = index;
+      if (selectedKey !== prevSelectedKey) userScrolled = false;
       prevSelectedKey = selectedKey;
       return;
     }
@@ -428,6 +446,9 @@ export const SessionList: Component<SessionListProps> = (props) => {
       (items === prevItems
         ? index !== prevSelectedIndex || selectedKey !== prevSelectedKey
         : selectedKey !== prevSelectedKey);
+    if (selectionChanged) userScrolled = false;
+    const selectedRowMoved =
+      !isInitialLayout && index !== prevSelectedIndex && !userScrolled;
 
     if (layoutChanged) {
       pendingLayoutScroll = true;
@@ -448,6 +469,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       !isInitialLayout &&
       !viewportResized &&
       !selectionChanged &&
+      !selectedRowMoved &&
       !pendingLayoutScroll
     ) {
       return;
@@ -464,6 +486,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
       pendingLayoutScroll = false;
     } else {
       scrollboxRef.scrollTo(target);
+      userScrolled = false;
       pendingLayoutScroll = contentHeight < target + viewportHeight;
     }
   });
@@ -615,6 +638,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             initialScrollDone = false;
             prevViewportHeight = 0;
             pendingLayoutScroll = false;
+            userScrolled = false;
             // Handed up here rather than on mount: with no rows there is no
             // scrollbox at all (see the fallback above), and a resolver
             // published before it existed would answer null for the list's
@@ -624,6 +648,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
             r.verticalScrollBar.on("change", () => {
               props.onScrollMoved?.(r.scrollTop);
               if (scrollInputActive) {
+                userScrolled = true;
                 pendingLayoutScroll = false;
                 props.onUserScroll?.(r.scrollTop);
               }
