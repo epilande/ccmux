@@ -13,6 +13,7 @@ import {
   BUILD_IDENTITY,
   IS_TRANSIENT_SOURCE_RUN,
   classifyDaemonBuild,
+  compareSemver,
   computeBuildIdentity,
   isTransientSourceRun,
   parseBuildIdentity,
@@ -172,6 +173,21 @@ describe("classifyDaemonBuild", () => {
     ).toBe("foreign");
   });
 
+  it("a release candidate is replaced by a newer rc and by the stable, never the reverse", () => {
+    const verdict = (daemon: string, ours: string) =>
+      classifyDaemonBuild(
+        { version: daemon, artifact: "/elsewhere", stamp: "1:1" },
+        { ...cli, version: ours },
+      );
+    expect(verdict("1.5.0-rc.1", "1.5.0-rc.2")).toBe("outdated");
+    expect(verdict("1.5.0-rc.9", "1.5.0-rc.10")).toBe("outdated");
+    expect(verdict("1.5.0-rc.2", "1.5.0")).toBe("outdated");
+    expect(verdict("1.4.8", "1.5.0-rc.1")).toBe("outdated");
+    expect(verdict("1.5.0-rc.2", "1.5.0-rc.1")).toBe("foreign");
+    expect(verdict("1.5.0", "1.5.0-rc.2")).toBe("foreign");
+    expect(verdict("1.5.0-rc.1", "1.4.8")).toBe("foreign");
+  });
+
   it("same version, different artifact is foreign (left alone)", () => {
     expect(classifyDaemonBuild({ ...cli, artifact: "/elsewhere" }, cli)).toBe(
       "foreign",
@@ -193,6 +209,57 @@ describe("classifyDaemonBuild", () => {
 
   it("identical identity is current", () => {
     expect(classifyDaemonBuild({ ...cli }, cli)).toBe("current");
+  });
+});
+
+describe("compareSemver", () => {
+  it("orders releases and prereleases by semver precedence", () => {
+    const ascending = [
+      "1.4.7",
+      "1.4.10",
+      "1.5.0-alpha",
+      "1.5.0-alpha.1",
+      "1.5.0-alpha.beta",
+      "1.5.0-rc",
+      "1.5.0-rc.1",
+      "1.5.0-rc.2",
+      "1.5.0-rc.9",
+      "1.5.0-rc.10",
+      "1.5.0",
+      "1.5.1-rc.1",
+      "2.0.0",
+    ];
+    // Every pair, so a comparator that is only right for neighbours fails.
+    for (const [i, a] of ascending.entries()) {
+      for (const [j, b] of ascending.entries()) {
+        const cmp = compareSemver(a, b);
+        expect([a, b, cmp === null ? null : Math.sign(cmp)]).toEqual([
+          a,
+          b,
+          Math.sign(i - j),
+        ]);
+      }
+    }
+  });
+
+  it("accepts a leading v and ignores build metadata", () => {
+    expect(compareSemver("v1.5.0-rc.1", "1.5.0-rc.1")).toBe(0);
+    expect(compareSemver("1.5.0+abc", "1.5.0")).toBe(0);
+  });
+
+  it("is null when either side is not a semver", () => {
+    for (const bad of [
+      "",
+      "1.5",
+      "1.5.0.1",
+      "1.5.0-",
+      "1.5.0-rc.",
+      "1.5.0rc1",
+      "latest",
+    ]) {
+      expect(compareSemver(bad, "1.5.0")).toBeNull();
+      expect(compareSemver("1.5.0", bad)).toBeNull();
+    }
   });
 });
 
