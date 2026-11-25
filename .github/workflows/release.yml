@@ -389,6 +389,12 @@ jobs:
     needs: [guard, build, notarize-notifier, package]
     if: needs.guard.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    # One release at a time, from the guard below to the published release.
+    # `queue: max` because the default cancels a job that is already waiting.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
     steps:
@@ -457,6 +463,7 @@ jobs:
     concurrency:
       group: homebrew-tap
       cancel-in-progress: false
+      queue: max
     # Soft-fail: a tap-update hiccup must not fail the release. Needs the
     # HOMEBREW_TAP_GITHUB_TOKEN secret (PAT with push to epilande/homebrew-tap).
     continue-on-error: true
