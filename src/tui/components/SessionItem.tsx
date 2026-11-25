@@ -1264,8 +1264,12 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
         backgroundColor={bgColor()}
         onMouseDown={(event) => {
           if (event.button === MouseButton.LEFT) {
+            event.preventDefault();
+            event.stopPropagation();
             props.onActivate?.();
           } else if (event.button === MouseButton.RIGHT) {
+            event.preventDefault();
+            event.stopPropagation();
             props.onContextMenu?.(event);
           }
         }}
