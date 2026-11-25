@@ -1,0 +1,7 @@
+{
+  "branches": {
+    "main": "1.5",
+    "release/1.4": "1.4"
+  },
+  "rcLine": "1.5"
+}
