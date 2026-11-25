@@ -244,7 +244,8 @@ describe("compareSemver", () => {
 
   it("accepts a leading v and ignores build metadata", () => {
     expect(compareSemver("v1.5.0-rc.1", "1.5.0-rc.1")).toBe(0);
-    expect(compareSemver("1.5.0+abc", "1.5.0")).toBe(0);
+    expect(compareSemver("1.5.0+001", "1.5.0")).toBe(0);
+    expect(compareSemver("1.5.0-01a", "1.5.0")).toBeLessThan(0);
   });
 
   it("is null when either side is not a semver", () => {
@@ -256,6 +257,10 @@ describe("compareSemver", () => {
       "1.5.0-rc.",
       "1.5.0rc1",
       "latest",
+      "01.5.0",
+      "1.5.0-01",
+      "1.5.0-rc.01",
+      "1.5.0+build..id",
     ]) {
       expect(compareSemver(bad, "1.5.0")).toBeNull();
       expect(compareSemver("1.5.0", bad)).toBeNull();

@@ -213,8 +213,9 @@ export function classifyDaemonBuild(
   return "current";
 }
 
+/** The grammar from semver.org, plus an optional leading `v`. */
 const SEMVER =
-  /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/i;
+  /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-z-][0-9a-z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-z-][0-9a-z-]*))*))?(?:\+[0-9a-z-]+(?:\.[0-9a-z-]+)*)?$/i;
 
 /**
  * `a - b` in semver precedence, prereleases included: `1.5.0-rc.9` <
