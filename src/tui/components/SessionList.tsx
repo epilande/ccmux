@@ -113,6 +113,9 @@ interface SessionListProps {
   onRowAnchor?: (resolve: RowAnchor) => void;
   /** Cross-sidebar vertical scroll synchronization signal */
   scrollSync?: { top: number; generation: number } | null;
+  /** Fired on every wheel notch over the list, including one that moves
+   *  nothing because the offset is already at that end */
+  onWheel?: () => void;
   /** Fired only on user-initiated scroll (mouse wheel / scrollbar) */
   onUserScroll?: (scrollTop: number) => void;
   /** Fired whenever scrollTop changes (user or programmatic) */
@@ -671,6 +674,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
           }}
           flexGrow={1}
           onMouse={(event) => {
+            if (event.type === "scroll") props.onWheel?.();
             // Wheel notches, and presses and drags on the scrollbar.
             if (
               event.type === "scroll" ||

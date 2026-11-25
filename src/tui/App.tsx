@@ -4316,6 +4316,9 @@ export function App(props: AppProps) {
                 ? (top) => store.actions.setLocalScrollTop(top)
                 : undefined
             }
+            // A wheel at either end moves no offset, so it never reaches
+            // `onUserScroll`, yet it is still a newer action than the click.
+            onWheel={props.sidebar ? () => activationToken++ : undefined}
             onUserScroll={
               props.sidebar
                 ? (top) => {

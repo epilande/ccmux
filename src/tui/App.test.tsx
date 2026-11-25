@@ -1233,7 +1233,7 @@ describe("App sidebar mode", () => {
       expect(postCount).toBe(1);
       expect(switchToPaneSpy).not.toHaveBeenCalled();
 
-      return { releasePost, failPost };
+      return { releasePost, failPost, postCount: () => postCount };
     }
 
     function scrollTop(): number {
@@ -1330,6 +1330,34 @@ describe("App sidebar mode", () => {
       await settle();
       expect(switchToPaneSpy).not.toHaveBeenCalled();
     });
+
+    it.each([
+      { end: "top", direction: "up", scrollTop: 0 },
+      { end: "bottom", direction: "down", scrollTop: 1 },
+    ] as const)(
+      "drops a click superseded by a wheel clamped at the $end",
+      async ({ direction, scrollTop: top }) => {
+        // Just past the viewport, so alpha's row is on screen at both ends.
+        const { releasePost, postCount } = await clickAlphaWithPendingPost({
+          extraRows: 15,
+          scrollTop: top,
+        });
+        const [box] = findScrollBoxes(setup.renderer);
+        expect(box!.scrollHeight - box!.viewport.height).toBe(1);
+
+        await createMockMouse(setup.renderer).scroll(5, 10, direction);
+        await settle();
+        expect(scrollTop()).toBe(top);
+        // Past the broadcast debounce: an offset that never moved is not
+        // published, so the click's POST is still the only one, unaborted.
+        await new Promise((r) => setTimeout(r, 150));
+        expect(postCount()).toBe(1);
+
+        releasePost();
+        await settle();
+        expect(switchToPaneSpy).not.toHaveBeenCalled();
+      },
+    );
 
     it("activates when only layout moved the scroll offset", async () => {
       const { releasePost } = await clickAlphaWithPendingPost({

@@ -1095,6 +1095,7 @@ describe("SessionList user scroll", () => {
     } | null>(null);
     const userScrolls: number[] = [];
     const moves: number[] = [];
+    let wheels = 0;
     setup = await testRender(
       () => (
         <TickContext.Provider value={{ tick: () => 0 }}>
@@ -1104,6 +1105,7 @@ describe("SessionList user scroll", () => {
             previewWidth={0}
             promptLines={3}
             scrollSync={scrollSync()}
+            onWheel={() => wheels++}
             onUserScroll={(top) => userScrolls.push(top)}
             onScrollMoved={(top) => moves.push(top)}
           />
@@ -1146,6 +1148,7 @@ describe("SessionList user scroll", () => {
       },
       userScrolls,
       moves,
+      wheels: () => wheels,
       mouse: createMockMouse(setup.renderer),
     };
   }
@@ -1155,11 +1158,40 @@ describe("SessionList user scroll", () => {
   }
 
   it("reports a wheel notch", async () => {
-    const { mouse, userScrolls } = await mount(50);
+    const { mouse, userScrolls, wheels } = await mount(50);
     await mouse.scroll(5, 5, "down");
     await frames();
     expect(userScrolls).toEqual([1]);
+    expect(wheels()).toBe(1);
   });
+
+  it.each([
+    { end: "top", direction: "up" },
+    { end: "bottom", direction: "down" },
+  ] as const)(
+    "reports a wheel clamped at the $end without reporting a scroll",
+    async ({ end, direction }) => {
+      const { mouse, box, setScrollSync, userScrolls, moves, wheels } =
+        await mount(50);
+      const max = box.scrollHeight - box.viewport.height;
+      expect(max).toBeGreaterThan(0);
+      const top = end === "top" ? 0 : max;
+      setScrollSync({ top, generation: 1 });
+      await frames();
+      expect(box.scrollTop).toBe(top);
+      // A peer's sync is not a wheel.
+      expect(wheels()).toBe(0);
+      moves.length = 0;
+
+      await mouse.scroll(5, 5, direction);
+      await frames();
+
+      expect(box.scrollTop).toBe(top);
+      expect(wheels()).toBe(1);
+      expect(userScrolls).toEqual([]);
+      expect(moves).toEqual([]);
+    },
+  );
 
   it("reports a scrollbar press", async () => {
     const { mouse, box, userScrolls } = await mount(50);
@@ -1170,10 +1202,12 @@ describe("SessionList user scroll", () => {
   });
 
   it("records a layout clamp without reporting it as user scroll", async () => {
-    const { box, items, setItems, userScrolls, moves, mouse } = await mount(50);
+    const { box, items, setItems, userScrolls, moves, wheels, mouse } =
+      await mount(50);
     await mouse.scroll(5, 5, "down");
     await frames();
     expect(box.scrollTop).toBe(1);
+    expect(wheels()).toBe(1);
     userScrolls.length = 0;
     moves.length = 0;
 
@@ -1183,6 +1217,7 @@ describe("SessionList user scroll", () => {
     expect(box.scrollTop).toBe(0);
     expect(moves).toEqual([0]);
     expect(userScrolls).toEqual([]);
+    expect(wheels()).toBe(1);
   });
 
   describe("when rows change height under an unchanged selection", () => {
