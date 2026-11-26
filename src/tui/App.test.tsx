@@ -8683,6 +8683,47 @@ describe("App hand off to", () => {
     }
   });
 
+  it("keeps a strip click and the Start keys off an open handoff dialog", async () => {
+    // The repro: with the note focused, a click on the strip's Start tab
+    // switched views under the dialog, Start's `n` then opened a new-session
+    // dialog, and Enter there submitted the handoff nobody could see.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      setup.mockInput.pressTab();
+      await settle();
+      await setup.renderOnce();
+      const strip = setup.captureCharFrame().split("\n")[0]!;
+      const start = strip.indexOf("Start");
+      expect(start).toBeGreaterThan(-1);
+      await setup.mockMouse.click(start + 1, 0);
+      await settle();
+      await setup.renderOnce();
+      await press("n");
+      const frame = squish(setup.captureCharFrame());
+      // Still the dialog over Sessions: no Start body under it, and no
+      // new-session dialog stacked on it.
+      expect(frame).toContain("entersend");
+      expect(frame).toContain("Toproj2Claude");
+      expect(frame).not.toContain("Newsession");
+      expect(frame).not.toContain("Filterpullrequests");
+      expect(posted).toEqual([]);
+      // The `n` was the note's, which is where the focus was.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.body).toMatchObject({
+        from: "s1",
+        to: "s2",
+        note: "n",
+      });
+    } finally {
+      restore();
+    }
+  });
+
   it("omits a blank note rather than sending an empty one", async () => {
     const { posted, restore } = withDaemon();
     try {

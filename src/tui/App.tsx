@@ -1165,12 +1165,29 @@ export function App(props: AppProps) {
    */
   function modalOverlayOpen(): boolean {
     return (
+      dialogOwnsInput() ||
+      store.state.previewFocused ||
+      store.state.worktrees !== null ||
+      store.state.sourcePicker !== null
+    );
+  }
+
+  /**
+   * Whether a dialog over the views owns input: help, a confirmation, the
+   * notice, the palette, or the new-session, Copy or handoff dialog. Each one
+   * is answered ahead of the views in the keyboard handler, so nothing under
+   * it may act either: not a row click (`modalOverlayOpen`), not a Worktrees
+   * or Start body (`panelOwnsKeys`), and not a view switch from the strip
+   * (`switchMainView`). One predicate, because three hand-kept lists drifted:
+   * the handoff dialog was missing from two, so a strip click swapped Start
+   * in under it, and Start's `n` opened a new-session dialog whose Enter the
+   * handoff, answered first, took as its own.
+   */
+  function dialogOwnsInput(): boolean {
+    return (
       store.state.showHelp ||
       store.state.confirmMode ||
-      store.state.previewFocused ||
       store.state.newSession !== null ||
-      store.state.worktrees !== null ||
-      store.state.sourcePicker !== null ||
       store.state.notice !== null ||
       store.state.copyDialog !== null ||
       store.state.handoffDialog !== null ||
@@ -1497,15 +1514,13 @@ export function App(props: AppProps) {
       : store.state.sourcePicker
         ? "start"
         : "sessions";
-  /** Whether a Worktrees or Start body owns the keyboard: not while help, a
-   *  confirmation, a dialog or the palette is over it, and not while its
+  /** Whether a Worktrees or Start body owns the keyboard: not while a dialog
+   *  owns input (`dialogOwnsInput`) or a handoff is aiming, and not while its
    *  preview is focused (App scrolls that). A disabled body also yields its
    *  footer to App's, which shows the keys of whatever does own them. */
   const panelOwnsKeys = () =>
-    !store.state.showHelp &&
-    !store.state.confirmMode &&
-    !store.state.newSession &&
-    !store.state.palette &&
+    !dialogOwnsInput() &&
+    store.state.handoffPick === null &&
     !store.state.previewFocused;
   const repoFacts = createRepoFacts({
     connected: () => store.state.connectionState === "connected",
@@ -1514,18 +1529,24 @@ export function App(props: AppProps) {
     visible: () => isVisible(),
   });
   function switchMainView(next: View) {
+    // Refused under anything that owns input, the strip's clicks included:
+    // a switch would leave that owner answering keys over a view it is no
+    // longer drawn on. A handoff being aimed lives on the session list, and
+    // a removal prompt on the Worktrees panel.
     if (
       next === view() ||
-      worktreeModal() ||
-      store.state.newSession ||
-      store.state.confirmMode ||
-      store.state.showHelp ||
-      store.state.palette
+      dialogOwnsInput() ||
+      store.state.handoffPick !== null ||
+      worktreeModal()
     )
       return;
     // A focused preview belongs to the view it is in; the next view's
     // preview starts unfocused (and a strip click is how one gets here).
     store.actions.exitPreviewFocus();
+    // So does a row menu: it is the session list's, and the panels answer
+    // keys ahead of the branch that would dismiss it.
+    store.actions.hideContextMenu();
+    store.actions.hideGroupContextMenu();
     // The base scope: a `W`/`N` jump narrowed only the view it opened, and
     // leaving it for another view ends the jump.
     const scope = store.baseScope();
