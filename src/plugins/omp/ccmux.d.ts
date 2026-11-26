@@ -16,6 +16,9 @@ export interface OmpExtensionContext {
   cwd: string;
   agent?: { kind: "main" | "sub" };
   isIdle?(): boolean;
+  /** Managed timers; omp clears them with the session itself. */
+  setInterval?(handler: () => void, ms: number): unknown;
+  clearTimer?(id: unknown): void;
   sessionManager: {
     getSessionId(): string | undefined;
     getSessionFile(): string | undefined;

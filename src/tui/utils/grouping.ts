@@ -96,6 +96,13 @@ export type FlatItem =
       sharedTmuxSession?: string;
     };
 
+/** Stable identity key for a flat list row across list rebuilds and reorders. */
+export function flatItemIdentity(item: FlatItem): string {
+  return item.type === "header"
+    ? `header:${item.groupKey}`
+    : `session:${item.filteredSession.session.id}`;
+}
+
 /** A group of sessions keyed for sorting */
 export interface GroupEntry {
   key: string;

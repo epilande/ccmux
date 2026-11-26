@@ -9,13 +9,14 @@ import {
   spyOn,
 } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { MouseButtons } from "@opentui/core/testing";
+import { createMockMouse, MouseButtons } from "@opentui/core/testing";
 import { RGBA, TextAttributes } from "@opentui/core";
 import { theme } from "./theme";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import {
   deliverEscape,
+  findScrollBoxes,
   mockEnrichedSession,
   squish,
 } from "./components/test-helpers";
@@ -173,12 +174,13 @@ mock.module("./utils/review", () => ({
 // clear that persister's half-window ceiling for any width the degenerate gate
 // lets through, so a future resize-based test cannot reach the spawn.
 const realWindowState = await import("./utils/tmux-window-state");
+let mockWindowActive = true;
 
 mock.module("./utils/tmux-window-state", () => ({
   ...realWindowState,
   fetchWindowState: async () => ({
     windowWidth: 1,
-    windowActive: true,
+    windowActive: mockWindowActive,
     sessionAttached: true,
   }),
 }));
@@ -259,6 +261,7 @@ beforeEach(() => {
   resolveLaunchPaneSpy.mockImplementation(async () => "%7");
   uiStateWrites.length = 0;
   uiStateGate = null;
+  mockWindowActive = true;
   hunkAvailable = true;
   runHunkReviewSpy.mockClear();
   runHunkReviewSpy.mockImplementation(async () => ({ ok: true, notes: [] }));
@@ -268,6 +271,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setup?.renderer.destroy();
+  setup = undefined as unknown as Setup;
   restoreFetch();
   // refreshServerInfo writes the module-global server-guard cache; restore
   // fail-open so a guard test's refusal can't leak into other test files.
@@ -279,6 +283,7 @@ async function renderApp(
   height = 20,
   props: Record<string, unknown> = {},
 ) {
+  setup?.renderer.destroy();
   // The column-header line is on by default in every grouping and would
   // push every row down one line under the pointer coordinates these tests
   // aim at; they opt out the way a user can. Its own tests pass the mode.
@@ -295,7 +300,7 @@ async function renderApp(
  * test awaits in place of a fixed sleep, plus `restore()` to put back the
  * original `fetch`.
  *
- * The capture is gated on the URL containing "/sidebar-state" rather than
+ * The capture is gated on GET "/sidebar-state" rather than
  * being a bare last-write-wins assignment: onMount also fires
  * `refreshServerInfo()`'s `/server-info` fetch first (App.tsx:1399-1405), so
  * an ungated capture would only happen to grab the right promise because of
@@ -304,22 +309,32 @@ async function renderApp(
  * installed, so callers of this helper don't inherit ambient fetch state
  * from another test.
  */
-function mockSidebarStateFetch(payload: Record<string, unknown>) {
+function mockSidebarStateFetch(
+  payload: Record<string, unknown>,
+  options: { ok?: boolean; gate?: Promise<void> } = {},
+) {
+  const { ok = true, gate } = options;
   const originalFetch = globalThis.fetch;
   let hydrationFetchPromise:
-    | Promise<{ json: () => Promise<unknown> }>
+    | Promise<{ ok: boolean; json: () => Promise<unknown> }>
     | undefined;
-  globalThis.fetch = ((input: string | URL | Request) => {
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url =
       typeof input === "string" || input instanceof URL
         ? input.toString()
         : input.url;
-    if (url.includes("/sidebar-state")) {
-      const promise = (async () => ({ json: async () => payload }))();
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
+    if (url.includes("/sidebar-state") && method === "GET") {
+      const promise = (async () => {
+        if (gate) await gate;
+        return { ok, json: async () => payload };
+      })();
       hydrationFetchPromise = promise;
       return promise;
     }
-    return (async () => ({ json: async () => ({}) }))();
+    return (async () => ({ ok: true, json: async () => ({}) }))();
   }) as unknown as typeof fetch;
   return {
     getPromise: () => hydrationFetchPromise,
@@ -602,8 +617,256 @@ describe("App", () => {
       setup.mockInput.pressKey("x");
       await setup.renderOnce();
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Kill Session?");
-      expect(frame).toContain("alpha");
+      expect(frame).toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration resolving BEFORE onInit is preserved across initial init and reconnect without flashing", async () => {
+    const { getPromise, restore } = mockSidebarStateFetch({
+      selectedSessionId: "s1",
+      selectedHeaderKey: null,
+    });
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      flashPaneSpy.mockClear();
+      const sessions = [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%10",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%20",
+        }),
+      ];
+      // Initial onInit arrives AFTER hydration resolved: activePane is s2 (%20),
+      // but hydrated selection s1 (alpha) must stay selected and not flash on mount.
+      sseCallbacks!.onInit(sessions, "%20");
+      await setup.renderOnce();
+      expect(flashPaneSpy).not.toHaveBeenCalled();
+
+      // SSE reconnect delivers another onInit: selection s1 must still be preserved.
+      sseCallbacks!.onInit(sessions, "%20");
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration does not overwrite newer SSE sidebar_state", async () => {
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // Newer SSE sidebar_state arrives before the startup GET resolves.
+      sseCallbacks!.onSidebarState!("s2", null, 3, "peer-sidebar", 5);
+      await setup.renderOnce();
+
+      // Now let the stale startup GET /sidebar-state resolve with s1.
+      releaseHydration();
+      const hydrationFetchPromise = getPromise();
+      expect(hydrationFetchPromise).toBeDefined();
+      await hydrationFetchPromise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration skips non-OK response and preserves active-pane default", async () => {
+    const nonOk = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null },
+      { ok: false },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%20",
+      );
+      await nonOk.getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      nonOk.restore();
+    }
+  });
+
+  it("sidebar hydration does not overwrite local user navigation while GET is in flight", async () => {
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // User navigates locally from alpha (s1) to beta (s2) before GET resolves.
+      setup.mockInput.pressKey("j");
+      await setup.renderOnce();
+
+      releaseHydration();
+      await getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("sidebar hydration does not overwrite off-screen onActivePane update while GET is in flight", async () => {
+    mockWindowActive = false;
+    let releaseHydration!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseHydration = r;
+    });
+    const { getPromise, restore } = mockSidebarStateFetch(
+      { selectedSessionId: "s1", selectedHeaderKey: null, scrollTop: 0 },
+      { gate },
+    );
+    try {
+      await renderApp(120, 20, { sidebar: true, groupBy: "none" });
+      // Drain initial fetchWindowState() so visibility.visible() settles to false.
+      await new Promise((r) => setTimeout(r, 0));
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+        ],
+        "%10",
+      );
+      await setup.renderOnce();
+
+      // Off-screen sidebar receives a newer active_pane switch to s2.
+      sseCallbacks!.onActivePane!("s2", "%20");
+      await setup.renderOnce();
+
+      releaseHydration();
+      await getPromise();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await setup.renderOnce();
+
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/Kill Session\?[\s\S]*beta[\s\S]*Y confirm/);
+      expect(frame).not.toMatch(/Kill Session\?[\s\S]*alpha[\s\S]*Y confirm/);
     } finally {
       restore();
     }
@@ -999,6 +1262,286 @@ describe("App sidebar mode", () => {
     } finally {
       process.exit = originalExit;
     }
+  });
+
+  describe("pending click activation", () => {
+    /** Renders alpha, beta and any extra rows, then clicks alpha, leaving its
+     *  state POST in flight. Later POSTs answer immediately. `scrollTop` is
+     *  applied as a peer's sync, which posts nothing of its own. `spawn`
+     *  answers a spawn submitted before the click, from a dialog then closed. */
+    async function clickAlphaWithPendingPost(
+      opts: {
+        extraRows?: number;
+        scrollTop?: number;
+        spawn?: Promise<Response>;
+      } = {},
+    ) {
+      let releasePost!: () => void;
+      let failPost!: (error: Error) => void;
+      let postCount = 0;
+      spyOn(globalThis, "fetch").mockImplementation(
+        Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith("/agents")) {
+              const claude = { name: "claude", displayName: "Claude" };
+              return Response.json({
+                agents: [{ ...claude, shortCode: "CC", supportsPrompt: true }],
+              });
+            }
+            if (url.endsWith("/spawn") && opts.spawn) return opts.spawn;
+            const isPost =
+              url.includes("/sidebar-state") && init?.method === "POST";
+            if (!isPost || ++postCount > 1) return Response.json({});
+            return new Promise<Response>((resolve, reject) => {
+              releasePost = () => resolve(Response.json({}));
+              failPost = reject;
+              const signal = init?.signal;
+              signal?.addEventListener("abort", () => reject(signal.reason));
+            });
+          },
+          { preconnect: () => {} },
+        ),
+      );
+
+      await renderApp(60, 20, { sidebar: true, groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "beta",
+            cwd: "/code/beta",
+            tmuxPane: "%20",
+          }),
+          ...Array.from({ length: opts.extraRows ?? 0 }, (_, i) =>
+            mockEnrichedSession({
+              id: `extra-${i}`,
+              project: "beta",
+              cwd: "/code/beta",
+              tmuxPane: `%${100 + i}`,
+            }),
+          ),
+        ],
+        null,
+      );
+      await settle();
+      const alphaRow = rowOf("alpha") + 1 - (opts.scrollTop ?? 0);
+      if (opts.scrollTop !== undefined) {
+        sseCallbacks!.onSidebarState!("s1", null, 1, "peer", opts.scrollTop);
+        await settle();
+        expect(scrollTop()).toBe(opts.scrollTop);
+      }
+
+      if (opts.spawn) {
+        setup.mockInput.pressKey("n");
+        await settle();
+        expect(setup.captureCharFrame()).toContain("New session");
+        setup.mockInput.pressEnter();
+        await settle();
+        deliverEscape(setup.renderer);
+        await settle();
+        expect(setup.captureCharFrame()).not.toContain("New session");
+      }
+
+      await setup.mockMouse.click(5, alphaRow);
+      await settle();
+      // Both halves of "pending": the POST left, and nothing has switched yet.
+      expect(postCount).toBe(1);
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+
+      return { releasePost, failPost, postCount: () => postCount };
+    }
+
+    function scrollTop(): number {
+      return findScrollBoxes(setup.renderer)[0]!.scrollTop;
+    }
+
+    /** Screen row of a project's group header. */
+    function rowOf(project: string): number {
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => new RegExp(`[▾▸] ${project}`).test(line));
+      expect(row).toBeGreaterThan(0);
+      return row;
+    }
+
+    async function settle() {
+      await new Promise((r) => setTimeout(r, 0));
+      for (let i = 0; i < 3; i++) await setup.renderOnce();
+    }
+
+    it("activates once the POST settles", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
+    });
+
+    it("activates when the POST fails and nothing superseded it", async () => {
+      const { failPost } = await clickAlphaWithPendingPost();
+      failPost(new Error("daemon unreachable"));
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
+    });
+
+    it("drops a click superseded by a group header click", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      await setup.mockMouse.click(5, rowOf("beta"));
+      await settle();
+      releasePost();
+      await settle();
+      expect(setup.captureCharFrame()).toContain("▸ beta");
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("activates only the latest of two clicked sessions", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      await setup.mockMouse.click(5, rowOf("beta") + 1);
+      await settle();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%20"]]);
+    });
+
+    it("drops a click superseded by keyboard navigation", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      setup.mockInput.pressKey("j");
+      await settle();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by an overlay, even one closed again", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      setup.mockInput.pressKey("?");
+      await settle();
+      expect(setup.captureCharFrame()).toContain("Keyboard Shortcuts");
+      setup.mockInput.pressKey("?");
+      await settle();
+      expect(setup.captureCharFrame()).not.toContain("Keyboard Shortcuts");
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by a row menu", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost();
+      await setup.mockMouse.click(5, rowOf("alpha") + 1, MouseButtons.RIGHT);
+      await settle();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by a wheel scroll, whose sync aborts its POST", async () => {
+      await clickAlphaWithPendingPost({ extraRows: 30 });
+      await createMockMouse(setup.renderer).scroll(5, 10, "down");
+      await settle();
+      expect(scrollTop()).toBe(1);
+      // Past the 100ms debounce, after which the scroll's own POST aborts the
+      // click's.
+      await new Promise((r) => setTimeout(r, 150));
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { end: "top", direction: "up", scrollTop: 0 },
+      { end: "bottom", direction: "down", scrollTop: 1 },
+    ] as const)(
+      "drops a click superseded by a wheel clamped at the $end",
+      async ({ direction, scrollTop: top }) => {
+        // Just past the viewport, so alpha's row is on screen at both ends.
+        const { releasePost, postCount } = await clickAlphaWithPendingPost({
+          extraRows: 16,
+          scrollTop: top,
+        });
+        const [box] = findScrollBoxes(setup.renderer);
+        expect(box!.scrollHeight - box!.viewport.height).toBe(1);
+
+        await createMockMouse(setup.renderer).scroll(5, 10, direction);
+        await settle();
+        expect(scrollTop()).toBe(top);
+        // Past the broadcast debounce: an offset that never moved is not
+        // published, so the click's POST is still the only one, unaborted.
+        await new Promise((r) => setTimeout(r, 150));
+        expect(postCount()).toBe(1);
+
+        releasePost();
+        await settle();
+        expect(switchToPaneSpy).not.toHaveBeenCalled();
+      },
+    );
+
+    it("activates when only layout moved the scroll offset", async () => {
+      const { releasePost } = await clickAlphaWithPendingPost({
+        extraRows: 30,
+        scrollTop: 1,
+      });
+      for (let i = 0; i < 30; i++) sseCallbacks!.onSessionRemoved(`extra-${i}`);
+      await settle();
+      expect(scrollTop()).toBe(0);
+      // Nor may the clamp's own sync abort the POST behind the click's back.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy.mock.calls).toEqual([["%10"]]);
+    });
+
+    /** A pending click, then a notice raised with no input: the answer to a
+     *  spawn that was still in flight. */
+    async function clickAlphaThenNotice() {
+      let answerSpawn!: (response: Response) => void;
+      const { releasePost } = await clickAlphaWithPendingPost({
+        spawn: new Promise((resolve) => (answerSpawn = resolve)),
+      });
+      answerSpawn(
+        Response.json(
+          { error: "could not restore", stashSha: "abc123" },
+          { status: 500 },
+        ),
+      );
+      await settle();
+      const row = setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes("any key to dismiss"));
+      expect(row).toBeGreaterThan(0);
+      return { releasePost, noticeRow: row };
+    }
+
+    it("drops a click whose POST settles under a notice", async () => {
+      const { releasePost } = await clickAlphaThenNotice();
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a click superseded by a notice dismissed with the pointer", async () => {
+      const { releasePost, noticeRow } = await clickAlphaThenNotice();
+      await setup.mockMouse.click(30, noticeRow);
+      await settle();
+      expect(setup.captureCharFrame()).not.toContain("any key to dismiss");
+      releasePost();
+      await settle();
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
+
+    it("drops a pending click on dispose", async () => {
+      await clickAlphaWithPendingPost();
+      setup.renderer.destroy();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(switchToPaneSpy).not.toHaveBeenCalled();
+    });
   });
 
   it("Escape does not exit in sidebar mode", async () => {
