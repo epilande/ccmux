@@ -18,6 +18,7 @@ import {
 import { listTmuxClientTtys } from "../lib/tmux-client";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { attemptedTmuxSocketPath } from "../lib/tmux-socket";
+import { findOrphanedTmuxServer } from "./orphaned-tmux-server";
 import {
   capturePane,
   getPaneCurrentCommand,
@@ -1597,9 +1598,14 @@ export class DaemonServer {
         this.serverSocketPath = out.trim() || null;
         if (this.serverSocketPath) this.socketError = null;
       } else {
+        const message = stderr.trim() || `tmux display-message exited ${code}`;
+        // Only a missing socket file spends the lsof pass; a refused
+        // connection is a dead server and returns null without spawning.
+        const orphanedServerPid = await findOrphanedTmuxServer(message);
         this.socketError = {
           attemptedSocket: attemptedTmuxSocketPath(),
-          message: stderr.trim() || `tmux display-message exited ${code}`,
+          message,
+          ...(orphanedServerPid !== null ? { orphanedServerPid } : {}),
         };
       }
     } catch (error) {

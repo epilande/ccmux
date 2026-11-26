@@ -37,6 +37,13 @@ export type DaemonHealth =
 export interface TmuxSocketError {
   attemptedSocket: string | null;
   message: string;
+  /**
+   * Set when the socket FILE is gone but a tmux server still holds it open
+   * (`orphaned-tmux-server.ts`): the server is alive and recoverable with
+   * SIGUSR1, which is what this pid is for. Additive: absent means unknown,
+   * which reads the same as "no orphaned server".
+   */
+  orphanedServerPid?: number | null;
 }
 
 /**

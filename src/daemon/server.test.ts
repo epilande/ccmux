@@ -3508,6 +3508,57 @@ describe("getServerSocketPath and /server-info", () => {
     }
   });
 
+  it("names the orphaned tmux server when the socket file is gone but the server is not", async () => {
+    // The display-message probe fails with ENOENT, then lsof (the second spawn)
+    // finds a tmux process still bound to that path: the server is alive and
+    // recoverable, which a plain "unreachable" would hide.
+    const { internals } = createServer();
+    const { state, restore } = withSpawnQueue([
+      {
+        code: 1,
+        out: "",
+        err: "error connecting to /tmp/tmux-501/work (No such file or directory)\n",
+      },
+      { code: 0, out: "p4242\nf5\nn/private/tmp/tmux-501/work\n" },
+    ]);
+    try {
+      const data = (await (
+        await internals.handleRequest(
+          new Request("http://localhost/server-info"),
+        )
+      ).json()) as {
+        socketError: { message: string; orphanedServerPid?: number } | null;
+      };
+      expect(state.calls).toBe(2);
+      expect(data.socketError?.orphanedServerPid).toBe(4242);
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits orphanedServerPid when nothing still holds the missing socket", async () => {
+    const { internals } = createServer();
+    const { restore } = withSpawnQueue([
+      {
+        code: 1,
+        out: "",
+        err: "error connecting to /tmp/tmux-501/work (No such file or directory)\n",
+      },
+      { code: 1, out: "" },
+    ]);
+    try {
+      const data = (await (
+        await internals.handleRequest(
+          new Request("http://localhost/server-info"),
+        )
+      ).json()) as { socketError: Record<string, unknown> | null };
+      expect(data.socketError).not.toBe(null);
+      expect("orphanedServerPid" in data.socketError!).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
   it("serves socketError: null on a healthy daemon", async () => {
     const { internals } = createServer();
     const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/ok-sock\n" }]);

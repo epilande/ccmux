@@ -26,6 +26,7 @@ import {
   parseBuildIdentity,
   type BuildIdentity,
 } from "../lib/build-identity";
+import { socketRecoveryHint } from "../lib/tmux-socket";
 import type { TmuxSocketError } from "../types";
 
 /**
@@ -81,6 +82,8 @@ async function printTmuxServer(): Promise<void> {
         `tmux socket: unreachable${error?.attemptedSocket ? ` at ${error.attemptedSocket}` : ""}` +
           (error ? ` (${error.message})` : ""),
       );
+      const hint = error ? socketRecoveryHint(error) : null;
+      if (hint) console.log(`  ${hint.reason}\n    ${hint.command}`);
     }
     printBuild(info.build);
   } catch {

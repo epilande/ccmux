@@ -11,7 +11,7 @@ import {
 import { formatRelativeTime } from "../lib/format";
 import { getPreferences } from "../lib/preferences";
 import type { EnrichedSession, TmuxSocketError } from "../types";
-import { socketErrorMessage } from "../lib/tmux-socket";
+import { socketErrorMessage, socketRecoveryHint } from "../lib/tmux-socket";
 
 function formatSession(session: EnrichedSession, style: IconStyle): string {
   const icon = getStatusIcon(session.status, session.attentionType, style);
@@ -40,7 +40,13 @@ async function emptyMessage(): Promise<string> {
       const { socketError } = await daemonBody<{
         socketError?: TmuxSocketError | null;
       }>(response, "server info");
-      if (socketError) return socketErrorMessage(socketError.attemptedSocket);
+      if (socketError) {
+        const hint = socketRecoveryHint(socketError);
+        const message = socketErrorMessage(socketError.attemptedSocket);
+        return hint
+          ? `${message}\n${hint.reason}\n  ${hint.command}`
+          : message;
+      }
     }
   } catch {
     // Fall through to the plain empty message.
