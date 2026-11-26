@@ -11,7 +11,8 @@
  *
  * Three fields, compared in this order by `classifyDaemonBuild`:
  *
- * 1. `version` (package.json). A *strictly older* daemon version -> `outdated`.
+ * 1. `version` (package.json), in semver precedence, so a newer release
+ *    candidate replaces an older one and the stable replaces both. A *strictly older* daemon version -> `outdated`.
  *    Checked FIRST because a version bump is the one signal that is true
  *    across checkouts: a daemon from an older release should be replaced by
  *    any newer CLI, wherever the newer CLI lives. A *newer* daemon than this
@@ -212,21 +213,52 @@ export function classifyDaemonBuild(
   return "current";
 }
 
-/** `a - b` for `major.minor.patch` (optional leading `v`). Null if either side will not parse. */
-function compareSemver(a: string, b: string): number | null {
-  const parse = (value: string): [number, number, number] | null => {
-    const match = value
-      .trim()
-      .replace(/^v/i, "")
-      .match(/^(\d+)\.(\d+)\.(\d+)/);
-    if (!match) return null;
-    return [Number(match[1]), Number(match[2]), Number(match[3])];
-  };
-  const left = parse(a);
-  const right = parse(b);
+/** The grammar from semver.org, plus an optional leading `v`. */
+const SEMVER =
+  /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-z-][0-9a-z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-z-][0-9a-z-]*))*))?(?:\+[0-9a-z-]+(?:\.[0-9a-z-]+)*)?$/i;
+
+/**
+ * `a - b` in semver precedence, prereleases included: `1.5.0-rc.9` <
+ * `1.5.0-rc.10` < `1.5.0`. Accepts an optional leading `v` and ignores build
+ * metadata. Null if either side will not parse.
+ *
+ * Also the release guard's ordering (`scripts/release-guard.ts`), so "which
+ * release is newer" and "which daemon is newer" can never disagree. `sort -V`
+ * is not a substitute: it puts `1.5.0` BEFORE `1.5.0-rc.1`.
+ */
+export function compareSemver(a: string, b: string): number | null {
+  const left = a.trim().match(SEMVER);
+  const right = b.trim().match(SEMVER);
   if (!left || !right) return null;
-  for (let i = 0; i < 3; i++) {
-    if (left[i] !== right[i]) return left[i] - right[i];
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(left[i]) - Number(right[i]);
+    if (diff !== 0) return diff;
   }
-  return 0;
+  return comparePrerelease(left[4], right[4]);
+}
+
+/** Semver rule 11: a release outranks its prereleases; identifiers compare left to right. */
+function comparePrerelease(
+  a: string | undefined,
+  b: string | undefined,
+): number {
+  if (a === undefined || b === undefined) {
+    return Number(a === undefined) - Number(b === undefined);
+  }
+  const left = a.split(".");
+  const right = b.split(".");
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const diff = compareIdentifier(left[i], right[i]);
+    if (diff !== 0) return diff;
+  }
+  return left.length - right.length;
+}
+
+/** Numeric identifiers compare as numbers and rank below alphanumeric ones. */
+function compareIdentifier(a: string, b: string): number {
+  const aNumeric = /^\d+$/.test(a);
+  const bNumeric = /^\d+$/.test(b);
+  if (aNumeric && bNumeric) return Number(a) - Number(b);
+  if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+  return a < b ? -1 : Number(a > b);
 }
