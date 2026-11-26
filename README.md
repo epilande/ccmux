@@ -1219,6 +1219,8 @@ Inside tmux, the client half of ccmux ignores the setting and uses the server yo
 
 When the configured server cannot be reached, the picker, the sidebar, and `ccmux show` say so and name the socket (`tmux server unreachable at /private/tmp/tmux-501/work`) instead of reporting an empty session list.
 
+If the socket file was deleted while tmux kept running (your attached terminal still works, but nothing new can connect), they also print the command that brings it back, for example `mkdir -p -m 700 /private/tmp/tmux-501 && kill -USR1 19086`. SIGUSR1 tells the tmux server to recreate its socket; ccmux only suggests it and never signals the server itself.
+
 ## 🌐 Remote / SSH
 
 ccmux tracks the sessions on the machine where it runs, so for a remote devbox, run everything there: install ccmux, tmux, and your agents on the remote host, run `ccmux setup`, and attach over SSH. Detection, hooks, the picker, and the sidebar all work at full fidelity because nothing crosses the SSH boundary; your terminal is just the window into it.
