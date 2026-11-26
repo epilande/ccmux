@@ -4,6 +4,7 @@ import {
   parseWindowIdByName,
   agentAttachWindowName,
   isSafeAgentShortId,
+  hasMultipleMainPanesInList,
   AGENTS_WINDOW_NAME,
 } from "./tmux";
 import { setPinnedTmuxClientTty } from "../../lib/tmux-client";
@@ -14,9 +15,8 @@ import { PANE_FIELD_SEP } from "../../lib/tmux-format";
 // reaches this file. A distinct cache entry always gets the implementation,
 // the same trick client-switch.test.ts uses.
 const REAL_TMUX_SPECIFIER = "./tmux" + "?real";
-const { openAgentsWindow, notifyActivePane } = (await import(
-  REAL_TMUX_SPECIFIER
-)) as typeof import("./tmux");
+const { openAgentsWindow, notifyActivePane, flashPane, flashPaneDetached } =
+  (await import(REAL_TMUX_SPECIFIER)) as typeof import("./tmux");
 
 // Note: capturePane isn't unit-tested here. Preview/App tests call
 // `mock.module("../utils/tmux")`, which is process-wide in Bun, so capturePane
@@ -101,10 +101,7 @@ describe("parseLaunchPane", () => {
   });
 
   it("returns the active pane for a popup picker, which is not a pane", () => {
-    const output = [
-      row("%1", "zsh", "0"),
-      row("%2", "nvim", "1"),
-    ].join("\n");
+    const output = [row("%1", "zsh", "0"), row("%2", "nvim", "1")].join("\n");
     expect(parseLaunchPane(output, null)).toBe("%2");
   });
 
@@ -112,10 +109,7 @@ describe("parseLaunchPane", () => {
     // The inline picker vacates its pane on spawn, so that pane is exactly
     // where the split belongs. Excluding it halves the neighbour instead —
     // someone's editor — which is what shipped before this was surfaced.
-    const output = [
-      row("%1", "nvim", "0"),
-      row("%2", "bun", "1"),
-    ].join("\n");
+    const output = [row("%1", "nvim", "0"), row("%2", "bun", "1")].join("\n");
     expect(parseLaunchPane(output, "%2")).toBe("%2");
   });
 
@@ -126,10 +120,9 @@ describe("parseLaunchPane", () => {
   });
 
   it("still skips a titled persistent picker, which does not vacate", () => {
-    const output = [
-      row("%1", "zsh", "0"),
-      row("%2", "ccmux-picker", "1"),
-    ].join("\n");
+    const output = [row("%1", "zsh", "0"), row("%2", "ccmux-picker", "1")].join(
+      "\n",
+    );
     expect(parseLaunchPane(output, "%2")).toBe("%1");
   });
 
@@ -155,6 +148,7 @@ describe("parseLaunchPane", () => {
 interface SpawnResponse {
   stdout?: string;
   exitCode?: number;
+  exited?: Promise<number>;
 }
 
 /** Stubs the three process spawns the window launcher makes: `Bun.which`
@@ -176,7 +170,7 @@ function withTmuxStubs(responses: SpawnResponse[]): {
     return {
       stdout: new Blob([response.stdout ?? ""]).stream(),
       stderr: new Blob([""]).stream(),
-      exited: Promise.resolve(response.exitCode ?? 0),
+      exited: response.exited ?? Promise.resolve(response.exitCode ?? 0),
     };
   }) as unknown as typeof Bun.spawn;
   return {
@@ -190,8 +184,7 @@ function withTmuxStubs(responses: SpawnResponse[]): {
   };
 }
 
-const windowRow = (id: string, name: string) =>
-  [id, name].join(PANE_FIELD_SEP);
+const windowRow = (id: string, name: string) => [id, name].join(PANE_FIELD_SEP);
 
 /** A `list-clients` listing in the launcher's own `-F` shape. The decoy comes
  *  first and sits on a different session, so a match by anything other than the
@@ -783,6 +776,173 @@ describe("notifyActivePane", () => {
       expect(await notifyActivePane("%5")).toBeUndefined();
     } finally {
       restore();
+    }
+  });
+});
+
+describe("hasMultipleMainPanesInList", () => {
+  it("returns false for a single main pane alongside a sidebar", () => {
+    const output = [row("%1", "ccmux-sidebar"), row("%2", "claude")].join("\n");
+    expect(hasMultipleMainPanesInList(output)).toBe(false);
+  });
+
+  it("returns false when remaining panes are ccmux surfaces", () => {
+    const output = [
+      row("%1", "ccmux-sidebar"),
+      row("%2", "ccmux-picker"),
+      row("%3", "zsh"),
+    ].join("\n");
+    expect(hasMultipleMainPanesInList(output)).toBe(false);
+  });
+
+  it("returns true when two or more non-ccmux panes share the window", () => {
+    const output = [
+      row("%1", "ccmux-sidebar"),
+      row("%2", "claude"),
+      row("%3", ""),
+    ].join("\n");
+    expect(hasMultipleMainPanesInList(output)).toBe(true);
+  });
+
+  it("returns false on empty output", () => {
+    expect(hasMultipleMainPanesInList("")).toBe(false);
+  });
+});
+
+describe("flashPane and flashPaneDetached single-main-pane gating", () => {
+  it("skips set-option in flashPaneDetached when window has only one main pane", async () => {
+    const stubs = withTmuxStubs([
+      { stdout: [row("%1", "ccmux-sidebar"), row("%2", "claude")].join("\n") },
+    ]);
+    try {
+      await flashPaneDetached("%2");
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-panes"]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("spawns set-option and detached reset in flashPaneDetached when two main panes exist", async () => {
+    const stubs = withTmuxStubs([
+      {
+        stdout: [
+          row("%1", "ccmux-sidebar"),
+          row("%2", "claude"),
+          row("%3", "zsh"),
+        ].join("\n"),
+      },
+      {},
+      {},
+    ]);
+    try {
+      await flashPaneDetached("%2");
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-panes",
+        "set-option",
+        "run-shell",
+      ]);
+    } finally {
+      stubs.restore();
+    }
+  });
+
+  it("skips set-option in flashPane for 1 main pane and flashes + resets for 2 main panes", async () => {
+    const origSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void) => {
+      if (typeof fn === "function") scheduled.push(() => fn());
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    const stubs = withTmuxStubs([
+      { stdout: [row("%1", "ccmux-sidebar"), row("%2", "claude")].join("\n") },
+      {
+        stdout: [
+          row("%1", "ccmux-sidebar"),
+          row("%2", "claude"),
+          row("%3", "zsh"),
+        ].join("\n"),
+      },
+      {},
+      {},
+    ]);
+    try {
+      flashPane("%2");
+      await new Promise((r) => origSetTimeout(r, 0));
+      expect(stubs.calls.map((argv) => argv[1])).toEqual(["list-panes"]);
+
+      flashPane("%2");
+      await new Promise((r) => origSetTimeout(r, 0));
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-panes",
+        "list-panes",
+        "set-option",
+      ]);
+      // Drain the 500ms reset timer inside the stub scope so no timer leaks
+      for (const fn of scheduled.splice(0)) fn();
+      expect(stubs.calls.map((argv) => argv[1])).toEqual([
+        "list-panes",
+        "list-panes",
+        "set-option",
+        "set-option",
+      ]);
+    } finally {
+      for (const fn of scheduled.splice(0)) fn();
+      globalThis.setTimeout = origSetTimeout;
+      stubs.restore();
+    }
+  });
+
+  it("invalidates an in-flight flashPane(B) check when returning to already-flashing pane A", async () => {
+    const origSetTimeout = globalThis.setTimeout;
+    const scheduled: Array<() => void> = [];
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void) => {
+      if (typeof fn === "function") scheduled.push(() => fn());
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    }) as unknown as typeof setTimeout;
+
+    let resolvePaneB!: (code: number) => void;
+    const paneBExited = new Promise<number>((r) => {
+      resolvePaneB = r;
+    });
+    const multiPaneList = [
+      row("%1", "ccmux-sidebar"),
+      row("%2", "claude"),
+      row("%3", "zsh"),
+    ].join("\n");
+
+    const stubs = withTmuxStubs([
+      { stdout: multiPaneList },
+      {},
+      { stdout: multiPaneList, exited: paneBExited },
+      {},
+      {},
+    ]);
+    try {
+      // 1. Start flashing %2 (A)
+      flashPane("%2");
+      await new Promise((r) => origSetTimeout(r, 0));
+      expect(
+        stubs.calls.filter((argv) => argv[1] === "set-option"),
+      ).toHaveLength(1);
+
+      // 2. Request flash on %3 (B) — list-panes stays in flight
+      flashPane("%3");
+      // 3. User returns to %2 (A) while %2 is still flashing and %3 is pending
+      flashPane("%2");
+
+      // 4. %3's list-panes now resolves: it must NOT flash %3 over %2
+      resolvePaneB(0);
+      await new Promise((r) => origSetTimeout(r, 0));
+
+      const setOptionTargets = stubs.calls
+        .filter((argv) => argv[1] === "set-option")
+        .map((argv) => argv[argv.indexOf("-t") + 1]);
+      expect(setOptionTargets).toEqual(["%2"]);
+    } finally {
+      for (const fn of scheduled.splice(0)) fn();
+      globalThis.setTimeout = origSetTimeout;
+      stubs.restore();
     }
   });
 });

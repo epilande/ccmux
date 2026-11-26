@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   request-deployment:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

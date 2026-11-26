@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/1.4]
   pull_request:
-    branches: [main]
+    branches: [main, release/1.4]
 
 jobs:
   test:
@@ -34,14 +34,30 @@ jobs:
           fish --version
       - run: bun test
 
+  # Would the release workflow accept this PR's version on its base branch?
+  release-guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The guard orders versions against every tag.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun --no-install --config=/dev/null scripts/release-guard.ts
+        env:
+          RELEASE_REF: refs/heads/${{ github.base_ref }}
+
   # Branch protection requires a check named `ci`, and a matrix job reports one
   # check per leg (`test (ubuntu-latest)`, ...), never a bare `ci`. This gate
   # keeps that name stable however the matrix changes. `always()` is
   # load-bearing: without it a failed leg SKIPS this job, and protection counts
   # a skipped required check as passing.
   ci:
-    needs: test
+    needs: [test, release-guard]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.test.result }}" = "success"
+      # Runs only on PRs, so a push expects exactly "skipped".
+      - run: test "${{ needs.release-guard.result }}" = "${{ github.event_name == 'pull_request' && 'success' || 'skipped' }}"

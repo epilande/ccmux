@@ -116,6 +116,12 @@ describe("parseAutoOpenHook", () => {
     expect(parseAutoOpenHook(output)).toBe(true);
   });
 
+  it("recognizes a surviving session hook for width updates", () => {
+    const output =
+      "after-new-session[99] split-window -fhbd -l 30 'sleep 0.1 && exec ccmux sidebar'";
+    expect(parseAutoOpenHook(output)).toBe(true);
+  });
+
   it("returns false when hook is absent", () => {
     const output = "after-new-session[0] -> run-shell 'some command'";
     expect(parseAutoOpenHook(output)).toBe(false);
@@ -176,11 +182,9 @@ describe("parseSidebarPaneIds", () => {
 describe("resizeHookCommand", () => {
   // Verified live on tmux 3.6a: resizing one window re-pins only that window's
   // sidebar, a sidebar-less window is a no-op, and no ccmux process is started.
-  it("emits the exact pure-shell hook body", () => {
+  it("emits the exact synchronous tmux command hook body", () => {
     expect(resizeHookCommand(30)).toBe(
-      `run-shell -b 'tmux -S "#{socket_path}" list-panes -t "#{hook_window}" ` +
-        `-F "##{pane_id}" -f "##{==:##{pane_title},ccmux-sidebar}" 2>/dev/null ` +
-        `| while read -r p; do tmux -S "#{socket_path}" resize-pane -t "$p" -x 30 2>/dev/null; done'`,
+      `run-shell -C '#{P:#{?#{==:#{pane_title},ccmux-sidebar},resize-pane -t #{pane_id} -x 30 ; ,}}'`,
     );
   });
 
@@ -191,28 +195,28 @@ describe("resizeHookCommand", () => {
     expect(resizeHookCommand(42)).not.toContain("ccmux ");
   });
 
-  it("scopes the work to the resized window", () => {
+  it("scopes the work to the resized window synchronously in-process", () => {
     const cmd = resizeHookCommand(42);
-    expect(cmd).toContain('list-panes -t "#{hook_window}"');
-    // A global `list-panes -a` here is what re-pinned every sidebar per firing.
+    expect(cmd).toStartWith("run-shell -C '");
+    // Must NOT pass -t "#{hook_window}" to run-shell (run-shell -t expects a
+    // target-pane without format-expanding its flag, which silently fails).
+    expect(cmd).not.toContain("hook_window");
+    // No background shell (`run-shell -b`) or global `list-panes -a`.
+    expect(cmd).not.toContain("run-shell -b");
     expect(cmd).not.toContain("list-panes -a");
   });
 
-  it("escapes inner formats so only the outer ones expand at fire time", () => {
+  it("uses native tmux #{P:...} pane loop matching sidebar title", () => {
     const cmd = resizeHookCommand(42);
-    // `#{hook_window}` / `#{socket_path}` expand when run-shell fires...
-    expect(cmd).toContain('"#{socket_path}"');
-    // ...while `##{pane_id}` / `##{pane_title}` must reach the inner list-panes
-    // as literal `#{...}`.
-    expect(cmd).toContain('-F "##{pane_id}"');
-    expect(cmd).toContain("##{pane_title}");
-    expect(cmd).not.toContain('-F "#{pane_id}"');
+    expect(cmd).toContain("#{P:");
+    expect(cmd).toContain("ccmux-sidebar");
+    expect(cmd).toContain("resize-pane -t #{pane_id} -x 42");
   });
 
-  it("bakes the width in and stays free of single quotes", () => {
+  it("bakes the width in and stays free of single quotes inside body", () => {
     expect(resizeHookCommand(77)).toContain("-x 77");
     // The body is single-quoted at the tmux layer, which cannot escape a quote.
-    const body = resizeHookCommand(77).replace(/^run-shell -b '/, "");
+    const body = resizeHookCommand(77).replace(/^run-shell -C '/, "");
     expect(body.slice(0, -1)).not.toContain("'");
   });
 });
@@ -300,17 +304,19 @@ describe("ccmuxPortEnvPrefix", () => {
     }
   });
 
-  it("bakes the forwarded port into the spawn command", () => {
+  it("bakes the forwarded port and the resolved width into the spawn command", () => {
     withPort("2270", () =>
-      expect(sidebarSpawnCmd(0.1)).toBe(
-        "sleep 0.10 && exec env CCMUX_PORT=2270 ccmux sidebar",
+      expect(sidebarSpawnCmd(0.1, 40)).toBe(
+        "sleep 0.10 && exec env CCMUX_PORT=2270 ccmux sidebar --width 40",
       ),
     );
   });
 
-  it("leaves the spawn command bare when no port is forwarded", () => {
+  it("leaves the spawn command bare except the width when no port is forwarded", () => {
     withPort(undefined, () =>
-      expect(sidebarSpawnCmd(0.6)).toBe("sleep 0.60 && exec ccmux sidebar"),
+      expect(sidebarSpawnCmd(0.6, 30)).toBe(
+        "sleep 0.60 && exec ccmux sidebar --width 30",
+      ),
     );
   });
 });
