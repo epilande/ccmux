@@ -19,9 +19,12 @@
  * 4. Failures are held for their own, shorter window than successes.
  * 5. An unforeseen rejection DROPS the entry, so a repo cannot wedge
  *    permanently "in flight" for the daemon's whole life.
- * 6. With `maxEntries`, the oldest SETTLED entries are evicted past the cap.
- *    An in-flight entry is never evicted: it is the lock, and dropping it
- *    would let the next caller start the duplicate call rule 1 prevents.
+ * 6. With `maxEntries`, the oldest SETTLED entries are evicted past the cap,
+ *    both when an entry is added and when one settles. An in-flight entry is
+ *    never evicted: it is the lock, and dropping it would let the next caller
+ *    start the duplicate call rule 1 prevents. Trimming on settle is what
+ *    brings a burst of concurrent misses back under the cap once it lands,
+ *    rather than leaving it over until some later miss.
  *    Per-repo keys never needed a cap; per-item keys (`<root>#<n>` for one
  *    PR's detail) grow with every row the cursor visits.
  *
@@ -97,6 +100,7 @@ export class RepoAnswerCache<T> {
     void answer.then(
       (result) => {
         fresh.done = { at: Date.now(), result };
+        this.evict();
       },
       () => {
         // The listers report every failure they know about as `ok: false` and
@@ -111,8 +115,8 @@ export class RepoAnswerCache<T> {
   }
 
   /** Drop the oldest settled entries while over `maxEntries`. In-flight ones
-   *  are skipped, so a burst of concurrent misses can briefly exceed the cap
-   *  rather than lose a lock. */
+   *  are skipped, so a burst of concurrent misses can exceed the cap while it
+   *  runs rather than lose a lock; each settling entry trims it back. */
   private evict(): void {
     const max = this.options.maxEntries;
     if (max === undefined) return;
