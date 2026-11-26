@@ -425,6 +425,20 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     visible().find((r) => `repo:${r.repoRoot}` === cursorKey());
   const currentRepo = () =>
     headerRepo()?.repoRoot ?? cursorRow()?.repoRoot ?? scope();
+  /**
+   * `zm` and `-`: fold every repo, and bring the cursor out with its own.
+   * A row's key outlives its group folding, and the re-seed effect has no
+   * rows left to re-seed from, so without this the cursor would name a
+   * hidden row: nothing highlighted, and every key acting on it unseen.
+   * Measured BEFORE the fold, while the row still says which repo it is in.
+   */
+  function collapseAll(): void {
+    const repo = headerRepo()?.repoRoot ?? cursorRow()?.repoRoot ?? null;
+    setCollapsed(new Set(visible().map((r) => r.repoRoot)));
+    const keys = navKeys();
+    const own = repo === null ? undefined : `repo:${repo}`;
+    setCursorKey(own && keys.includes(own) ? own : (keys[0] ?? null));
+  }
   function toggleGroup(root: string) {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -699,7 +713,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     if (props.onNavigate?.(event, currentRepo())) return;
     if (armedZ) {
       if (key === "m") {
-        setCollapsed(new Set(visible().map((r) => r.repoRoot)));
+        collapseAll();
         return;
       }
       if (key === "r") {
@@ -860,7 +874,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         pendingZ = true;
         break;
       case "-":
-        setCollapsed(new Set(visible().map((r) => r.repoRoot)));
+        collapseAll();
         break;
       case "=":
         setCollapsed(new Set<string>());

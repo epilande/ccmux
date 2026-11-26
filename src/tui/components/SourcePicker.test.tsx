@@ -1609,6 +1609,24 @@ describe("Start key convergence", () => {
     harness.keys.pressKey("r");
     expect(await harness.frame()).toContain("#156");
   });
+
+  for (const fold of [["z", "m"], ["-"]]) {
+    it(`brings the cursor out to its repo's header on ${fold.join("")}`, async () => {
+      const harness = await mountSettled({
+        prs: [openPR()],
+        issues: [openIssue()],
+      });
+      // The cursor seeds onto the first PR row.
+      for (const key of fold) harness.keys.pressKey(key);
+      const folded = await harness.frame();
+      expect(folded).not.toContain("#156");
+      // On the header, Enter unfolds it. Left on the hidden row, Enter had
+      // no row to act on and the fold stayed shut.
+      harness.keys.pressEnter();
+      expect(await harness.frame()).toContain("#156");
+      expect(harness.picked.prs).toEqual([]);
+    });
+  }
 });
 
 it("keeps the PR number, title and checkout arrow in a compact overlay", async () => {
