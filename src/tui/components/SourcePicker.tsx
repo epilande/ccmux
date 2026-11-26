@@ -1,7 +1,6 @@
 import { useStatusIcon } from "../utils/useStatusIcon";
 import { GroupHeader } from "./GroupHeader";
 import type { ViewMemory } from "../actions";
-import type { RepoFactsResponse } from "../../daemon/repo-facts";
 import type { PanelEffects } from "./WorktreesPanel";
 import { useRenderer } from "@opentui/solid";
 import type { Component } from "solid-js";
@@ -88,7 +87,6 @@ export interface SourcePickerOrigin {
 export interface SourcePickerProps {
   activeSessionId?: string | null;
   effects: PanelEffects;
-  facts?: RepoFactsResponse;
   memory?: ViewMemory;
   onRemember?: (memory: ViewMemory) => void;
   embedded?: boolean;

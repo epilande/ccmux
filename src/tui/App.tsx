@@ -4974,7 +4974,6 @@ export function App(props: AppProps) {
               scope={store.state.scope}
               activeSessionId={store.state.activeSessionId}
               effects={liveEffects}
-              facts={repoFacts.data()}
               showPreview={!props.sidebar && store.state.showPreview}
               previewWidth={store.state.previewWidth}
               previewFocused={store.state.previewFocused}
