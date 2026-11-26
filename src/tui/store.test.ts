@@ -3611,6 +3611,183 @@ describe("store", () => {
       expect(store.isSidebarVersionNewer(1)).toBe(false);
       expect(store.isSidebarVersionNewer(2)).toBe(true);
     });
+
+    it("accepts updates from another sidebar instance even when its local counter is lower", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "s1" }),
+        createMockSession({ id: "s2" }),
+        createMockSession({ id: "s3" }),
+      ]);
+
+      // Navigate locally 3 times so local version reaches 3
+      store.actions.moveSelection(1);
+      store.actions.moveSelection(1);
+      store.actions.moveSelection(-1);
+
+      // Another window's sidebar (different senderId) clicks for the first time (version 1)
+      expect(store.isSidebarVersionNewer(1, "other-sidebar-uuid")).toBe(true);
+    });
+
+    it("preserves FlatItem object identity for unchanged session rows when another row reorders", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({
+          id: "s1",
+          project: "alpha",
+          status: "idle",
+          statusChangedAt: "2026-11-19T09:00:00.000Z",
+        }),
+        createMockSession({
+          id: "s2",
+          project: "beta",
+          status: "idle",
+          statusChangedAt: "2026-11-19T09:01:00.000Z",
+        }),
+        createMockSession({
+          id: "s3",
+          project: "beta",
+          status: "idle",
+          statusChangedAt: "2026-11-19T09:02:00.000Z",
+        }),
+      ]);
+
+      const before = store.flatItems();
+      const s1ItemBefore = before.find(
+        (i) => i.type === "session" && i.filteredSession.session.id === "s1",
+      );
+      expect(s1ItemBefore).toBeDefined();
+
+      // s2 transitions to newer statusChangedAt, reordering beta's rows
+      store.actions.updateSession(
+        createMockSession({
+          id: "s2",
+          project: "beta",
+          status: "working",
+          statusChangedAt: "2026-11-19T09:05:00.000Z",
+        }),
+      );
+
+      const after = store.flatItems();
+      const s1ItemAfter = after.find(
+        (i) => i.type === "session" && i.filteredSession.session.id === "s1",
+      );
+      expect(s1ItemAfter).toBe(s1ItemBefore);
+    });
+
+    it("selectFlatItem selects by item identity even if list indices shifted", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "none" });
+      store.actions.setSessions([
+        createMockSession({ id: "s1", status: "idle" }),
+        createMockSession({ id: "s2", status: "idle" }),
+      ]);
+
+      const staleItem = store.flatItems()[1]!; // s2 was at index 1
+      // Now s0 is added at the front (waiting) so s2 shifts to index 2
+      store.actions.setSessions([
+        createMockSession({ id: "s0", status: "waiting" }),
+        createMockSession({ id: "s1", status: "idle" }),
+        createMockSession({ id: "s2", status: "idle" }),
+      ]);
+
+      store.actions.selectFlatItem(staleItem, 1);
+      expect(store.state.selectedSessionId).toBe("s2");
+    });
+
+    it("tracks scrollSync on applySidebarSelection and flushes scrollTop immediately via flushSidebarStateNow", async () => {
+      const fetchCalls: Array<{ url: string; body: Record<string, unknown> }> =
+        [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        fetchCalls.push({
+          url: String(input),
+          body: init?.body ? JSON.parse(String(init.body)) : {},
+        });
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch;
+
+      try {
+        const store = createTUIStore({ sidebar: true, groupBy: "none" });
+        store.actions.setSessions([
+          createMockSession({ id: "s1" }),
+          createMockSession({ id: "s2" }),
+        ]);
+
+        expect(store.scrollSync()).toBeNull();
+        store.actions.applySidebarSelection("s2", null, 14);
+        expect(store.scrollSync()).toEqual({ top: 14, generation: 1 });
+
+        store.actions.setSelectedIndex(0);
+        await store.flushSidebarStateNow(9);
+        expect(fetchCalls).toHaveLength(1);
+        expect(fetchCalls[0]!.url).toContain("/sidebar-state");
+        expect(fetchCalls[0]!.body).toMatchObject({
+          selectedSessionId: "s1",
+          selectedHeaderKey: null,
+          scrollTop: 9,
+        });
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
+
+    it("rejects stale or duplicate versions from the same peer senderId", () => {
+      const store = createTUIStore({ sidebar: true, groupBy: "none" });
+      expect(store.isSidebarVersionNewer(4, "peer-a")).toBe(true);
+      expect(store.isSidebarVersionNewer(4, "peer-a")).toBe(false);
+      expect(store.isSidebarVersionNewer(3, "peer-a")).toBe(false);
+      expect(store.isSidebarVersionNewer(5, "peer-a")).toBe(true);
+      // Independent peer starts at version 1 and is still accepted
+      expect(store.isSidebarVersionNewer(1, "peer-b")).toBe(true);
+      expect(store.isSidebarVersionNewer(1, "peer-b")).toBe(false);
+    });
+
+    it("omits scrollTop in picker mode, when search narrows the list, or after group collapse", async () => {
+      const fetchCalls: Array<Record<string, unknown>> = [];
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = (async (
+        _input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        fetchCalls.push(init?.body ? JSON.parse(String(init.body)) : {});
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }) as typeof fetch;
+
+      try {
+        // Non-sidebar picker never broadcasts or applies scrollTop
+        const picker = createTUIStore({ sidebar: false, groupBy: "none" });
+        picker.actions.setSessions([createMockSession({ id: "s1" })]);
+        picker.actions.applySidebarSelection("s1", null, 12);
+        expect(picker.scrollSync()).toBeNull();
+        await picker.flushSidebarStateNow(12);
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+
+        // Sidebar with active search query omits scrollTop and ignores incoming scrollTop
+        const sidebar = createTUIStore({ sidebar: true, groupBy: "project" });
+        sidebar.actions.setSessions([
+          createMockSession({ id: "s1", project: "alpha" }),
+          createMockSession({ id: "s2", project: "beta" }),
+        ]);
+        sidebar.actions.setLocalScrollTop(10);
+        sidebar.actions.setSearchQuery("alpha");
+        sidebar.actions.applySidebarSelection("s1", null, 22);
+        expect(sidebar.scrollSync()).toBeNull();
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+
+        // Clearing search and collapsing a group clears stale localScrollTop
+        sidebar.actions.setSearchQuery("");
+        sidebar.actions.setLocalScrollTop(15);
+        sidebar.actions.toggleGroupCollapse("alpha");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    });
   });
 
   describe("new session dialog", () => {

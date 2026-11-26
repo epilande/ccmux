@@ -1,4 +1,4 @@
-import { waitForIdleMarker } from "./marker-test-helpers";
+import { waitForIdleMarker, waitForMarkerState } from "./marker-test-helpers";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
@@ -21,6 +21,7 @@ type Fire = (
   event: string,
   payload?: unknown,
   ctx?: OmpExtensionContext,
+  opts?: { settleIdle?: boolean },
 ) => void | Promise<void>;
 
 function makeCtx(
@@ -33,6 +34,40 @@ function makeCtx(
     sessionManager: {
       getSessionId: () => sessionId,
       getSessionFile: () => file,
+    },
+  };
+}
+
+/**
+ * A ctx whose managed-timer and isIdle surface is fake but controllable:
+ * `tick()` runs every reconcile callback that has not been cleared and
+ * awaits the marker write each one queues.
+ */
+function makeTimedCtx(
+  sessionId: string | undefined,
+  file?: string,
+  cwd = "/repo",
+) {
+  const timers: Array<(() => void) | undefined> = [];
+  const live = { idle: true };
+  const ctx: OmpExtensionContext = {
+    ...makeCtx(sessionId, file, cwd),
+    isIdle: () => live.idle,
+    setInterval: (fn: () => void, _ms: number) => {
+      timers.push(fn);
+      return timers.length - 1;
+    },
+    clearTimer: (id: unknown) => {
+      if (typeof id === "number") timers[id] = undefined;
+    },
+  };
+  return {
+    ctx,
+    setIdle: (idle: boolean) => {
+      live.idle = idle;
+    },
+    tick: async () => {
+      for (const fn of [...timers]) await fn?.();
     },
   };
 }
@@ -51,9 +86,9 @@ function startExtension(now?: () => number): Fire {
   };
   makeExtension({ markersDir, version: "1.0.0", now })(omp);
   const defaultCtx = makeCtx("S1");
-  return async (event, payload = null, ctx = defaultCtx) => {
+  return async (event, payload = null, ctx = defaultCtx, opts) => {
     await handlers.get(event)!(payload, ctx);
-    if (event === "agent_end") {
+    if (event === "agent_end" && opts?.settleIdle !== false) {
       await waitForIdleMarker(markersDir, ctx.sessionManager.getSessionId()!);
     }
   };
@@ -170,6 +205,7 @@ describe("omp ccmux extension", () => {
       const fire = startExtension();
 
       await fire("session_start");
+      await fire("agent_start");
       await fire("tool_approval_requested", {
         toolCallId: "call-1",
         toolName: "bash",
@@ -189,6 +225,7 @@ describe("omp ccmux extension", () => {
       const fire = startExtension();
 
       await fire("session_start");
+      await fire("agent_start");
       await fire("tool_approval_requested", {
         toolCallId: "call-1",
         toolName: "bash",
@@ -206,6 +243,7 @@ describe("omp ccmux extension", () => {
       const fire = startExtension();
 
       await fire("session_start");
+      await fire("agent_start");
       await fire("tool_approval_requested", {
         toolCallId: "call-1",
         toolName: "bash",
@@ -281,6 +319,7 @@ describe("omp ccmux extension", () => {
       const fire = startExtension();
 
       await fire("session_start");
+      await fire("agent_start");
       await fire("tool_approval_requested", {
         toolCallId: "call-1",
         toolName: "bash",
@@ -355,14 +394,16 @@ describe("omp ccmux extension", () => {
       const fire = startExtension();
 
       await fire("session_start");
+      await fire("agent_start");
       await fire("tool_approval_requested", {
         toolCallId: "call-1",
         toolName: "bash",
       });
       await fire("tool_approval_resolved", { approved: true });
 
-      // Fail-open on the state, not the wait: a row stuck at waiting forever
-      // is worse than one turn of optimistic working.
+      // Fail-open on the wait, not the state: drop everything outstanding
+      // rather than risk a row stuck at waiting; the live turn's reason
+      // keeps the row working.
       expect(readMarker("S1").state).toBe("working");
     });
 
@@ -613,6 +654,281 @@ describe("omp ccmux extension", () => {
       // `session_tree` moves a leaf within the current session, so the id is
       // untouched and rebinding would be wrong.
       expect(events).not.toContain("session_tree");
+    });
+  });
+
+  describe("compaction and retry activity", () => {
+    it("treats a save-only session_compact as a harmless end without a start", async () => {
+      const fire = startExtension();
+
+      await fire("session_start");
+      // omp 19.0.1's mirror never forwards a manual compaction's start, so
+      // a saved manual `/compact` can arrive as this end-only event; it
+      // must not lift an idle row.
+      await fire("session_compact");
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("stays working across auto-compaction that outlives the turn", async () => {
+      const fire = startExtension();
+
+      await fire("session_start");
+      await fire("agent_start");
+      await fire("auto_compaction_start");
+      // The turn ends while the compaction is still running.
+      await fire("agent_end", null, undefined, { settleIdle: false });
+      await waitForMarkerState(markersDir, "S1", "working");
+
+      await fire("auto_compaction_end");
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("marks auto-compaction started after a turn as working", async () => {
+      const fire = startExtension();
+
+      await fire("session_start");
+      await fire("agent_start");
+      await fire("agent_end");
+      expect(readMarker("S1").state).toBe("idle");
+
+      // The headline gap: post-turn auto-compaction used to read as idle
+      // while the session was busy compacting.
+      await fire("auto_compaction_start");
+      expect(readMarker("S1").state).toBe("working");
+
+      await fire("auto_compaction_end");
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("stays working across retry backoff between turns", async () => {
+      const fire = startExtension();
+
+      await fire("session_start");
+      await fire("agent_start");
+      await fire("agent_end");
+      await fire("auto_retry_start");
+      expect(readMarker("S1").state).toBe("working");
+
+      await fire("auto_retry_end");
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("keeps an approval wait on top of running activity", async () => {
+      const fire = startExtension();
+
+      await fire("session_start");
+      await fire("auto_compaction_start");
+      await fire("tool_approval_requested", {
+        toolCallId: "call-1",
+        toolName: "bash",
+      });
+      const waiting = readMarker("S1");
+      expect(waiting.state).toBe("waiting_permission");
+      expect(waiting.pending_tool).toBe("bash");
+
+      // The resolve lands while the compaction is still running.
+      await fire("tool_approval_resolved", {
+        toolCallId: "call-1",
+        approved: true,
+      });
+      expect(readMarker("S1").state).toBe("working");
+
+      // The compaction ends, but the re-armed turn keeps the row working.
+      await fire("session_compact");
+      expect(readMarker("S1").state).toBe("working");
+
+      await fire("agent_end");
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("clears activity on rebind so the fresh row starts idle", async () => {
+      const fire = startExtension();
+      const oldCtx = makeCtx("S1");
+
+      await fire("session_start", null, oldCtx);
+      await fire("auto_compaction_start", null, oldCtx);
+      expect(readMarker("S1").state).toBe("working");
+
+      const newCtx = makeCtx("S2");
+      await fire(
+        "session_switch",
+        { type: "session_switch", reason: "new" },
+        newCtx,
+      );
+      expect(readMarker("S2").state).toBe("idle");
+
+      // A late end event carried by the new ctx must not resurrect the
+      // abandoned row's state.
+      await fire("auto_compaction_end", null, newCtx);
+      expect(readMarker("S2").state).toBe("idle");
+      expect(existsSync(markerPath("S1"))).toBe(false);
+    });
+
+    it("subscribes only to the mirrored, reliably paired activity events", () => {
+      const events = registeredEvents();
+
+      for (const name of [
+        "auto_compaction_start",
+        "session_compact",
+        "auto_compaction_end",
+        "auto_retry_start",
+        "auto_retry_end",
+      ]) {
+        expect(events).toContain(name);
+      }
+      // Every unsubscribed name here starts an activity the event model
+      // cannot reliably end: omp 19.0.1's lifecycle mirror swallows
+      // manual_compaction_*, `session.compacting` fires before the
+      // summarizer even on failed or cancelled compactions, and
+      // `session_compact` fires only on save, so none of them has an
+      // extension-visible end when a compaction does not commit.
+      // `session_before_compact` additionally disables omp's speculative
+      // and mid-turn compaction when any extension registers it.
+      for (const name of [
+        "session.compacting",
+        "manual_compaction_start",
+        "manual_compaction_end",
+        "session_before_compact",
+      ]) {
+        expect(events).not.toContain(name);
+      }
+    });
+  });
+
+  describe("reconcile", () => {
+    it("heals a turn reason whose agent_end was lost", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      expect(readMarker("S1").state).toBe("working");
+
+      // agent_end never arrives; the session is idle in truth.
+      setIdle(true);
+      await tick();
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("keeps a compaction reason alive across idle ticks", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("auto_compaction_start", null, ctx);
+      expect(readMarker("S1").state).toBe("working");
+
+      // `ctx.isIdle()` is `!isStreaming`, which stays true through a
+      // compaction; a long one must outlive any number of reconcile
+      // ticks. Only its own end event delivers idle.
+      setIdle(true);
+      await tick();
+      await tick();
+      expect(readMarker("S1").state).toBe("working");
+
+      await fire("auto_compaction_end", null, ctx);
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("keeps an approval wait visible when a busy tick has no reasons", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      await fire("agent_end", null, ctx);
+      await fire(
+        "tool_approval_requested",
+        { toolCallId: "call-1", toolName: "bash" },
+        ctx,
+      );
+
+      // The turn is gone but omp still reads busy when the approval lands;
+      // the busy fallback must not bury the wait under `working`.
+      setIdle(false);
+      await tick();
+      expect(readMarker("S1").state).toBe("waiting_permission");
+      expect(readMarker("S1").pending_tool).toBe("bash");
+    });
+
+    it("leaves an approval wait alone when the context reads idle", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      await fire(
+        "tool_approval_requested",
+        { toolCallId: "call-1", toolName: "bash" },
+        ctx,
+      );
+      setIdle(true);
+      await tick();
+
+      expect(readMarker("S1").state).toBe("waiting_permission");
+      expect(readMarker("S1").pending_tool).toBe("bash");
+    });
+
+    it("keeps an explicitly continuing turn across idle ticks", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      // omp waits on async work before continuing the turn; nothing is
+      // streaming, so the context reads idle while it waits.
+      await fire(
+        "agent_end",
+        { willContinue: true, awaitingAsyncWork: true },
+        ctx,
+        { settleIdle: false },
+      );
+      setIdle(true);
+      await tick();
+      await tick();
+      expect(readMarker("S1").state).toBe("working");
+
+      // The continuation runs and finishes; only the terminal end (or a
+      // rebind) clears the parked reason.
+      await fire("agent_start", null, ctx);
+      await fire("agent_end", null, ctx);
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("leans a busy session with no reason on record toward working", async () => {
+      const fire = startExtension();
+      const { ctx, setIdle, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      await fire("agent_end", null, ctx);
+      expect(readMarker("S1").state).toBe("idle");
+
+      // omp is running again but no event said so (a continuation the
+      // event model cannot see): lift the row rather than leave it idle.
+      setIdle(false);
+      await tick();
+      expect(readMarker("S1").state).toBe("working");
+
+      // And settle it back once the context reads idle, disarming itself.
+      setIdle(true);
+      await tick();
+      expect(readMarker("S1").state).toBe("idle");
+    });
+
+    it("stops the reconcile before removing the marker on shutdown", async () => {
+      const fire = startExtension();
+      const { ctx, tick } = makeTimedCtx("S1");
+
+      await fire("session_start", null, ctx);
+      await fire("agent_start", null, ctx);
+      await fire("session_shutdown", null, ctx);
+      expect(existsSync(markerPath("S1"))).toBe(false);
+
+      // A tick that would have landed behind the queued removal must find
+      // no timer to run and must not recreate the marker.
+      await tick();
+      expect(existsSync(markerPath("S1"))).toBe(false);
     });
   });
 });

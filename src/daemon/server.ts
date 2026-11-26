@@ -686,10 +686,13 @@ export class DaemonServer {
    * client can say "unreachable at <path>" instead of "no sessions".
    */
   private socketError: TmuxSocketError | null = null;
+  private static readonly MAX_SIDEBAR_SENDERS = 128;
   private lastSidebarState: {
     selectedSessionId: string | null;
     selectedHeaderKey: string | null;
+    scrollTop?: number;
   } = { selectedSessionId: null, selectedHeaderKey: null };
+  private sidebarSenderVersions = new Map<string, number>();
   private attentionTracker: AttentionTracker;
   private invocationManager: InvocationManager;
   private getHookAdapter: (agentName: string) => HookAdapter | null;
@@ -1376,18 +1379,20 @@ export class DaemonServer {
   private static readonly ACTIVE_PANE_HOOKS = [
     "after-select-pane[50]",
     "after-select-window[50]",
+    "client-session-changed[50]",
   ] as const;
 
   /**
    * Install tmux hooks to notify daemon of pane focus changes.
-   * Uses after-select-pane and after-select-window (compatible with tmux 3.x).
+   * Uses after-select-pane, after-select-window, and client-session-changed
+   * so switching tmux sessions (`switch-client`) updates focus too.
    */
   private installPaneFocusHook(): void {
-    // Trailing `|| true` keeps the shell exit status 0 when the daemon isn't
-    // listening (curl exit 7). Without it, tmux surfaces the non-zero exit
-    // from `run-shell -b` as a status-line message on every pane switch
-    // whenever a stale hook outlives the daemon.
-    const hookCmd = `run-shell -b 'curl -s -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
+    // Require an attached session AND active window + active pane so programmatic
+    // select-pane/select-window calls in detached sessions or background windows
+    // cannot steal active-pane focus. Trailing `|| true` keeps exit status 0
+    // when short-circuited or when the daemon isn't listening (curl exit 7).
+    const hookCmd = `run-shell -b '[ -n "#{session_attached}" ] && [ "#{session_attached}" != "0" ] && [ "#{window_active}" = "1" ] && [ "#{pane_active}" = "1" ] && curl -s -m 2 -X POST http://${DAEMON_HOST}:${DAEMON_PORT}/active-pane -H "Content-Type:application/json" -d "{\\"paneId\\":\\"#{pane_id}\\"}" > /dev/null 2>&1 || true'`;
     for (const hook of DaemonServer.ACTIVE_PANE_HOOKS) {
       Bun.spawn(tmuxArgv("set-hook", "-g", hook, hookCmd), {
         stdout: "ignore",
@@ -2689,6 +2694,19 @@ export class DaemonServer {
     const session = this.resolveSession(paneId);
     const sessionId = session?.id ?? null;
 
+    if (sessionId !== null) {
+      const keepScrollTop =
+        this.lastSidebarState.selectedSessionId === sessionId &&
+        this.lastSidebarState.scrollTop !== undefined;
+      this.lastSidebarState = {
+        selectedSessionId: sessionId,
+        selectedHeaderKey: null,
+        ...(keepScrollTop
+          ? { scrollTop: this.lastSidebarState.scrollTop }
+          : {}),
+      };
+    }
+
     // Mark session as seen when user switches to its pane
     if (session?.attentionState) {
       this.attentionTracker.markSeen(session.id, false);
@@ -2841,10 +2859,30 @@ export class DaemonServer {
         ? body.selectedHeaderKey
         : null;
     const version = typeof body.version === "number" ? body.version : undefined;
+    const senderId =
+      typeof body.senderId === "string" ? body.senderId : undefined;
+    const scrollTop =
+      typeof body.scrollTop === "number" && Number.isFinite(body.scrollTop)
+        ? body.scrollTop
+        : undefined;
+
+    if (senderId !== undefined && version !== undefined) {
+      const prevVersion = this.sidebarSenderVersions.get(senderId) ?? 0;
+      if (version <= prevVersion) {
+        return Response.json({ success: true, ignored: true }, { headers });
+      }
+      this.sidebarSenderVersions.delete(senderId);
+      this.sidebarSenderVersions.set(senderId, version);
+      if (this.sidebarSenderVersions.size > DaemonServer.MAX_SIDEBAR_SENDERS) {
+        const oldest = this.sidebarSenderVersions.keys().next().value;
+        if (oldest !== undefined) this.sidebarSenderVersions.delete(oldest);
+      }
+    }
 
     this.lastSidebarState = {
       selectedSessionId,
       selectedHeaderKey,
+      ...(scrollTop !== undefined ? { scrollTop } : {}),
     };
 
     this.broadcastEvent({
@@ -2852,7 +2890,9 @@ export class DaemonServer {
       timestamp: new Date().toISOString(),
       selectedSessionId,
       selectedHeaderKey,
+      ...(scrollTop !== undefined ? { scrollTop } : {}),
       version,
+      senderId,
     });
 
     return Response.json({ success: true }, { headers });
