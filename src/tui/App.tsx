@@ -1530,20 +1530,30 @@ export function App(props: AppProps) {
     cwd: () => pickerCwd(),
     visible: () => isVisible(),
   });
-  function switchMainView(next: View) {
-    // Refused under anything that owns input, the strip's clicks included:
-    // a switch would leave that owner answering keys over a view it is no
-    // longer drawn on. A handoff being aimed and the search input live on
-    // the session list (Esc leaves either), and a removal prompt on the
-    // Worktrees panel.
-    if (
-      next === view() ||
+  /**
+   * Whether entering another view is refused now: under anything that owns
+   * input, since the entry would leave that owner answering keys over a view
+   * it is no longer drawn on, and the panel it opened disabled under it
+   * (`panelOwnsKeys`). A handoff being aimed and the search input live on the
+   * session list (Esc leaves either), and a removal prompt on the Worktrees
+   * panel.
+   *
+   * Every way INTO a view asks this, not only the strip: the group menu's
+   * Worktrees once opened the panel directly under a search, where the
+   * panel's early return kept Esc from the search and the strip refused the
+   * way back, so nothing recovered. The view keys need no check of their
+   * own, because each owner here takes the keyboard ahead of them.
+   */
+  function viewEntryRefused(): boolean {
+    return (
       dialogOwnsInput() ||
       store.state.handoffPick !== null ||
       store.state.searchMode ||
       worktreeModal()
-    )
-      return;
+    );
+  }
+  function switchMainView(next: View) {
+    if (next === view() || viewEntryRefused()) return;
     // A focused preview belongs to the view it is in; the next view's
     // preview starts unfocused (and a strip click is how one gets here).
     store.actions.exitPreviewFocus();
@@ -1832,6 +1842,13 @@ export function App(props: AppProps) {
       isSyntheticGroupKey(header.groupKey)
     )
       return;
+    // The strip's refusal, said aloud: a menu item that silently did nothing
+    // would read as broken, where the strip's tab simply stays put.
+    if (viewEntryRefused()) {
+      if (store.state.searchMode)
+        store.actions.showToast("Esc ends the search first");
+      return;
+    }
     const repo =
       header.members
         .map((member) => member.session)

@@ -486,6 +486,83 @@ describe("App", () => {
     }
   });
 
+  it("keeps the group menu's Worktrees from opening the panel under an open search", async () => {
+    // The strip refuses a switch under the search, and the group menu's
+    // Worktrees is the same entry into the same view. Taken directly, it
+    // put the panel up disabled (search owns the keys) over a search whose
+    // Esc never ran (the panel's early return comes first), and the strip
+    // refused the way back: nothing recovered.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({})) as unknown as typeof fetch;
+    const settle = async () => {
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+    };
+    const lineOf = (text: string) =>
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes(text));
+    const colOf = (line: number, text: string) =>
+      setup.captureCharFrame().split("\n")[line]!.indexOf(text) + 1;
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            mainRepoRoot: "/code/alpha",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await settle();
+      setup.mockInput.pressKey("/");
+      await settle();
+      await setup.mockInput.typeText("al");
+      await settle();
+      const header = lineOf("alpha (1)");
+      expect(header).toBeGreaterThan(-1);
+      await setup.mockMouse.click(5, header, MouseButtons.RIGHT);
+      await settle();
+      const item = lineOf("│ Worktrees");
+      expect(item).toBeGreaterThan(-1);
+      await setup.mockMouse.click(colOf(item, "Worktrees"), item);
+      await settle();
+      let frame = setup.captureCharFrame();
+      // Refused, and said why: still Sessions, unscoped, still searching.
+      expect(frame).toContain("scope: all repos");
+      expect(frame).toContain("/ al");
+      expect(frame).toContain("alpha (1)");
+      expect(frame).not.toContain("│ Worktrees");
+      expect(frame).toContain("Esc ends the search first");
+      // And the search is still the search's: typing lands in it, and Esc
+      // ends it.
+      await setup.mockInput.typeText("p");
+      await settle();
+      expect(setup.captureCharFrame()).toContain("alp");
+      deliverEscape(setup.renderer);
+      await settle();
+      frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Search sessions");
+      expect(frame).not.toContain("alp ");
+      // With the search over, the same menu item opens the panel, narrowed
+      // to the group's repo.
+      await setup.mockMouse.click(5, lineOf("alpha (1)"), MouseButtons.RIGHT);
+      await settle();
+      const again = lineOf("│ Worktrees");
+      await setup.mockMouse.click(colOf(again, "Worktrees"), again);
+      await settle();
+      expect(setup.captureCharFrame()).toContain("scope: alpha");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("toggles help overlay on ? key", async () => {
     await renderApp(120, 24);
     setup.mockInput.pressKey("?");
