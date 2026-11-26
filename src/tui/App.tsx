@@ -136,6 +136,8 @@ import { Text } from "./components/Text";
  *  shared-session refusal is the only place a user hears that a popup on a
  *  session with two terminals needs a binding that names the client. */
 const BINDING_HINT_TOAST_MS = 6000;
+/** How often an empty board re-checks whether the tmux server is reachable. */
+const SERVER_INFO_RECHECK_MS = 5000;
 
 interface AppProps {
   initialPreview?: boolean;
@@ -3565,6 +3567,24 @@ export function App(props: AppProps) {
       idleGc.cancel();
     });
   }
+
+  // While the list is empty, re-ask the daemon now and then whether its tmux
+  // server is reachable: the empty state is the only place the answer shows,
+  // and `/server-info` is otherwise read only on (re)connect. Both directions
+  // need it. A server lost mid-session reaps every row without any event that
+  // says why, so the board would read "No sessions found"; and one that comes
+  // back with no agents produces no session event, so the diagnostic (and an
+  // orphaned server's recovery command) would outlive the fix. Gated on
+  // visibility because a probe of a broken server spawns tmux, and a hidden
+  // sidebar shows nothing; a healthy daemon answers from its cached socket.
+  // `boardEmpty` is a boolean memo so session churn on a populated board never
+  // re-runs the effect, and an empty one keeps a single steady interval.
+  const boardEmpty = createMemo(() => store.flatItems().length === 0);
+  createEffect(() => {
+    if (!(boardEmpty() || store.state.tmuxSocketError) || !isVisible()) return;
+    const timer = setInterval(refreshServerInfo, SERVER_INFO_RECHECK_MS);
+    onCleanup(() => clearInterval(timer));
+  });
 
   // Sync state across TUI instances (sidebar reads state.json changes made by picker)
   if (props.sidebar) {
