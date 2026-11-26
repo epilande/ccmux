@@ -51,6 +51,7 @@ import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
   buildFlatItems,
+  flatItemIdentity,
   isSyntheticGroupKey,
   getGroupKey,
   groupSessions,
@@ -937,31 +938,114 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
   /** Monotonic version counter for sidebar state sync.
    *  Incremented on every local selection change so echo-back events
-   *  from the daemon can be detected and ignored. */
+   *  from the daemon can be detected and ignored, while peer sidebars
+   *  with independent counters are identified via sidebarInstanceId. */
+  const SIDEBAR_STATE_TIMEOUT_MS = 500;
+  const MAX_TRACKED_SENDERS = 128;
+  const sidebarInstanceId = crypto.randomUUID();
   let sidebarVersion = 0;
+  let localSidebarTouched = false;
   let sidebarBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  let sidebarInflightAbort: AbortController | null = null;
+  const lastVersionBySender = new Map<string, number>();
+  let localScrollTop: number | undefined;
+  const [scrollSync, setScrollSync] = createSignal<{
+    top: number;
+    generation: number;
+  } | null>(null);
+
+  function canSyncScrollTop(): boolean {
+    return Boolean(options.sidebar) && state.searchQuery.trim().length === 0;
+  }
+
+  function recordSenderVersion(senderId: string, version: number) {
+    lastVersionBySender.delete(senderId);
+    lastVersionBySender.set(senderId, version);
+    if (lastVersionBySender.size > MAX_TRACKED_SENDERS) {
+      const oldest = lastVersionBySender.keys().next().value;
+      if (oldest !== undefined) lastVersionBySender.delete(oldest);
+    }
+  }
+
+  function buildSidebarStatePayload() {
+    return {
+      selectedSessionId: state.selectedSessionId,
+      selectedHeaderKey: selectedHeaderKey(),
+      ...(canSyncScrollTop() && localScrollTop !== undefined
+        ? { scrollTop: localScrollTop }
+        : {}),
+      version: sidebarVersion,
+      senderId: sidebarInstanceId,
+    };
+  }
+
+  function postSidebarState(): Promise<Response> {
+    sidebarInflightAbort?.abort();
+    const controller = new AbortController();
+    sidebarInflightAbort = controller;
+    return fetch(`${getDaemonUrl()}/sidebar-state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildSidebarStatePayload()),
+      signal: AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(SIDEBAR_STATE_TIMEOUT_MS),
+      ]),
+    }).finally(() => {
+      if (sidebarInflightAbort === controller) {
+        sidebarInflightAbort = null;
+      }
+    });
+  }
 
   /** Broadcast sidebar selection to all instances via daemon SSE.
    *  Debounced to coalesce rapid navigation into a single broadcast. */
   function broadcastSidebarState() {
+    localSidebarTouched = true;
     sidebarVersion++;
     if (sidebarBroadcastTimer) clearTimeout(sidebarBroadcastTimer);
     sidebarBroadcastTimer = setTimeout(() => {
       sidebarBroadcastTimer = null;
-      fetch(`${getDaemonUrl()}/sidebar-state`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          selectedSessionId: state.selectedSessionId,
-          selectedHeaderKey: selectedHeaderKey(),
-          version: sidebarVersion,
-        }),
-      }).catch(() => {});
+      postSidebarState().catch(() => {});
     }, 100);
   }
 
-  /** Check if an incoming sidebar state version is newer than our local state */
-  function isSidebarVersionNewer(incomingVersion: number | undefined): boolean {
+  /** Immediately flush sidebar state to the daemon without debounce so
+   *  peer sidebars receive selection + scrollTop before tmux switches windows. */
+  async function flushSidebarStateNow(scrollTop?: number): Promise<void> {
+    localSidebarTouched = true;
+    if (typeof scrollTop === "number" && Number.isFinite(scrollTop)) {
+      localScrollTop = scrollTop;
+    }
+    sidebarVersion++;
+    if (sidebarBroadcastTimer) {
+      clearTimeout(sidebarBroadcastTimer);
+      sidebarBroadcastTimer = null;
+    }
+    try {
+      await postSidebarState();
+    } catch {
+      // Best-effort sync
+    }
+  }
+
+  /** Check if an incoming sidebar state event should be applied locally */
+  function isSidebarVersionNewer(
+    incomingVersion: number | undefined,
+    incomingSenderId?: string,
+  ): boolean {
+    if (incomingSenderId !== undefined) {
+      if (incomingSenderId === sidebarInstanceId) return false;
+      if (incomingVersion !== undefined) {
+        const lastSeen = lastVersionBySender.get(incomingSenderId) ?? 0;
+        if (incomingVersion <= lastSeen) return false;
+        recordSenderVersion(incomingSenderId, incomingVersion);
+        if (incomingVersion > sidebarVersion) {
+          sidebarVersion = incomingVersion;
+        }
+      }
+      return true;
+    }
     if (incomingVersion === undefined) return true; // legacy event without version
     return incomingVersion > sidebarVersion;
   }
@@ -969,6 +1053,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   onCleanup(() => {
     if (statePersistTimer) clearTimeout(statePersistTimer);
     if (sidebarBroadcastTimer) clearTimeout(sidebarBroadcastTimer);
+    if (sidebarInflightAbort) {
+      sidebarInflightAbort.abort();
+      sidebarInflightAbort = null;
+    }
     if (toastTimer) clearTimeout(toastTimer);
     for (const timer of invokeRemovalTimers.values()) clearTimeout(timer);
     invokeRemovalTimers.clear();
@@ -1426,9 +1514,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     ).length;
   });
 
+  let previousSessionItems = new Map<
+    string,
+    Extract<FlatItem, { type: "session" }>
+  >();
+
   const flatItems = trackedMemo("flatItems", () => {
     const isSearching = state.searchQuery.trim().length > 0;
-    return buildFlatItems(
+    const rawItems = buildFlatItems(
       filteredSessions(),
       state.groupBy,
       collapsedGroups(),
@@ -1437,6 +1530,36 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       attentionBand,
       outOfScopeWaiting(),
     );
+    const nextSessionItems = new Map<
+      string,
+      Extract<FlatItem, { type: "session" }>
+    >();
+    const stabilized = rawItems.map((item) => {
+      if (item.type !== "session") return item;
+      const cacheKey = `${item.groupKey}\0${item.filteredSession.session.id}`;
+      const prev = previousSessionItems.get(cacheKey);
+      if (
+        prev &&
+        prev.groupKey === item.groupKey &&
+        prev.sharedTmuxSession === item.sharedTmuxSession &&
+        prev.filteredSession.session === item.filteredSession.session &&
+        prev.filteredSession.highlights === item.filteredSession.highlights &&
+        prev.filteredSession.paneMatch === item.filteredSession.paneMatch &&
+        prev.filteredSession.transcriptMatch ===
+          item.filteredSession.transcriptMatch &&
+        prev.filteredSession.transcriptSnippet ===
+          item.filteredSession.transcriptSnippet &&
+        prev.filteredSession.primarySource ===
+          item.filteredSession.primarySource
+      ) {
+        nextSessionItems.set(cacheKey, prev);
+        return prev;
+      }
+      nextSessionItems.set(cacheKey, item);
+      return item;
+    });
+    previousSessionItems = nextSessionItems;
+    return stabilized;
   });
 
   const selectedIndex = trackedMemo("selectedIndex", () => {
@@ -1497,14 +1620,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     const header = selectedGroupHeader();
     return header?.members.map((fs) => fs.session) ?? [];
   });
-
-  /** Stable identity for a flat row. Used to find a pre-kill predecessor in
-   *  the post-rebuild list after headers for emptied groups disappear. */
-  function flatItemIdentity(item: FlatItem): string {
-    return item.type === "header"
-      ? `header:${item.groupKey}`
-      : `session:${item.filteredSession.session.id}`;
-  }
 
   /** Select an item in the flat list by index.
    *  Batched to prevent transient states where selectedIndex() falls back to 0. */
@@ -2063,6 +2178,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     setSelectedIndex(index: number) {
       selectItemAt(index);
+    },
+
+    selectFlatItem(item: FlatItem, fallbackIndex?: number) {
+      const items = flatItems();
+      const targetIdentity = flatItemIdentity(item);
+      const resolvedIndex = items.findIndex(
+        (candidate) => flatItemIdentity(candidate) === targetIdentity,
+      );
+      if (resolvedIndex !== -1) {
+        selectItemAt(resolvedIndex);
+      } else if (fallbackIndex !== undefined) {
+        selectItemAt(fallbackIndex);
+      }
     },
 
     setSearchQuery(query: string) {
@@ -2739,14 +2867,49 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     setSelectedSessionId(sessionId: string | null) {
+      localSidebarTouched = true;
       setState("selectedSessionId", sessionId);
     },
 
+    /** Record local scroll offset without triggering a broadcast */
+    setLocalScrollTop(scrollTop: number) {
+      if (Number.isFinite(scrollTop)) {
+        localScrollTop = scrollTop;
+      }
+    },
+
+    /** Record user-initiated scroll offset and debounce-sync to peer sidebars */
+    syncSidebarScroll(scrollTop: number) {
+      if (!Number.isFinite(scrollTop)) return;
+      localSidebarTouched = true;
+      localScrollTop = scrollTop;
+      if (canSyncScrollTop()) broadcastSidebarState();
+    },
+
     /** Apply a full sidebar selection received from another instance */
-    applySidebarSelection(sessionId: string | null, headerKey: string | null) {
+    applySidebarSelection(
+      sessionId: string | null,
+      headerKey: string | null,
+      scrollTop?: number,
+    ) {
+      if (sidebarBroadcastTimer) {
+        clearTimeout(sidebarBroadcastTimer);
+        sidebarBroadcastTimer = null;
+      }
       batch(() => {
         setState("selectedSessionId", sessionId);
         setSelectedHeaderKey(headerKey);
+        if (
+          canSyncScrollTop() &&
+          typeof scrollTop === "number" &&
+          Number.isFinite(scrollTop)
+        ) {
+          localScrollTop = scrollTop;
+          setScrollSync((prev) => ({
+            top: scrollTop,
+            generation: (prev?.generation ?? 0) + 1,
+          }));
+        }
       });
     },
 
@@ -2806,6 +2969,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     toggleGroupCollapse(groupKey: string) {
       if (isSyntheticGroupKey(groupKey)) return;
+      localScrollTop = undefined;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
         if (next.has(groupKey)) {
@@ -2833,6 +2997,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     collapseAll() {
+      localScrollTop = undefined;
       const items = flatItems();
       const keys = activeGroupKeys();
       setCollapsedGroups(keys);
@@ -2851,6 +3016,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
 
     expandAll() {
+      localScrollTop = undefined;
       setCollapsedGroups(new Set<string>());
       persistUIState({ collapsedGroups: [] });
     },
@@ -2864,6 +3030,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (inBand(session)) return;
       const groupKey = getGroupKey(session, state.groupBy);
       if (state.groupBy === "none" || !groupKey) return;
+      localScrollTop = undefined;
       setState("selectedSessionId", null);
       setSelectedHeaderKey(groupKey);
       setCollapsedGroups((prev) => {
@@ -2877,6 +3044,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     expandGroup(groupKey: string) {
       setCollapsedGroups((prev) => {
         if (!prev.has(groupKey)) return prev;
+        localScrollTop = undefined;
         const next = new Set(prev);
         next.delete(groupKey);
         persistCollapsedGroups(next);
@@ -2972,6 +3140,9 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     tick,
     bumpTick: () => setTick((t) => t + 1),
     isSidebarVersionNewer,
+    hasLocalSidebarActivity: () => localSidebarTouched,
+    scrollSync,
+    flushSidebarStateNow,
   };
 }
 

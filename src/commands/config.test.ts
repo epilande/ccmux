@@ -700,6 +700,7 @@ describe("config set statusBar.*", () => {
     try {
       for (const [key, value] of [
         ["enabled", "true"],
+        ["animateWorking", "true"],
         ["waitingIcon", "!"],
         ["waitingColor", "#aabbcc"],
         ["unreadColor", "colour255"],
@@ -708,6 +709,7 @@ describe("config set statusBar.*", () => {
       }
       expect(store.statusBar).toEqual({
         enabled: true,
+        animateWorking: true,
         waitingIcon: "!",
         unreadIcon: "*",
         waitingColor: "#aabbcc",
@@ -716,6 +718,8 @@ describe("config set statusBar.*", () => {
       const before = structuredClone(store);
       for (const [key, value] of [
         ["enabled", "yes"],
+        ["animateWorking", "yes"],
+        ["animateWorking", "1"],
         ["waitingIcon", "#{bad}"],
         ["unreadIcon", "a\nb"],
         ["waitingColor", "red]oops"],
@@ -727,6 +731,8 @@ describe("config set statusBar.*", () => {
       }
       expect(await runConfigSet("statusBar.waitingColor", "")).toBeNull();
       expect(store.statusBar?.waitingColor).toBe("");
+      expect(await runConfigSet("statusBar.animateWorking", "false")).toBeNull();
+      expect(store.statusBar?.animateWorking).toBe(false);
     } finally {
       restoreExit();
       log.mockRestore();
