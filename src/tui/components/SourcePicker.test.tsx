@@ -901,6 +901,41 @@ describe("SourcePicker filter", () => {
    * inconsistency was the whole objection to it: one surface asking to be
    * searched while the other waits to be asked.
    */
+  it("hands the filter's non-text preview keys to App and keeps the query", async () => {
+    const forwarded: string[] = [];
+    const harness = await mountSettled({
+      prs: [openPR()],
+      actions: {
+        // App's: it claims the preview keys and nothing in nav mode's way.
+        onNavigate: (event) => {
+          const preview = event.ctrl || event.meta || event.name === "tab";
+          forwarded.push(
+            `${event.ctrl ? "C-" : event.meta ? "M-" : ""}${event.name}`,
+          );
+          if (preview) event.preventDefault();
+          return preview;
+        },
+      },
+    });
+    harness.keys.pressKey("/");
+    await harness.frame();
+    forwarded.length = 0;
+    await harness.keys.typeText("park");
+    expect(await harness.frame()).toContain("/ park");
+    // Tab focuses the preview, Ctrl+D/U scroll it and Alt+H/L size it.
+    harness.keys.pressTab();
+    harness.keys.pressKey("d", { ctrl: true });
+    harness.keys.pressKey("u", { ctrl: true });
+    harness.keys.pressKey("h", { meta: true });
+    await harness.frame();
+    expect(forwarded).toEqual(["tab", "C-d", "C-u", "M-h"]);
+    // Letters stay the input's, `P` and App's view keys included, and the
+    // query survived the trip.
+    await harness.keys.typeText("Plh");
+    expect(await harness.frame()).toContain("/ parkPlh");
+    expect(forwarded).toEqual(["tab", "C-d", "C-u", "M-h"]);
+  });
+
   it("draws no filter row until the filter is entered", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
     expect(await harness.frame()).not.toContain("Filter pull requests");

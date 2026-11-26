@@ -206,6 +206,14 @@ export function showsRepoHeaders(repos: SourceRepo[]): boolean {
   return repos.length > 0;
 }
 
+/** The preview keys that carry no text, so the filter can pass them on. */
+function isPreviewKey(event: KeyEvent): boolean {
+  const key = event.name;
+  if (event.ctrl) return key === "d" || key === "u";
+  if (event.meta) return key === "h" || key === "l";
+  return key === "tab";
+}
+
 export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const renderer = useRenderer();
@@ -674,6 +682,13 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         event.preventDefault();
         return;
       }
+      // The preview keys that are not text: `Tab` focuses the preview and
+      // `Ctrl+D/U` and `Alt+H/L` scroll and size it, so a filtered result can
+      // be read without leaving the filter. The query stays, and typing
+      // resumes where it was once focus comes back. `P` is a letter here,
+      // and so is every other key App's view keys would take.
+      if (isPreviewKey(event) && props.onNavigate?.(event, currentRepo()))
+        return;
       // Everything else falls through to the input, untouched.
       return;
     }
