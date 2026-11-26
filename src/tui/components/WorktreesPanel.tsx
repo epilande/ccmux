@@ -88,7 +88,14 @@ import { getStatusColor } from "./StatusBadge";
 import { theme } from "../theme";
 import { Text } from "./Text";
 
-type Phase = "loading" | "list" | "confirm" | "running" | "done" | "error";
+/** Where the `/worktrees` read is. It knows nothing about removal. */
+type ListStatus = "loading" | "list" | "error";
+/** Where a removal is, from its prompts to its result. Owned by the removal
+ *  flow alone: no read settling may write it, or a refreshed list landing
+ *  mid-removal would re-arm the action keys while the POST is in flight. */
+type Removal = "none" | "dirty" | "confirm" | "running" | "done" | "error";
+/** What the panel shows: a removal in progress wins over the list. */
+type Phase = ListStatus | Exclude<Removal, "none">;
 
 const LIST_TIMEOUT_MS = 20_000;
 
@@ -754,7 +761,12 @@ function spawnClipboardHelper(argv: string[], text: string): boolean {
 export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const renderer = useRenderer();
-  const [phase, setPhase] = createSignal<Phase | "dirty">("loading");
+  const [listStatus, setListStatus] = createSignal<ListStatus>("loading");
+  const [removal, setRemoval] = createSignal<Removal>("none");
+  const phase = (): Phase => {
+    const step = removal();
+    return step === "none" ? listStatus() : step;
+  };
   const [repos, setRepos] = createSignal<WorktreeListResponse["repos"]>([]);
   const [scan, setScan] = createSignal<PruneScan | null>(null);
   const [scanError, setScanError] = createSignal<string | null>(null);
@@ -915,8 +927,12 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     setNote("");
     setScanError(null);
     setScan(null);
-    if (!repos().length) setPhase("loading");
-    else setPhase("list");
+    setListStatus(repos().length ? "list" : "loading");
+    // A new read ends a removal that has not been sent (its prompts were
+    // about the rows being replaced) and the result or error screen of one
+    // that finished. One in flight is left alone: only its own answer may
+    // end it.
+    setRemoval((step) => (step === "running" ? step : "none"));
     const query = new URLSearchParams({ cwd: props.cwd });
     if (scope()) query.set("repo", scope()!);
     void fetch(`${getDaemonUrl()}/worktrees?${query}`, {
@@ -927,7 +943,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         const data = (await response.json()) as WorktreeListResponse;
         if (gen !== generation) return;
         setRepos(data.repos);
-        setPhase("list");
+        setListStatus("list");
         const live = new Set(
           data.repos.flatMap((r) => r.worktrees.map((w) => w.path)),
         );
@@ -936,7 +952,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       .catch((error: unknown) => {
         if (gen !== generation) return;
         setNote(String(error));
-        setPhase("error");
+        setListStatus("error");
       });
     const cached =
       !refresh && seedFromCache
@@ -1067,7 +1083,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     setDeclinedDirty(0);
     const dirty = pending.filter((c) => c.dirty);
     setDirtyQueue(dirty);
-    setPhase(dirty.length ? "dirty" : "confirm");
+    setRemoval(dirty.length ? "dirty" : "confirm");
   }
   function answerDirty(include: boolean) {
     const candidate = dirtyQueue()[0];
@@ -1079,11 +1095,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     }
     const rest = dirtyQueue().slice(1);
     setDirtyQueue(rest);
-    if (!rest.length) setPhase(chosen().length ? "confirm" : "list");
+    if (!rest.length) setRemoval(chosen().length ? "confirm" : "none");
   }
   async function runPrune() {
     if (!chosen().length) return;
-    setPhase("running");
+    setRemoval("running");
     try {
       const response = await fetch(`${getDaemonUrl()}/worktrees/prune`, {
         method: "POST",
@@ -1110,15 +1126,16 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
       setMarks(new Set<string>());
       props.onRefresh?.();
       if (pruneFullySucceeded(data)) {
+        setRemoval("none");
         load();
         setNote(removalNotice(data.outcomes.length));
       } else {
         setResult(data);
-        setPhase("done");
+        setRemoval("done");
       }
     } catch (error) {
       setNote(String(error));
-      setPhase("error");
+      setRemoval("error");
     }
   }
   useKeyboard((event: KeyEvent) => {
@@ -1132,12 +1149,13 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (phase() === "dirty") {
       if (key === "y" || key === "Y") answerDirty(true);
       else if (key === "n" || key === "N") answerDirty(false);
-      else if (key === "escape") setPhase("list");
+      else if (key === "escape") setRemoval("none");
       return;
     }
     if (phase() === "confirm") {
       if (key === "y" || key === "Y") void runPrune();
-      else if (key === "n" || key === "N" || key === "escape") setPhase("list");
+      else if (key === "n" || key === "N" || key === "escape")
+        setRemoval("none");
       return;
     }
     if (props.onNavigate?.(event, currentRepo())) return;
@@ -1800,7 +1818,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
           width={width()}
           height={confirmHeight()}
           onConfirm={() => void runPrune()}
-          onCancel={() => setPhase("list")}
+          onCancel={() => setRemoval("none")}
         />
       </Show>
     </box>

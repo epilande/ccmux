@@ -1144,6 +1144,55 @@ describe("Worktrees removal outcomes and cache", () => {
       expect(h.scanCalls()).toBe(2);
     });
   }
+  it("keeps a removal in flight when a refresh's list lands under it", async () => {
+    // `R`, then `x` `y` before the refreshed list answers: the list landing
+    // mid-removal must not put the panel back on its list with the action
+    // keys live while the POST is still out.
+    let lists = 0;
+    let releaseList: () => void = () => {};
+    const refreshedList = new Promise<void>((done) => {
+      releaseList = done;
+    });
+    let finishRun: (response: Response) => void = () => {};
+    const run = new Promise<Response>((done) => {
+      finishRun = done;
+    });
+    let removed = false;
+    const h = await mount({
+      cursor: row().path,
+      list: async () => {
+        if (++lists === 2) await refreshedList;
+        return listResponse(removed ? [mainRow()] : [mainRow(), row()]);
+      },
+      run: () => run,
+    });
+    await h.keys.pressKey("R");
+    // The refresh's classification answers; only its list is held.
+    expect(await h.frame()).toContain("alpha+");
+    await h.keys.pressKey("x");
+    await h.keys.pressKey("y");
+    expect(await h.frame()).toContain("Removing worktrees…");
+    expect(h.posts).toHaveLength(1);
+    releaseList();
+    let frame = await h.frame();
+    expect(frame).toContain("Removing worktrees…");
+    expect(frame).not.toContain("alpha+");
+    // The keys stay inert until the run answers: no second removal, no new
+    // session, no copy.
+    await h.keys.pressKey("x");
+    await h.keys.pressKey("y");
+    await h.keys.pressKey("n");
+    await h.keys.pressKey("y");
+    await h.frame();
+    expect(h.posts).toHaveLength(1);
+    expect(h.newDirs).toEqual([]);
+    expect(h.copies).toEqual([]);
+    removed = true;
+    finishRun(Response.json(runResult([outcome()])));
+    frame = await h.frame();
+    expect(frame).not.toContain("Removing worktrees…");
+    expect(frame).toContain("removed 1 worktree");
+  });
   it("reports a failed removal request and allows an explicit retry of the reads", async () => {
     const h = await mount({
       cursor: row().path,
