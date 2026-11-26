@@ -3895,6 +3895,22 @@ describe("store", () => {
         sidebar.actions.toggleGroupCollapse("alpha");
         await sidebar.flushSidebarStateNow();
         expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+
+        // So do a rename (here a merge into beta) and the reset that splits
+        // it back out: both move rows under the recorded offset.
+        sidebar.actions.setLocalScrollTop(18);
+        sidebar.actions.renameGroup("alpha", "beta");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+        sidebar.actions.setLocalScrollTop(21);
+        sidebar.actions.resetGroupName("beta");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+        // A rename that changes nothing leaves the offset alone.
+        sidebar.actions.setLocalScrollTop(24);
+        sidebar.actions.renameGroup("alpha", "alpha");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBe(24);
       } finally {
         globalThis.fetch = origFetch;
       }

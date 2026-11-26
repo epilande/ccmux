@@ -3484,6 +3484,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // differ, as cwd's home-shortened paths do) means that group.
       const name = resolveGroupName(rawName, groups, mode);
       if (!name || name === key) return;
+      // The rows move (a merge folds two groups, and a new name re-sorts
+      // this one), so a recorded scroll offset no longer lands where it
+      // did, the same reason the collapse actions drop it.
+      localScrollTop = undefined;
       const map = aliases[mode] ?? {};
       const members = new Set(
         Object.keys(map).filter((raw) => map[raw] === key),
@@ -3572,6 +3576,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         actions.showToast("No custom name to reset");
         return;
       }
+      // Splitting a merged group back out moves rows, as a rename does.
+      localScrollTop = undefined;
       const next = withModeAliases(
         aliases,
         mode,
