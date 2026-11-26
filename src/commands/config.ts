@@ -205,6 +205,7 @@ export function completableConfigKeys(): string[] {
     "notifications.backend",
     "notifications.command",
     "statusBar.enabled",
+    "statusBar.animateWorking",
     "statusBar.waitingIcon",
     "statusBar.unreadIcon",
     "statusBar.waitingColor",
@@ -222,6 +223,7 @@ export function configValueChoices(key: string): readonly string[] | null {
       return ["left", "right"];
     case "notifications.enabled":
     case "statusBar.enabled":
+    case "statusBar.animateWorking":
     case "notifications.sound":
       return BOOLEAN_CHOICES;
     case "notifications.backend":
@@ -493,11 +495,12 @@ export function createConfigCommand(): Command {
         const statusBar: StatusBarConfig = { ...prefs.statusBar };
         switch (statusKey) {
           case "enabled":
+          case "animateWorking":
             if (value !== "true" && value !== "false") {
-              console.error("Invalid statusBar.enabled (true, false)");
+              console.error(`Invalid statusBar.${statusKey} (true, false)`);
               process.exit(1);
             }
-            statusBar.enabled = value === "true";
+            statusBar[statusKey] = value === "true";
             break;
           case "waitingIcon":
           case "unreadIcon":
@@ -522,7 +525,7 @@ export function createConfigCommand(): Command {
           default:
             console.error(`Unknown statusBar key: ${statusKey}`);
             console.error(
-              "Valid statusBar keys: enabled, waitingIcon, unreadIcon, waitingColor, unreadColor",
+              "Valid statusBar keys: enabled, animateWorking, waitingIcon, unreadIcon, waitingColor, unreadColor",
             );
             process.exit(1);
         }

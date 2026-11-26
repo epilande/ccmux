@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate the Homebrew formula for ccmux.
+# Generate a Homebrew formula for ccmux. Defaults to the stable formula.
 # Usage: update-homebrew-formula.sh <output-path>
 # Requires env: VERSION (no 'v' prefix), SHA_MACOS_ARM64, SHA_MACOS_X64,
 # SHA_LINUX_X64, SHA_NOTIFIER_APP.
+# Optional env: CLASS_NAME, DESCRIPTION, and CONFLICTS_WITH (a formula that
+# installs the same binary; also adds caveats for switching back to it).
 
 OUTPUT_PATH="${1:-}"
 
@@ -25,11 +27,43 @@ done
 # so asset URLs always track the publishing repo.
 REPO="${REPO:-epilande/ccmux}"
 
+CLASS_NAME="${CLASS_NAME:-Ccmux}"
+DESCRIPTION="${DESCRIPTION:-Monitor AI coding agent sessions running in tmux}"
+CONFLICTS_WITH="${CONFLICTS_WITH:-}"
+FORMULA_NAME="$(basename "$OUTPUT_PATH" .rb)"
+
+CONFLICTS_BLOCK=""
+CAVEATS_BLOCK=""
+if [[ -n "$CONFLICTS_WITH" ]]; then
+	CONFLICTS_BLOCK="
+  conflicts_with \"${CONFLICTS_WITH}\", because: \"both install a ccmux binary\"
+"
+	# The daemon is stopped first because an older ccmux never replaces a newer
+	# daemon; setup runs last so the hooks match the binary that stays.
+	CAVEATS_BLOCK="
+  def caveats
+    <<~EOS
+      To switch back to the ${CONFLICTS_WITH} formula:
+        ccmux daemon stop
+        brew uninstall ${FORMULA_NAME}
+        brew install epilande/tap/${CONFLICTS_WITH}
+        ccmux setup
+
+      If ${CONFLICTS_WITH} is already installed but unlinked, use
+      \"brew link ${CONFLICTS_WITH}\" in place of the install step.
+    EOS
+  end
+"
+fi
+
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
+# The heredoc is unquoted, so an unescaped backtick inside it RUNS a command
+# here. The doubled space in "after  returns" is where one used to be; filling
+# it in would change the stable formula's bytes.
 cat >"$OUTPUT_PATH" <<EOF
-class Ccmux < Formula
-  desc "Monitor AI coding agent sessions running in tmux"
+class ${CLASS_NAME} < Formula
+  desc "${DESCRIPTION}"
   homepage "https://github.com/${REPO}"
   version "${VERSION}"
   license "MIT"
@@ -57,12 +91,12 @@ class Ccmux < Formula
     url "https://github.com/${REPO}/releases/download/v${VERSION}/ccmux-linux-x64"
     sha256 "${SHA_LINUX_X64}"
   end
-
+${CONFLICTS_BLOCK}
   def install
     binary_name = stable.url.split("/").last
     bin.install binary_name => "ccmux"
     # The release asset is a bare binary, downloaded as 0644. Homebrew only
-    # fixes bin/ permissions after `install` returns, so make it executable
+    # fixes bin/ permissions after  returns, so make it executable
     # here or the completion step below fails with EACCES.
     chmod 0755, bin/"ccmux"
 
@@ -86,7 +120,7 @@ class Ccmux < Formula
       end
     end
   end
-
+${CAVEATS_BLOCK}
   test do
     system "#{bin}/ccmux", "--version"
   end
