@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockMouse, MouseButtons } from "@opentui/core/testing";
-import { createSignal } from "solid-js";
+import { batch, createSignal } from "solid-js";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
 import {
@@ -459,6 +459,187 @@ describe("SessionList", () => {
     expect(frame).not.toContain("filler-0");
   });
 
+  it("preserves manual wheel scroll across SSE item updates when selected session does not change", async () => {
+    const buildItems = (promptSuffix: string): FlatItem[] => [
+      makeHeader("proj", 12),
+      ...Array.from({ length: 12 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: i === 11 ? "/code/target-end" : `/code/filler-${i}`,
+          lastPrompt: `prompt ${i} ${promptSuffix}`,
+        }),
+      ),
+    ];
+    const [items, setItems] = createSignal(buildItems("v1"));
+    const [selectedIndex, setSelectedIndex] = createSignal(12);
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items()}
+            selectedIndex={selectedIndex()}
+            previewWidth={30}
+            promptDisplay="row2"
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBeGreaterThan(0);
+
+    // User scrolls up to the top with mouse wheel while s11 remains selected
+    box!.scrollTo(0);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("filler-0");
+
+    // SSE session_updated arrives (new items array, same selected session s11)
+    setItems(buildItems("v2"));
+    await setup.renderOnce();
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("filler-0");
+
+    // Explicit selection change to s10 DOES scroll it into view
+    setSelectedIndex(11);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBeGreaterThan(0);
+  });
+
+  it("updates index-dependent props reactively when an earlier item is inserted without recreating existing FlatItems", async () => {
+    const s1 = makeSessionItem("s1", "proj", { cwd: "/code/one" });
+    const s2 = makeSessionItem("s2", "proj", { cwd: "/code/two" });
+    const [items, setItems] = createSignal<FlatItem[]>([s1, s2]);
+    const calls: Array<{ id: string; index: number }> = [];
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items()}
+            selectedIndex={0}
+            previewWidth={30}
+            onActivate={(item, index) => {
+              if (item.type === "session") {
+                calls.push({ id: item.filteredSession.session.id, index });
+              }
+            }}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 20 },
+    );
+    await setup.renderOnce();
+
+    // Insert s0 before s1 while keeping s1 and s2 FlatItem references intact
+    const s0 = makeSessionItem("s0", "proj", { cwd: "/code/zero" });
+    setItems([s0, s1, s2]);
+    await setup.renderOnce();
+
+    // Click s1 (now at row 1): index passed to onActivate must be 1, not stale 0
+    await setup.mockMouse.click(3, 1);
+    expect(calls).toEqual([{ id: "s1", index: 1 }]);
+  });
+
+  it("applies synced scrollTop verbatim and disables drag auto-scroll on scrollbox", async () => {
+    const items: FlatItem[] = [
+      makeHeader("proj", 20),
+      ...Array.from({ length: 20 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: `/code/item-${i}`,
+          lastPrompt: `prompt ${i}`,
+        }),
+      ),
+    ];
+    const [scrollSync, setScrollSync] = createSignal<{
+      top: number;
+      generation: number;
+    } | null>({ top: 7, generation: 1 });
+    const userScrolls: number[] = [];
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={5}
+            previewWidth={30}
+            promptDisplay="row2"
+            scrollSync={scrollSync()}
+            onUserScroll={(top) => userScrolls.push(top)}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    // Exact scrollTop=7 applied instead of scrollTarget's minimum scroll
+    expect(box!.scrollTop).toBe(7);
+    // Drag auto-scroll disabled so mid-click window switches cannot runaway scroll
+    expect(
+      (box as unknown as { autoScrollThresholdVertical: number })
+        .autoScrollThresholdVertical,
+    ).toBe(-1);
+    // Programmatic sync must not echo back through onUserScroll
+    expect(userScrolls).toEqual([]);
+
+    // Updating scrollSync generation moves scrollTop verbatim again
+    setScrollSync({ top: 3, generation: 2 });
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(3);
+    expect(userScrolls).toEqual([]);
+  });
+
+  it("clears suppressSelectionScroll after clicking an already-selected row so subsequent keyboard navigation scrolls", async () => {
+    const items: FlatItem[] = [
+      makeHeader("proj", 14),
+      ...Array.from({ length: 14 }, (_, i) =>
+        makeSessionItem(`s${i}`, "proj", {
+          cwd: `/code/item-${i}`,
+          lastPrompt: `prompt ${i}`,
+        }),
+      ),
+    ];
+    const [selectedIndex, setSelectedIndex] = createSignal(1);
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={selectedIndex()}
+            previewWidth={30}
+            promptDisplay="row2"
+            onActivate={(_item, idx) => {
+              // Clicking row 1 when selectedIndex is already 1 is a reactive no-op
+              setSelectedIndex(idx);
+            }}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 10 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+
+    // Click already-selected row 1 (y=1 right below header)
+    await setup.mockMouse.click(3, 1);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBe(0);
+
+    // Next programmatic/keyboard jump to off-screen row 13 MUST scroll into view
+    setSelectedIndex(13);
+    await setup.renderOnce();
+    expect(box!.scrollTop).toBeGreaterThan(0);
+  });
+
   it("routes clicks to onActivate with the right item and index", async () => {
     const items: FlatItem[] = [
       makeHeader("proj", 2),
@@ -556,6 +737,310 @@ describe("SessionList", () => {
     expect(group1Line).toBeGreaterThanOrEqual(0);
     expect(separatorLine).toBeGreaterThan(group1Line);
     expect(group2Line).toBeGreaterThan(separatorLine);
+  });
+
+  it("recalculates scroll target when row layout grows so selected row stays in view", async () => {
+    const items: FlatItem[] = Array.from({ length: 10 }, (_, i) =>
+      makeSessionItem(`s${i}`, "g", {
+        cwd: `/Users/test/Code/proj-${i}`,
+        lastPrompt: `prompt-${i}`,
+      }),
+    );
+    const [promptDisplay, setPromptDisplay] = createSignal<"off" | "row2">(
+      "off",
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items}
+            selectedIndex={9}
+            previewWidth={0}
+            promptDisplay={promptDisplay()}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 80, height: 12 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+
+    const [box] = findScrollBoxes(setup.renderer);
+    expect(box!.scrollTop).toBe(0);
+    expect(setup.captureCharFrame()).toContain("proj-9");
+
+    // Enabling row2 doubles each session row height (10 -> 20 lines in a 12-line
+    // viewport), pushing selected row 9 below the fold unless scroll recalculates.
+    setPromptDisplay("row2");
+    await setup.renderOnce();
+    await setup.renderOnce();
+
+    expect(box!.scrollTop).toBe(8);
+    expect(setup.captureCharFrame()).toContain("proj-9");
+    expect(setup.captureCharFrame()).toContain("prompt-9");
+  });
+});
+
+describe("SessionList user scroll", () => {
+  const rows = (n: number): FlatItem[] =>
+    Array.from({ length: n }, (_, i) =>
+      makeSessionItem(`s${i}`, "g", {
+        project: `row-${i}`,
+        cwd: `/code/row-${i}`,
+      }),
+    );
+
+  async function mount(count: number, selected = 0) {
+    const [items, setItems] = createSignal(rows(count));
+    const [index, setIndex] = createSignal(selected);
+    const [scrollSync, setScrollSync] = createSignal<{
+      top: number;
+      generation: number;
+    } | null>(null);
+    const userScrolls: number[] = [];
+    const moves: number[] = [];
+    let wheels = 0;
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items()}
+            selectedIndex={index()}
+            previewWidth={0}
+            promptLines={3}
+            scrollSync={scrollSync()}
+            onWheel={() => wheels++}
+            onUserScroll={(top) => userScrolls.push(top)}
+            onScrollMoved={(top) => moves.push(top)}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 60, height: 12 },
+    );
+    await frames();
+    const [box] = findScrollBoxes(setup.renderer);
+    return {
+      box: box!,
+      items,
+      setItems,
+      setIndex,
+      setScrollSync,
+      /** Resort the list so the row at `from` lands at `to`, still selected. */
+      async moveSelected(from: number, to: number) {
+        const next = [...items()];
+        next.splice(to, 0, ...next.splice(from, 1));
+        batch(() => {
+          setItems(next);
+          setIndex(to);
+        });
+        await frames();
+      },
+      /** Give the rows in [from, to) a prompt, and so a wrapped block. */
+      async growRows(from: number, to: number) {
+        setItems(
+          items().map((item, i) =>
+            i >= from && i < to
+              ? makeSessionItem(`s${i}`, "g", {
+                  project: `row-${i}`,
+                  cwd: `/code/row-${i}`,
+                  lastPrompt: "wrapped prompt text ".repeat(12),
+                })
+              : item,
+          ),
+        );
+        await frames();
+      },
+      userScrolls,
+      moves,
+      wheels: () => wheels,
+      mouse: createMockMouse(setup.renderer),
+    };
+  }
+
+  async function frames() {
+    for (let i = 0; i < 3; i++) await setup.renderOnce();
+  }
+
+  it("reports a wheel notch", async () => {
+    const { mouse, userScrolls, wheels } = await mount(50);
+    await mouse.scroll(5, 5, "down");
+    await frames();
+    expect(userScrolls).toEqual([1]);
+    expect(wheels()).toBe(1);
+  });
+
+  it.each([
+    { end: "top", direction: "up" },
+    { end: "bottom", direction: "down" },
+  ] as const)(
+    "reports a wheel clamped at the $end without reporting a scroll",
+    async ({ end, direction }) => {
+      const { mouse, box, setScrollSync, userScrolls, moves, wheels } =
+        await mount(50);
+      const max = box.scrollHeight - box.viewport.height;
+      expect(max).toBeGreaterThan(0);
+      const top = end === "top" ? 0 : max;
+      setScrollSync({ top, generation: 1 });
+      await frames();
+      expect(box.scrollTop).toBe(top);
+      // A peer's sync is not a wheel.
+      expect(wheels()).toBe(0);
+      moves.length = 0;
+
+      await mouse.scroll(5, 5, direction);
+      await frames();
+
+      expect(box.scrollTop).toBe(top);
+      expect(wheels()).toBe(1);
+      expect(userScrolls).toEqual([]);
+      expect(moves).toEqual([]);
+    },
+  );
+
+  it("reports a scrollbar press", async () => {
+    const { mouse, box, userScrolls } = await mount(50);
+    await mouse.click(box.x + box.width - 1, box.y + box.height - 1);
+    await frames();
+    expect(box.scrollTop).toBeGreaterThan(0);
+    expect(userScrolls).toContain(box.scrollTop);
+  });
+
+  it("records a layout clamp without reporting it as user scroll", async () => {
+    const { box, items, setItems, userScrolls, moves, wheels, mouse } =
+      await mount(50);
+    await mouse.scroll(5, 5, "down");
+    await frames();
+    expect(box.scrollTop).toBe(1);
+    expect(wheels()).toBe(1);
+    userScrolls.length = 0;
+    moves.length = 0;
+
+    setItems(items().slice(0, 10));
+    await frames();
+
+    expect(box.scrollTop).toBe(0);
+    expect(moves).toEqual([0]);
+    expect(userScrolls).toEqual([]);
+    expect(wheels()).toBe(1);
+  });
+
+  describe("when rows change height under an unchanged selection", () => {
+    const rowIsVisible = (n: number) =>
+      new RegExp(`row-${n}\\b`).test(setup.captureCharFrame());
+
+    it("keeps the selected row in view as rows above it grow", async () => {
+      const { growRows, box, userScrolls } = await mount(30, 8);
+      expect(rowIsVisible(8)).toBe(true);
+      const before = box.scrollTop;
+      await growRows(0, 8);
+      expect(box.scrollTop).toBeGreaterThan(before);
+      expect(rowIsVisible(8)).toBe(true);
+      expect(userScrolls).toEqual([]);
+    });
+
+    it("keeps the selected row whole as it grows itself", async () => {
+      const { growRows, box } = await mount(30, 11);
+      const before = box.scrollTop;
+      await growRows(11, 12);
+      expect(box.scrollTop).toBe(before + 3);
+      expect(rowIsVisible(11)).toBe(true);
+    });
+
+    it("leaves the offset alone when only rows below it grow", async () => {
+      const { growRows, box } = await mount(30, 8);
+      const before = box.scrollTop;
+      await growRows(9, 30);
+      expect(box.scrollTop).toBe(before);
+    });
+
+    it("leaves the offset alone after a user scroll", async () => {
+      const { growRows, box, mouse } = await mount(30, 8);
+      await mouse.scroll(5, 5, "down");
+      await frames();
+      const before = box.scrollTop;
+      await growRows(0, 8);
+      expect(box.scrollTop).toBe(before);
+    });
+
+    it("leaves the offset alone after a peer sidebar's scroll", async () => {
+      const { growRows, box, setScrollSync } = await mount(30, 8);
+      setScrollSync({ top: 15, generation: 1 });
+      await frames();
+      await growRows(0, 8);
+      expect(box.scrollTop).toBe(15);
+    });
+  });
+
+  describe("when a resort moves the selected row", () => {
+    const rowIsVisible = () => /row-0\b/.test(setup.captureCharFrame());
+
+    it("keeps it in view", async () => {
+      const { moveSelected, userScrolls } = await mount(30);
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(0, 29);
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(29, 0);
+      expect(rowIsVisible()).toBe(true);
+      expect(userScrolls).toEqual([]);
+    });
+
+    it("keeps it in view when new rows push it past the old content", async () => {
+      const { setItems, items, setIndex } = await mount(15);
+      batch(() => {
+        const [selected, ...rest] = items();
+        setItems([...rest, ...rows(30).slice(15), selected!]);
+        setIndex(29);
+      });
+      await frames();
+      expect(rowIsVisible()).toBe(true);
+    });
+
+    it("leaves the offset alone after a user scroll, until the selection changes", async () => {
+      const { moveSelected, mouse, box, setIndex } = await mount(30);
+      await mouse.scroll(5, 5, "down");
+      await frames();
+      await moveSelected(0, 29);
+      expect(box.scrollTop).toBe(1);
+
+      setIndex(2);
+      await frames();
+      setIndex(29);
+      await frames();
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(29, 0);
+      expect(rowIsVisible()).toBe(true);
+    });
+
+    it("leaves the offset alone after a peer sidebar's scroll", async () => {
+      const { moveSelected, box, setScrollSync } = await mount(30);
+      setScrollSync({ top: 9, generation: 1 });
+      await frames();
+      expect(rowIsVisible()).toBe(false);
+      await moveSelected(0, 29);
+      expect(box.scrollTop).toBe(9);
+    });
+
+    it("leaves the offset alone after a peer scroll that kept it in view", async () => {
+      const { moveSelected, box, setIndex, setScrollSync } = await mount(30);
+      setIndex(5);
+      await frames();
+      setScrollSync({ top: 2, generation: 1 });
+      await frames();
+      expect(setup.captureCharFrame()).toMatch(/row-5\b/);
+      await moveSelected(5, 29);
+      expect(box.scrollTop).toBe(2);
+    });
+
+    it("follows again once a resize has overridden the user's scroll", async () => {
+      const { moveSelected, mouse } = await mount(30);
+      await mouse.scroll(5, 5, "down");
+      await frames();
+      setup.resize(60, 14);
+      await frames();
+      expect(rowIsVisible()).toBe(true);
+      await moveSelected(0, 29);
+      expect(rowIsVisible()).toBe(true);
+    });
   });
 });
 

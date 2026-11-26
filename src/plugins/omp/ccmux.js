@@ -67,10 +67,30 @@ export function makeExtension({
   /**
    * Tool calls awaiting an approval decision, per session, as an
    * insertion-ordered `toolCallId -> toolName`. One assistant turn can gate
-   * several calls at once; see `publishApprovals` for what the set means.
+   * several calls at once; see `publishState` for what the set means.
    * @type {Map<string, Map<string, string|undefined>>}
    */
   const pendingApprovals = new Map();
+  /**
+   * Activity reasons (`turn` / `continuing` / `compaction` / `retry`)
+   * currently holding each session `working`. Handlers never write the
+   * state directly: they flip a reason and publish the derived state, so
+   * overlapping and repeated start events are idempotent and a state can
+   * only leak when an end event is lost (which the reconcile timer below
+   * heals — for the `turn` reason alone; `continuing`, `compaction`, and
+   * `retry` are trusted to their own clearing events).
+   * @type {Map<string, Set<string>>}
+   */
+  const activityReasons = new Map();
+  /**
+   * Managed `ctx.setInterval` reconcile per session: armed while an
+   * activity reason is on, disarmed on the first idle tick with none, and
+   * kept armed as a watchdog while a reason-less session reads busy.
+   * Value: the ctx that armed it and the managed timer id.
+   * @type {Map<string, {ctx: object, id: unknown}>}
+   */
+  const reconcileTimers = new Map();
+  const RECONCILE_INTERVAL_MS = 5000;
   /**
    * Serialize tmp+rename writes so events firing in the same tick
    * (before_agent_start -> agent_start) can't race on disk.
@@ -126,6 +146,8 @@ export function makeExtension({
   async function removeMarker(sessionId) {
     sessionState.delete(sessionId);
     pendingApprovals.delete(sessionId);
+    activityReasons.delete(sessionId);
+    stopReconcile(sessionId);
     try {
       await unlink(markerPath(sessionId));
     } catch (err) {
@@ -146,8 +168,20 @@ export function makeExtension({
   }
 
   /**
-   * Publish what the outstanding approvals imply. Two rules, both
-   * load-bearing: stay `waiting_permission` until the last id resolves
+   * Marker state implied by the outstanding approvals and activity
+   * reasons: an approval wait wins, then any activity reason means
+   * `working`, otherwise `idle`.
+   */
+  function derivedState(sessionId) {
+    if ((pendingApprovals.get(sessionId)?.size ?? 0) > 0)
+      return "waiting_permission";
+    if ((activityReasons.get(sessionId)?.size ?? 0) > 0) return "working";
+    return "idle";
+  }
+
+  /**
+   * Publish the derived state. Two rules, both load-bearing since the
+   * approval-only era: stay `waiting_permission` until the last id resolves
    * (reporting `working` mid-wait would clear the row's attention while
    * prompts are still on screen), and name the oldest entry, because omp's
    * dialog surface is FIFO and newest-wins would point ccmux's Approve/Deny
@@ -155,18 +189,108 @@ export function makeExtension({
    *
    * Returns the queued write so a handler can await the marker hitting disk.
    * @param {string} sessionId
-   * @param {Map<string, string|undefined>} pending
    */
-  function publishApprovals(sessionId, pending) {
+  function publishState(sessionId) {
+    const pending = pendingApprovals.get(sessionId);
     /** @type {MarkerState} */
     const patch =
-      pending.size > 0
+      pending && pending.size > 0
         ? {
             state: "waiting_permission",
             pending_tool: headToolName(pending),
           }
-        : { state: "working", pending_tool: undefined };
+        : { state: derivedState(sessionId), pending_tool: undefined };
     return queue(() => writeMerged(sessionId, patch));
+  }
+
+  /**
+   * Turn an activity reason on and publish. The ctx arms the reconcile
+   * timer; omp's managed `ctx.setInterval` never outlives the session.
+   */
+  function startActivity(sessionId, reason, ctx) {
+    let reasons = activityReasons.get(sessionId);
+    if (!reasons) {
+      reasons = new Set();
+      activityReasons.set(sessionId, reasons);
+    }
+    reasons.add(reason);
+    ensureReconcile(sessionId, ctx);
+    return publishState(sessionId);
+  }
+
+  /**
+   * Turn an activity reason off and publish.
+   */
+  function endActivity(sessionId, reason) {
+    activityReasons.get(sessionId)?.delete(reason);
+    return publishState(sessionId);
+  }
+
+  /**
+   * Arm the low-frequency reconcile unless one is already running. Only
+   * the public context surface is used: `ctx.isIdle()` (omp's
+   * `!isStreaming`) can vouch for the `turn` reason alone, so a lost
+   * agent_end cannot pin the row at `working` forever.
+   */
+  function ensureReconcile(sessionId, ctx) {
+    if (reconcileTimers.has(sessionId)) return;
+    if (typeof ctx?.setInterval !== "function") return;
+    const entry = { ctx, id: null };
+    entry.id = ctx.setInterval(() => {
+      const reasons = activityReasons.get(sessionId);
+      const busy = reasons !== undefined && reasons.size > 0;
+      let idle;
+      try {
+        idle = ctx.isIdle?.();
+      } catch {
+        return;
+      }
+      if (idle !== true && idle !== false) return;
+      if (busy) {
+        // `ctx.isIdle()` is `!isStreaming`, which stays true through
+        // compaction and retry backoff, so it may only clear the turn
+        // reason; compaction and retry end events are paired on every
+        // path (aborts included) and are trusted to deliver idle. An
+        // approval wait is a deliberate pause, not a stuck reason: the
+        // resolve path republishes, so leave it alone.
+        if (
+          idle &&
+          (pendingApprovals.get(sessionId)?.size ?? 0) === 0 &&
+          reasons.delete("turn")
+        ) {
+          // Return the queued write so a caller that inspects the marker
+          // can await it (omp's timer ignores the return value).
+          return publishState(sessionId);
+        }
+      } else if (idle) {
+        stopReconcile(sessionId);
+        if (sessionState.get(sessionId)?.state !== "idle")
+          return publishState(sessionId);
+      } else if (
+        (pendingApprovals.get(sessionId)?.size ?? 0) === 0 &&
+        sessionState.get(sessionId)?.state !== "working"
+      ) {
+        // Busy with no reason on record (an event we never saw): lean the
+        // row toward working rather than let it read idle while omp runs,
+        // but never over an approval wait.
+        return queue(() =>
+          writeMerged(sessionId, { state: "working", pending_tool: undefined }),
+        );
+      }
+    }, RECONCILE_INTERVAL_MS);
+    reconcileTimers.set(sessionId, entry);
+  }
+
+  function stopReconcile(sessionId) {
+    const entry = reconcileTimers.get(sessionId);
+    if (!entry) return;
+    reconcileTimers.delete(sessionId);
+    try {
+      entry.ctx.clearTimer?.(entry.id);
+    } catch {
+      // The timer being cleared is the one that matters; a dead ctx is not
+      // worth reporting.
+    }
   }
 
   /** Resolve the main session id; subagents do not own a pane marker. */
@@ -226,16 +350,34 @@ export function makeExtension({
     omp.on("agent_start", async (_event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
-      return queue(() =>
-        writeMerged(sessionId, { state: "working", pending_tool: undefined }),
-      );
+      // A user turn cannot start while an approval dialog is open, so any
+      // approval still pending here is stale from an aborted turn. It also
+      // supersedes a parked continuation from an earlier async wait.
+      pendingApprovals.delete(sessionId);
+      activityReasons.get(sessionId)?.delete("continuing");
+      return startActivity(sessionId, "turn", ctx);
     });
 
     omp.on("agent_end", async (event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
-      if (event?.willContinue === true) return;
+      if (event?.willContinue === true) {
+        // omp is waiting on async work before continuing this turn, and
+        // nothing is streaming while it waits, so `ctx.isIdle()` reads
+        // true and the reconcile must not flatten the turn. Park an
+        // explicit continuation reason that only the next agent_start,
+        // the terminal agent_end, or a rebind clears.
+        return startActivity(sessionId, "continuing", ctx);
+      }
       void (async () => {
+        // Drop the turn reason first; a compaction or retry that outlived
+        // the turn keeps the row working until its own end event.
+        activityReasons.get(sessionId)?.delete("turn");
+        activityReasons.get(sessionId)?.delete("continuing");
+        if ((activityReasons.get(sessionId)?.size ?? 0) > 0) {
+          pendingApprovals.delete(sessionId);
+          return publishState(sessionId);
+        }
         const state = await queue(() => sessionState.get(sessionId));
         await setImmediate();
         for (let retries = 10; retries >= 0; retries--) {
@@ -279,7 +421,7 @@ export function makeExtension({
       // omp awaits this handler before it renders the prompt, so returning
       // the queued write puts the waiting marker on disk by the time the
       // user can answer.
-      return publishApprovals(sessionId, pending);
+      return publishState(sessionId);
     });
 
     // Fires for both outcomes (approve and deny) and for the no-UI/aborted
@@ -301,10 +443,61 @@ export function makeExtension({
       // forever, so treat it as resolving everything outstanding.
       else pending.clear();
       // Re-publish so the notification retargets the prompt that just moved
-      // to the front of the queue.
+      // to the front of the queue. The loop resumes on every resolve
+      // (approve, deny, or the fail-closed no-UI path), so re-arm the
+      // turn: an agent_end that gave up waiting for idle may already have
+      // consumed it.
       if (pending.size === 0) pendingApprovals.delete(sessionId);
-      return publishApprovals(sessionId, pending);
+      return startActivity(sessionId, "turn", ctx);
     });
+
+    // Compaction and auto-retry are activity the approval-era marker missed
+    // most visibly: a session running auto-compaction after a turn read as
+    // `idle` while it was busy and not ready for input. Only events omp's
+    // lifecycle mirror actually forwards to extensions may be subscribed,
+    // and only in reliably paired shapes:
+    //
+    // - `auto_compaction_start` / `auto_compaction_end` are mirrored, and
+    //   the end is emitted on every outcome (abort, failure, skip), so the
+    //   auto path is tracked start to finish.
+    // - `session_compact` fires when a compaction is saved. Subscribing to
+    //   the end alone is harmless and finishes any start we saw.
+    //
+    // Deliberately NOT subscribed: `session.compacting` and the
+    // `manual_compaction_*` pair. In omp 19.0.1 the mirror swallows the
+    // manual pair (its forwarders are literally `async () => {}`), and
+    // `session.compacting` fires from the prep path before the summarizer
+    // even on compactions that fail or get cancelled, while
+    // `session_compact` fires only on save. None of them has an
+    // extension-visible end when a compaction does not commit, so starting
+    // from them pins the row at `working` until a later successful
+    // compaction, a rebind, or shutdown. A manual `/compact` therefore
+    // reads at its pre-command state; the trade is accepted because a
+    // stuck row suppresses finish notifications and blocks queued
+    // handoffs, while a running `/compact` is user-initiated and
+    // self-evident.
+    //
+    // Also NOT subscribed: `session_before_compact`. omp skips its
+    // speculative and mid-turn compaction entirely when an extension
+    // registers that hook, and ccmux must not cost users background
+    // compaction just to observe it.
+    const trackActivity = (reason) => async (_event, ctx) => {
+      const sessionId = sessionIdOf(ctx);
+      if (!sessionId) return;
+      return startActivity(sessionId, reason, ctx);
+    };
+    const untrackActivity = (reason) => async (_event, ctx) => {
+      const sessionId = sessionIdOf(ctx);
+      if (!sessionId) return;
+      return endActivity(sessionId, reason);
+    };
+
+    omp.on("auto_compaction_start", trackActivity("compaction"));
+    for (const name of ["session_compact", "auto_compaction_end"]) {
+      omp.on(name, untrackActivity("compaction"));
+    }
+    omp.on("auto_retry_start", trackActivity("retry"));
+    omp.on("auto_retry_end", untrackActivity("retry"));
 
     // `/new`, `/resume`, and `/branch` land here, not on a shutdown/start pair
     // (see the factory doc above). omp installs the new session id before it
@@ -322,6 +515,15 @@ export function makeExtension({
       // rather than publish an idle marker that a late resolve could drag
       // back to working.
       pendingApprovals.delete(sessionId);
+      // The rebind aborts any running turn, so drop its activity reasons
+      // too; the fresh idle marker below is the whole truth.
+      activityReasons.delete(sessionId);
+      // Timers stop BEFORE the removals are queued: a tick that lands
+      // while they are merely queued would publish behind the removal and
+      // recreate a reaped session's marker. omp clears managed timers only
+      // after awaiting this handler, so the ordering is ours to keep.
+      stopReconcile(sessionId);
+      for (const id of stale) stopReconcile(id);
       return queue(async () => {
         for (const id of stale) await removeMarker(id);
         await writeMerged(sessionId, {
@@ -355,6 +557,10 @@ export function makeExtension({
     omp.on("session_shutdown", async (_event, ctx) => {
       const sessionId = sessionIdOf(ctx);
       if (!sessionId) return;
+      // Same ordering as the rebind: stop the reconcile before queueing
+      // the removal, or a tick that lands first would publish behind it
+      // and recreate the marker of the session being shut down.
+      stopReconcile(sessionId);
       return queue(() => removeMarker(sessionId));
     });
   }

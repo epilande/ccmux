@@ -106,6 +106,7 @@ function flashBg(): string {
 
 let flashTimer: Timer | null = null;
 let flashingPaneId: string | null = null;
+let flashRequestSeq = 0;
 
 function resetPaneStyle(paneId: string): void {
   Bun.spawn(tmuxArgv("set-option", "-p", "-u", "-t", paneId, "window-style"), {
@@ -115,45 +116,95 @@ function resetPaneStyle(paneId: string): void {
 }
 
 /**
- * Briefly flash a pane's background (500ms).
+ * Pure check over `list-panes -F "#{pane_id}<sep>#{pane_title}"` output:
+ * true only when the window holds at least two non-ccmux panes.
+ */
+export function hasMultipleMainPanesInList(output: string): boolean {
+  let mainPanes = 0;
+  for (const line of output.split("\n")) {
+    if (!line) continue;
+    const [id, title = ""] = line.split(PANE_FIELD_SEP);
+    if (id && !isCcmuxPane(title)) {
+      mainPanes++;
+      if (mainPanes >= 2) return true;
+    }
+  }
+  return false;
+}
+
+async function hasMultipleMainPanes(paneId: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(
+      tmuxArgv(
+        "list-panes",
+        "-t",
+        paneId,
+        "-F",
+        ["#{pane_id}", "#{pane_title}"].join(PANE_FIELD_SEP),
+      ),
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    const [output, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) return false;
+    return hasMultipleMainPanesInList(output);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Briefly flash a pane's background (500ms) when disambiguating among multiple
+ * panes in the target window. Single-pane windows skip the full-screen strobe.
  * Uses per-pane window-style to avoid stealing focus.
  * Skips if the pane is already being flashed. Defers reset of the
  * previous pane, guarded against A->B->A races.
  */
 export function flashPane(paneId: string): void {
+  const seq = ++flashRequestSeq;
   if (flashingPaneId === paneId && flashTimer) return;
 
-  if (flashTimer) {
-    clearTimeout(flashTimer);
-    if (flashingPaneId && flashingPaneId !== paneId) {
-      const oldPane = flashingPaneId;
-      setTimeout(() => {
-        if (flashingPaneId !== oldPane) resetPaneStyle(oldPane);
-      }, 0);
+  void hasMultipleMainPanes(paneId).then((shouldFlash) => {
+    if (seq !== flashRequestSeq || !shouldFlash) return;
+    if (flashingPaneId === paneId && flashTimer) return;
+
+    if (flashTimer) {
+      clearTimeout(flashTimer);
+      if (flashingPaneId && flashingPaneId !== paneId) {
+        const oldPane = flashingPaneId;
+        setTimeout(() => {
+          if (flashingPaneId !== oldPane) resetPaneStyle(oldPane);
+        }, 0);
+      }
     }
-  }
 
-  flashingPaneId = paneId;
+    flashingPaneId = paneId;
 
-  Bun.spawn(
-    tmuxArgv("set-option", "-p", "-t", paneId, "window-style", flashBg()),
-    { stdout: "ignore", stderr: "ignore" },
-  );
+    Bun.spawn(
+      tmuxArgv("set-option", "-p", "-t", paneId, "window-style", flashBg()),
+      { stdout: "ignore", stderr: "ignore" },
+    );
 
-  flashTimer = setTimeout(() => {
-    resetPaneStyle(paneId);
-    flashTimer = null;
-    flashingPaneId = null;
-  }, FLASH_DURATION_MS);
+    flashTimer = setTimeout(() => {
+      resetPaneStyle(paneId);
+      flashTimer = null;
+      flashingPaneId = null;
+    }, FLASH_DURATION_MS);
+  });
 }
 
 /**
- * Spawn a detached flash that self-resets after 500ms.
+ * Spawn a detached flash that self-resets after 500ms when disambiguating
+ * among multiple non-ccmux panes in the target window. Single-pane windows
+ * skip the full-screen strobe.
  * Use when the calling process is about to exit (e.g. picker in a tmux popup).
  * Uses `tmux run-shell -b` so the reset runs in tmux's own process context
  * and survives popup teardown, which kills the entire child process group.
  */
-export function flashPaneDetached(paneId: string): void {
+export async function flashPaneDetached(paneId: string): Promise<void> {
+  if (!(await hasMultipleMainPanes(paneId))) return;
   Bun.spawn(
     tmuxArgv("set-option", "-p", "-t", paneId, "window-style", flashBg()),
     { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
