@@ -452,6 +452,40 @@ describe("App", () => {
     expect(frame).toContain("type to search");
   });
 
+  it("keeps a strip click from switching views under an open search", async () => {
+    // The search input owns the text keys and stays mounted while search is
+    // on, so a view switched in under it would take every typed letter as a
+    // panel key at the same time as the input took it as text.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({})) as unknown as typeof fetch;
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" })],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("/");
+      await setup.renderOnce();
+      await setup.mockInput.typeText("al");
+      await setup.renderOnce();
+      const strip = setup.captureCharFrame().split("\n")[0]!;
+      await setup.mockMouse.click(strip.indexOf("Start") + 1, 0);
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+      await setup.mockInput.typeText("pn");
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Filter pull requests");
+      expect(frame).not.toContain("New session");
+      expect(frame).toContain("alpn");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("toggles help overlay on ? key", async () => {
     await renderApp(120, 24);
     setup.mockInput.pressKey("?");

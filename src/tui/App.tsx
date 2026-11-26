@@ -1515,12 +1515,14 @@ export function App(props: AppProps) {
         ? "start"
         : "sessions";
   /** Whether a Worktrees or Start body owns the keyboard: not while a dialog
-   *  owns input (`dialogOwnsInput`) or a handoff is aiming, and not while its
-   *  preview is focused (App scrolls that). A disabled body also yields its
-   *  footer to App's, which shows the keys of whatever does own them. */
+   *  owns input (`dialogOwnsInput`), a handoff is aiming or the session
+   *  search is typing, and not while its preview is focused (App scrolls
+   *  that). A disabled body also yields its footer to App's, which shows the
+   *  keys of whatever does own them. */
   const panelOwnsKeys = () =>
     !dialogOwnsInput() &&
     store.state.handoffPick === null &&
+    !store.state.searchMode &&
     !store.state.previewFocused;
   const repoFacts = createRepoFacts({
     connected: () => store.state.connectionState === "connected",
@@ -1531,12 +1533,14 @@ export function App(props: AppProps) {
   function switchMainView(next: View) {
     // Refused under anything that owns input, the strip's clicks included:
     // a switch would leave that owner answering keys over a view it is no
-    // longer drawn on. A handoff being aimed lives on the session list, and
-    // a removal prompt on the Worktrees panel.
+    // longer drawn on. A handoff being aimed and the search input live on
+    // the session list (Esc leaves either), and a removal prompt on the
+    // Worktrees panel.
     if (
       next === view() ||
       dialogOwnsInput() ||
       store.state.handoffPick !== null ||
+      store.state.searchMode ||
       worktreeModal()
     )
       return;
