@@ -1,0 +1,93 @@
+import type { CliRenderer } from "@opentui/core";
+
+/** Runs `argv` with `text` on its stdin and the terminal on its stdout and
+ *  stderr; resolves with its exit code. */
+export type PagerSpawn = (argv: string[], text: string) => Promise<number>;
+
+export interface PagerDeps {
+  env?: Record<string, string | undefined>;
+  spawn?: PagerSpawn;
+}
+
+/**
+ * The pager to run: the user's `$PAGER` through the shell (it is a command
+ * line, `less -R` or `bat -p`, the way git runs it), else `less +G`, which
+ * opens at the end, where a transcript's newest turn is. No `-R`: the text
+ * is an agent's words, and passing escape sequences through raw would let
+ * one paint the terminal.
+ */
+export function pagerCommand(
+  env: Record<string, string | undefined>,
+): string[] {
+  const pager = env.PAGER?.trim();
+  return pager ? ["sh", "-c", pager] : ["less", "+G"];
+}
+
+const defaultSpawn: PagerSpawn = async (argv, text) => {
+  const proc = Bun.spawn(argv, {
+    stdin: "pipe",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  try {
+    proc.stdin.write(text);
+    await proc.stdin.end();
+  } catch {
+    // A pager quit before it read everything closes the pipe under us; what
+    // it showed is what the user wanted.
+  }
+  return proc.exited;
+};
+
+/**
+ * Show `text` in a pager over the picker: suspend the renderer, pipe the text
+ * to the pager's stdin, and resume when it exits.
+ *
+ * Piped, never written to a file. A transcript can carry whatever the user
+ * pasted into an agent (tokens, keys), and a temp file outlives a crash. As
+ * with review's suspend, a `suspend()` that throws leaves nothing to undo,
+ * and once suspended `resume()` is guaranteed even if the spawn throws.
+ *
+ * A nonzero exit is a failure too, with no exceptions: `sh -c` reports a
+ * `$PAGER` that does not exist as 127 rather than throwing, and its message
+ * went to a stderr the resumed picker paints over, so the toast is the only
+ * place the user can learn why nothing showed. `less` and `more` exit 0 when
+ * quit early, so an ordinary `q` is not caught by this.
+ */
+export async function openInPager(
+  renderer: Pick<CliRenderer, "suspend" | "resume">,
+  text: string,
+  deps: PagerDeps = {},
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const argv = pagerCommand(deps.env ?? process.env);
+  const spawn = deps.spawn ?? defaultSpawn;
+  // The command the user would recognize: `$PAGER` itself, not the `sh`
+  // that runs it.
+  const name = argv[0] === "sh" ? argv[2]! : argv[0]!;
+  try {
+    await renderer.suspend();
+  } catch (err) {
+    return { ok: false, error: `suspend failed: ${err}` };
+  }
+  let result: { ok: true } | { ok: false; error: string };
+  try {
+    const code = await spawn(argv, text);
+    result =
+      code === 0 ? { ok: true } : { ok: false, error: `${name} exited ${code}` };
+  } catch (err) {
+    result = { ok: false, error: `${name} failed: ${err}` };
+  }
+  // OpenTUI 0.8's resume is async. A failed one gets a second try, as in
+  // `runHunkReview`; only when both fail does it replace the pager's result,
+  // since a picker that never came back is the thing the user must hear about.
+  try {
+    await renderer.resume();
+  } catch {
+    try {
+      await renderer.resume();
+    } catch (err) {
+      return { ok: false, error: `resume failed: ${err}` };
+    }
+  }
+  return result;
+}

@@ -1,6 +1,17 @@
 import { wrapText } from "../utils/format";
 import { GroupHeader } from "./GroupHeader";
-import { badgeText, branchPRs, badgeColor } from "../utils/repo-facts";
+import {
+  badgeText,
+  branchPRs,
+  badgeColor,
+  factsText,
+} from "../utils/repo-facts";
+import type { EnrichedSession } from "../../types";
+import {
+  WorktreePreview,
+  type WorktreePreviewHeader,
+  type WorktreePreviewTarget,
+} from "./WorktreePreview";
 import { getAgentDisplayName } from "../../lib/agents";
 import type { ViewMemory } from "../actions";
 import type { RepoFactsResponse } from "../../daemon/repo-facts";
@@ -85,6 +96,10 @@ const SCAN_TIMEOUT_MS = 60_000;
 
 const RUN_TIMEOUT_MS = 10 * 60_000;
 
+/** The column between the list and the preview's border, so a row's
+ *  right-aligned agents cell does not touch it. */
+const PREVIEW_GAP = 1;
+
 export interface WorktreePanelRow {
   kind: "worktree";
   /**
@@ -148,11 +163,19 @@ interface WorktreesPanelProps {
   }) => void;
   /** Explicit so tests cannot launch a browser or write the real clipboard. */
   effects: PanelEffects;
-  /** Whether `d`/`D` review is installed, for the footer's hint. */
-  reviewable?: boolean;
   /** A dialog opened from this view sits over it: the view stays, dimmed,
    *  so it is still the view the user is in. */
   dimmed?: boolean;
+  /** The preview beside the list, as App's `P` and `Alt+H/L` set it. Never
+   *  drawn in the sidebar's compact overlay. */
+  showPreview?: boolean;
+  previewWidth?: number;
+  /** App owns focus (`Tab`) and its scroll keys; this only colors the
+   *  frame and hands App the scrollbox to scroll. */
+  previewFocused?: boolean;
+  onPreviewScrollbox?: (ref: ScrollBoxRenderable) => void;
+  /** The full session behind a worktree's session id, for its summary. */
+  sessionById?: (id: string) => EnrichedSession | undefined;
 }
 
 export function partitionSelection(
@@ -636,6 +659,23 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     props.onModalChange?.(false);
   });
   const width = () => Math.max(4, dims().width - (props.embedded ? 2 : 4));
+  const previewShown = () => !!props.showPreview && !props.compact;
+  const previewWidth = () => props.previewWidth ?? 50;
+  /**
+   * What the rows may spend: `width()` less the preview's share, by the
+   * session list's own formula. The footer and the removal confirmation
+   * still span the whole panel, so they keep `width()`.
+   */
+  const listWidth = () =>
+    previewShown()
+      ? Math.max(
+          4,
+          Math.floor((dims().width * (100 - previewWidth())) / 100) -
+            PREVIEW_GAP,
+        )
+      : width();
+  /** Bumped by `R`, so the preview re-reads past its caches too. */
+  const [detailRefresh, setDetailRefresh] = createSignal(0);
   // The header's label budget, from the scrollbox viewport the rows are laid
   // out inside (the row budgets above are a separate, deliberately
   // conservative, estimate). The header is drawn flush right because the
@@ -644,7 +684,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
   // viewport resize, which is what makes this reactive.
   const headerWidth = () => {
     void measured();
-    return listBox?.viewport.width || width();
+    return listBox?.viewport.width || listWidth();
   };
   const groups = createMemo(() => {
     const candidates = new Map(
@@ -951,6 +991,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     if (key === "R" || (key === "r" && event.shift)) {
       props.onRefresh?.();
       load(true);
+      setDetailRefresh((n) => n + 1);
       return;
     }
     if (key === "q" || key === "escape") {
@@ -1131,7 +1172,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     // otherwise their row positions remain visible on compact surfaces.
     const badge = cachedBadge(first) || (first.pr ? describePR(first.pr) : "");
     const header = `▾ ${group.repoName} (${rows.length})   ${branch}${badge ? `   ${badge}` : ""}`;
-    return displayWidth(header) <= width() - 2 ? branch : undefined;
+    return displayWidth(header) <= listWidth() - 2 ? branch : undefined;
   };
   /** Embedded and not the key owner: App's footer shows through instead. */
   const footerYielded = () => !!props.embedded && props.enabled === false;
@@ -1139,7 +1180,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     note() || scanError() || (!scan() ? "scanning…" : undefined);
   /** The agents cell's text for a row, at this width. */
   const agentsText = (entry: WorktreePanelRow) =>
-    describeSessions(rowSessions(entry), width() < 100);
+    describeSessions(rowSessions(entry), listWidth() < 100);
   /** The branch cell's text for a row: empty where the group header
    *  already carries the shared branch. */
   const branchText = (entry: WorktreePanelRow) =>
@@ -1158,8 +1199,11 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         cap,
         texts.reduce((n, t) => Math.max(n, displayWidth(t)), 0),
       );
-    const agents = widest(visible.map(agentsText), Math.floor(width() / 3));
-    const room = Math.max(0, width() - ROW_PREFIX - (agents ? agents + 1 : 0));
+    const agents = widest(visible.map(agentsText), Math.floor(listWidth() / 3));
+    const room = Math.max(
+      0,
+      listWidth() - ROW_PREFIX - (agents ? agents + 1 : 0),
+    );
     const name = widest(
       visible.map(nameText),
       Math.min(NAME_COLUMN_MAX, Math.max(8, Math.floor(room * 0.45))),
@@ -1170,6 +1214,48 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
     );
     return { name, branch, agents, room };
   });
+  /** The preview's facts line for a row: what the list says beside the
+   *  name, without the tracking and dirty counts the preview spells out. */
+  const previewFacts = (entry: WorktreePanelRow) => [
+    ...(entry.candidate
+      ? [{ text: describeReason(entry.candidate), fg: theme.yellow }]
+      : []),
+    ...(cachedBadge(entry)
+      ? [{ text: cachedBadge(entry), fg: badgeColor(cachedPRs(entry)) }]
+      : entry.pr
+        ? [{ text: describePR(entry.pr), fg: prColor(entry.pr) }]
+        : []),
+    ...(entry.row.locked ? [{ text: "locked", fg: theme.yellow }] : []),
+    ...(entry.skip?.reason && !entry.row.locked
+      ? [{ text: entry.skip.reason, fg: theme.subtext }]
+      : []),
+  ];
+  const previewTarget = (): WorktreePreviewTarget | null => {
+    const item = current();
+    return item?.kind === "worktree"
+      ? { row: item.row, facts: previewFacts(item) }
+      : null;
+  };
+  const previewHeader = (): WorktreePreviewHeader | null => {
+    const item = current();
+    if (item?.kind !== "header") return null;
+    const facts = props.facts?.repos.find((r) => r.repoRoot === item.repoRoot);
+    const counts = facts?.counts?.value;
+    const stale = facts?.counts?.stale ? " ~" : "";
+    return {
+      repoName: item.repoName,
+      repoRoot: item.repoRoot,
+      lines: [
+        factsText(facts) ||
+          `${item.rows.length} worktree${item.rows.length === 1 ? "" : "s"}`,
+        ...(counts
+          ? [
+              `${counts.prs} open PR${counts.prs === 1 ? "" : "s"} · ${counts.issues} open issue${counts.issues === 1 ? "" : "s"}${stale}`,
+            ]
+          : []),
+      ],
+    };
+  };
   const renderRow = (entry: WorktreePanelRow) => {
     const status = () => leadStatus(rowSessions(entry));
     // The session list's icon for the same status, in the user's style.
@@ -1309,7 +1395,7 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
         <box
           flexGrow={1}
           flexDirection="column"
-          paddingRight={props.embedded ? 1 : 0}
+          paddingRight={props.embedded && !previewShown() ? 1 : 0}
         >
           <Show when={phase() === "loading"}>
             <Text fg={theme.overlay}>Reading worktrees…</Text>
@@ -1360,54 +1446,71 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
             </scrollbox>
           </Show>
           <Show when={["list", "confirm", "dirty"].includes(phase())}>
-            <scrollbox
-              flexGrow={1}
-              ref={(r: ScrollBoxRenderable) => {
-                listBox = r;
-                const bump = () => setMeasured((v) => v + 1);
-                r.viewport.on("resize", bump);
-                r.content.on("resize", bump);
-              }}
-            >
-              <For each={items()}>
-                {(item) =>
-                  item.kind === "header" ? (
-                    <GroupHeader
-                      label={item.repoName}
-                      count={item.rows.length}
-                      width={headerWidth()}
-                      flushRight
-                      sharedBranch={groupBranch(item.repoRoot)}
-                      prBadgeColor={
-                        item.rows[0]
-                          ? cachedPRs(item.rows[0]).length
-                            ? badgeColor(cachedPRs(item.rows[0]))
-                            : item.rows[0].pr
-                              ? prColor(item.rows[0].pr)
-                              : undefined
-                          : undefined
-                      }
-                      prBadge={
-                        groupBranch(item.repoRoot) && item.rows[0]
-                          ? cachedBadge(item.rows[0]) ||
-                            (item.rows[0].pr ? describePR(item.rows[0].pr) : "")
-                          : ""
-                      }
-                      collapsed={collapsed().has(item.repoRoot)}
-                      selected={cursor() === item.key}
-                      members={[]}
-                      onActivate={() => {
-                        if (props.enabled === false) return;
-                        setCursor(item.key);
-                        toggleGroup(item.repoRoot);
-                      }}
-                    />
-                  ) : (
-                    renderRow(item)
-                  )
-                }
-              </For>
-            </scrollbox>
+            <box flexDirection="row" flexGrow={1}>
+              <scrollbox
+                flexGrow={1}
+                paddingRight={previewShown() ? PREVIEW_GAP : 0}
+                ref={(r: ScrollBoxRenderable) => {
+                  listBox = r;
+                  const bump = () => setMeasured((v) => v + 1);
+                  r.viewport.on("resize", bump);
+                  r.content.on("resize", bump);
+                }}
+              >
+                <For each={items()}>
+                  {(item) =>
+                    item.kind === "header" ? (
+                      <GroupHeader
+                        label={item.repoName}
+                        count={item.rows.length}
+                        width={headerWidth()}
+                        flushRight
+                        sharedBranch={groupBranch(item.repoRoot)}
+                        prBadgeColor={
+                          item.rows[0]
+                            ? cachedPRs(item.rows[0]).length
+                              ? badgeColor(cachedPRs(item.rows[0]))
+                              : item.rows[0].pr
+                                ? prColor(item.rows[0].pr)
+                                : undefined
+                            : undefined
+                        }
+                        prBadge={
+                          groupBranch(item.repoRoot) && item.rows[0]
+                            ? cachedBadge(item.rows[0]) ||
+                              (item.rows[0].pr
+                                ? describePR(item.rows[0].pr)
+                                : "")
+                            : ""
+                        }
+                        collapsed={collapsed().has(item.repoRoot)}
+                        selected={cursor() === item.key}
+                        members={[]}
+                        onActivate={() => {
+                          if (props.enabled === false) return;
+                          setCursor(item.key);
+                          toggleGroup(item.repoRoot);
+                        }}
+                      />
+                    ) : (
+                      renderRow(item)
+                    )
+                  }
+                </For>
+              </scrollbox>
+              <Show when={previewShown()}>
+                <WorktreePreview
+                  target={previewTarget()}
+                  header={previewHeader()}
+                  width={previewWidth()}
+                  focused={props.previewFocused}
+                  onScrollboxRef={(ref) => props.onPreviewScrollbox?.(ref)}
+                  sessionById={props.sessionById}
+                  iconStyle={props.iconStyle}
+                  refreshKey={detailRefresh()}
+                />
+              </Show>
+            </box>
           </Show>
         </box>
         {/* The session list's footer, built from the same registry: same
@@ -1420,7 +1523,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
               view="worktrees"
               width={width()}
               sidebar={props.compact}
-              reviewable={props.reviewable}
               note={footerNote()}
               noteColor={note() || scanError() ? theme.yellow : theme.subtext}
             />
@@ -1437,7 +1539,6 @@ export const WorktreesPanel: Component<WorktreesPanelProps> = (props) => {
                   <HintLine
                     view="worktrees"
                     width={width()}
-                    reviewable={props.reviewable}
                     note={footerNote()}
                     noteColor={
                       note() || scanError() ? theme.yellow : theme.subtext

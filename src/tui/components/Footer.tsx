@@ -27,7 +27,11 @@ interface FooterProps {
   handoffDialogMode?: boolean;
   /** The Copy dialog is open. */
   copyDialogMode?: boolean;
-  reviewable?: boolean;
+  /** The `:` palette is open. */
+  paletteMode?: boolean;
+  /** The view whose keys a focused preview takes: Sessions sends them to the
+   *  pane, Worktrees and Start scroll the preview. */
+  view?: View;
 }
 
 /** The box pads one column on each side. */
@@ -52,9 +56,9 @@ export interface HintSegment {
  * The default hint line grew past 120 columns once `n new` was added, which
  * clipped `quit`, the one hint a stuck user most needs. Every picker feature
  * wants a footer hint, so budgeting them by rank keeps the next one from
- * having to be withheld for want of room. The `PINNED` four (views, scope,
- * help, quit) are never dropped; when they alone overflow they shrink to
- * their bare keys instead, one at a time.
+ * having to be withheld for want of room. The `PINNED` five (views, scope,
+ * `: more`, help, quit) are never dropped; when they alone overflow they
+ * shrink to their bare keys instead, one at a time.
  *
  * Pure and exported for tests.
  */
@@ -84,24 +88,26 @@ export function fitHints(segments: HintSegment[], width: number): string {
 /**
  * The footer's hints for `view`, built from the `ACTIONS` registry: every
  * action with a `hint` that the view handles, in registry order, so the
- * order and the verbs are the same on every view. `views`, `scope`, `help`
- * and `quit`/`back` are pinned. A view leaves off the hint that opens it
- * (`N start` on Start, `W worktrees` on Worktrees).
+ * order and the verbs are the same on every view. `views`, `scope`, `: more`,
+ * `help` and `quit`/`back` are pinned. A hint can be limited to some views
+ * (`only`). The line teaches
+ * the everyday keys; everything else is one `:` away, which is what
+ * `: more` says.
  */
 export function footerHints(
   view: View,
-  opts: { groupBy?: GroupBy; reviewable?: boolean; sidebar?: boolean } = {},
+  opts: { groupBy?: GroupBy; sidebar?: boolean } = {},
 ): HintSegment[] {
   const segments: HintSegment[] = [];
   for (const action of ACTIONS) {
     if (!("hint" in action)) continue;
     if ("views" in action && !action.views.includes(view)) continue;
-    if (action.id === "review" && !opts.reviewable) continue;
-    if ("opens" in action.hint && action.hint.opens === view) continue;
-    // The sidebar's session list neither cycles views nor previews.
-    if (opts.sidebar && view === "sessions" && action.id === "views") continue;
-    if (opts.sidebar && action.id === "preview") continue;
     const hint: FooterHint = action.hint;
+    if (hint.only && !hint.only.includes(view)) continue;
+    // The sidebar's session list does not cycle views, and the rail has no
+    // palette.
+    if (opts.sidebar && view === "sessions" && action.id === "views") continue;
+    if (opts.sidebar && action.id === "palette") continue;
     const { key } = hint;
     const rank = hint.rankIn?.[view] ?? hint.rank;
     const verb = typeof hint.verb === "string" ? hint.verb : hint.verb[view];
@@ -124,11 +130,26 @@ export const CONFIRM_HINTS = "y confirm · n/Esc cancel";
 export const SEARCH_HINTS =
   "type to search · ↑/↓ or ^n/^p nav · enter go · esc cancel";
 
+/** The `:` palette's keys. */
+export const PALETTE_HINTS =
+  "type to filter · ↑/↓ or ^n/^p move · enter run · esc close";
+
+/**
+ * A focused preview's keys. Sessions hands every other key to the pane, so
+ * that is what it says; Worktrees and Start have nothing to type into, so
+ * focus there only scrolls.
+ */
+export function previewFocusHints(view: View): string {
+  return view === "sessions"
+    ? "tab/esc exit focus · keys sent to pane"
+    : "j/k scroll · ^d/^u page · g/G ends · tab/esc exit focus";
+}
+
 /**
  * The hint line for `view`, with an optional `note` (a flash message, a
  * scan state, a source error) ahead of it.
  *
- * The note never costs the pinned four. A note that fits beside them at
+ * The note never costs the pinned hints. A note that fits beside them at
  * full length keeps them so, with the droppable hints fitted into what is
  * left. A longer one (an error and its remedy) shrinks them to their bare
  * keys first, and only truncates if it still does not fit.
@@ -138,7 +159,6 @@ export function hintLine(
   width: number,
   opts: {
     groupBy?: GroupBy;
-    reviewable?: boolean;
     sidebar?: boolean;
     note?: string;
   } = {},
@@ -189,7 +209,6 @@ export const HintLine: Component<{
   view: View;
   width: number;
   groupBy?: GroupBy;
-  reviewable?: boolean;
   sidebar?: boolean;
   note?: string;
   noteColor?: string;
@@ -276,8 +295,13 @@ export const Footer: Component<FooterProps> = (props) => {
         <Match when={props.helpMode}>
           <Text fg={theme.subtext}>? or Esc close</Text>
         </Match>
+        <Match when={props.paletteMode}>
+          <Text fg={theme.subtext}>{PALETTE_HINTS}</Text>
+        </Match>
         <Match when={props.previewFocused}>
-          <Text fg={theme.subtext}>tab/esc exit focus · keys sent to pane</Text>
+          <Text fg={theme.subtext}>
+            {previewFocusHints(props.view ?? "sessions")}
+          </Text>
         </Match>
         <Match when={props.confirmMode}>
           <Text fg={theme.subtext}>{CONFIRM_HINTS}</Text>
@@ -316,7 +340,6 @@ export const Footer: Component<FooterProps> = (props) => {
             view="sessions"
             width={Math.max(1, dims().width - FOOTER_PADDING)}
             groupBy={props.groupBy}
-            reviewable={props.reviewable}
           />
         </Match>
       </Switch>
