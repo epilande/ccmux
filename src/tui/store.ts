@@ -214,8 +214,7 @@ export interface NewSessionIssue {
  * it, a dialog's cancel marker carries it, and Esc reads it back.
  */
 export interface SourcePickerOrigin {
-  panelRepo: string | null;
-  /** The panel's LIVE scope, null when Tab had widened it. */
+  /** The panel's scope when it opened the picker, null for all repos. */
   panelScope: string | null;
   panelCursor: string;
 }
@@ -452,12 +451,12 @@ export interface NewSessionDraft {
    * row keys off it, and submit ignores it entirely, since a spawn hands the
    * board to the new session. `cursor` is the panel row the dialog was
    * opened over, so the reopened panel lands where the user left; `scope`
-   * is the panel's LIVE filter at that moment (null when Tab had widened
-   * it), which the reopen re-establishes, since the rescope is panel-local
-   * state nothing else remembers.
+   * is the scope the panel showed at that moment (null for all repos),
+   * which the reopen re-establishes. One field, not an opening repo plus a
+   * live filter: `s` narrows to the cursor row's repo, never back to the
+   * repo the panel was opened on, so there is no second repo to remember.
    */
   returnToWorktrees: {
-    repo: string | null;
     scope: string | null;
     cursor: string;
   } | null;
@@ -485,6 +484,9 @@ interface TUIState {
   confirmAction: ConfirmAction | null;
   /** Snapshot of session IDs captured when the confirm dialog opens */
   confirmSessionIds: string[];
+  /** Names those IDs, captured with them: the Sessions list's selection may
+   *  be hidden, or unrelated to a marked set. */
+  confirmLabel: string | null;
   connectionState: ConnectionState;
   /** Daemon scan-health; drives the degraded warning in the header. */
   daemonHealth: DaemonHealth;
@@ -500,10 +502,12 @@ interface TUIState {
   promptDisplay: PromptDisplay;
   previewFocused: boolean;
   showHelp: boolean;
+  scope: string | null;
+  markedSessions: Set<string>;
   /**
-   * The Worktrees panel, or null when closed. `repo` scopes it to one main
-   * checkout (opened from a group header) and is null for the global
-   * keybinding; the panel's own Tab widens from there without reopening.
+   * The Worktrees panel, or null when closed. `repo` is the scope it was
+   * opened on (one main checkout, or null for all repos); the panel follows
+   * the shared `scope` from there, which its own `s` changes in place.
    * Everything else the panel needs — the rows, the selection, the run log —
    * is local to the component: it is fetched on open and discarded on close,
    * so it would only be stale state for the rest of the picker's life.
@@ -513,16 +517,13 @@ interface TUIState {
    * not in the fetched list. `isReturn` marks exactly those reopens, and is
    * what lets the panel reuse its last completed prune scan instead of
    * re-firing it; a plain open (`W`, the group menu) always scans fresh.
-   * `startWidened` re-establishes a Tab-widened scope on a return: the
-   * rescope is panel-local state this store never sees, so the action
-   * payloads carry the live filter out and a return carries it back in,
-   * while `repo` keeps naming the opening repo Tab can narrow back to.
+   * A return reopens on the scope its action payload carried out, so the
+   * panel comes back narrowed or widened exactly as the user left it.
    */
   worktrees: {
     repo: string | null;
     initialCursor: string | null;
     isReturn: boolean;
-    startWidened: boolean;
   } | null;
   /**
    * The source picker, or null when closed (issue #151).
@@ -1047,6 +1048,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     confirmSessionId: null,
     confirmAction: null,
     confirmSessionIds: [],
+    confirmLabel: null,
     connectionState: "disconnected",
     daemonHealth: { degraded: false },
     tmuxSocketError: null,
@@ -1055,6 +1057,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
+    scope: null,
+    markedSessions: new Set<string>(),
     worktrees: null,
     sourcePicker: null,
     notice: null,
@@ -1223,28 +1227,12 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
   );
 
-  /**
-   * Every session, wrapped as a `FilteredSession` but never filtered.
-   *
-   * The worktree-counts scope in `SessionList` needs a membership that no
-   * user-facing filter can move: each change costs an aborted fetch, a
-   * `git worktree list` per repo on the daemon, and a restarted refresh
-   * interval, so deriving it from `filteredSessions()` made every keystroke
-   * of a search that changed the matching project set pay for a refetch.
-   * Built on `sortedSessions`, whose identity-preserving equality means this
-   * array is rebuilt only when membership or ordering actually changes.
-   */
-  const unfilteredSessions = trackedMemo("unfilteredSessions", () =>
-    sortedSessions().map((session) => ({
-      session,
-      highlights: null,
-      paneMatch: false,
-    })),
-  );
-
   // Derived: status-filtered sessions (hide idle toggle, keeps unread/read visible)
   const statusFilteredSessions = trackedMemo("statusFilteredSessions", () => {
-    const sorted = sortedSessions();
+    const all = sortedSessions();
+    const sorted = state.scope
+      ? all.filter((s) => (s.mainRepoRoot ?? s.worktreeRoot) === state.scope)
+      : all;
     if (!state.hideIdle) return sorted;
     const filtered = sorted.filter(
       (s) => s.status !== "idle" || s.attentionState !== null,
@@ -1733,6 +1721,39 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     invokeRemovalTimers.set(invocationId, timer);
   }
 
+  function forgetSessionMark(id: string) {
+    if (!state.markedSessions.has(id)) return;
+    setState("markedSessions", (prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  function changeScope(repo: string | null) {
+    if (repo === state.scope) return;
+    batch(() => {
+      setState("scope", repo);
+      if (
+        state.selectedSessionId &&
+        !filteredSessions().some(
+          (s) => s.session.id === state.selectedSessionId,
+        )
+      ) {
+        setState("selectedSessionId", null);
+      }
+      const header = selectedHeaderKey();
+      if (
+        header &&
+        !flatItems().some(
+          (item) => item.type === "header" && item.groupKey === header,
+        )
+      ) {
+        setSelectedHeaderKey(null);
+      }
+    });
+  }
+
   /**
    * Immediately drop a synthetic invoke row (no outcome to show), clearing
    * any armed linger timer and the selection if it pointed at the row.
@@ -1745,6 +1766,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       clearTimeout(existing);
       invokeRemovalTimers.delete(invocationId);
     }
+    forgetSessionMark(invocationId);
     setState("sessions", (s) =>
       s.filter((session) => session.id !== invocationId),
     );
@@ -1861,6 +1883,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       const wasWaiting = selectedSession()?.status === "waiting";
       batch(() => {
         setState("sessions", merged);
+        const survivingIds = new Set(merged.map((session) => session.id));
+        for (const id of state.markedSessions) {
+          if (!survivingIds.has(id)) forgetSessionMark(id);
+        }
         if (
           state.selectedSessionId &&
           !merged.some((s) => s.id === state.selectedSessionId)
@@ -1930,6 +1956,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           ? flatItems().slice(0, killedIndex).map(flatItemIdentity)
           : [];
       batch(() => {
+        forgetSessionMark(sessionId);
         setState("sessions", (s) =>
           s.filter((session) => session.id !== sessionId),
         );
@@ -2149,6 +2176,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         null,
         "kill-group",
         header.members.map((fs) => fs.session.id),
+        header.label,
       );
     },
 
@@ -2156,11 +2184,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       sessionId: string | null,
       action: ConfirmAction = "kill",
       sessionIds: string[] = [],
+      label: string | null = null,
     ) {
       setState("confirmMode", true);
       setState("confirmSessionId", sessionId);
       setState("confirmAction", action);
       setState("confirmSessionIds", sessionIds);
+      setState("confirmLabel", label);
     },
 
     hideConfirmDialog() {
@@ -2168,6 +2198,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("confirmSessionId", null);
       setState("confirmAction", null);
       setState("confirmSessionIds", []);
+      setState("confirmLabel", null);
     },
 
     /** `highlight` is the item the keyboard starts on; null for a
@@ -2411,7 +2442,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
-        repo: string | null;
         scope: string | null;
         cursor: string;
       };
@@ -2689,19 +2719,40 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", false);
     },
 
+    setScope(repo: string | null) {
+      changeScope(repo);
+      if (state.sourcePicker) setState("sourcePicker", "repo", repo);
+    },
+    markSessions(ids: string[], clear = false) {
+      setState("markedSessions", (prev) => {
+        const next = new Set(prev);
+        const remove = clear || ids.every((id) => next.has(id));
+        for (const id of ids) {
+          if (remove) next.delete(id);
+          else next.add(id);
+        }
+        return next;
+      });
+    },
+    markAllSessions(clear = false) {
+      const visible = flatItems().flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session.id] : [],
+      );
+      setState("markedSessions", new Set(clear ? [] : visible));
+    },
     showWorktrees(
       repo: string | null,
       opts: {
         initialCursor?: string;
         isReturn?: boolean;
-        startWidened?: boolean;
       } = {},
     ) {
+      changeScope(repo);
+      setState("sourcePicker", null);
       setState("worktrees", {
         repo,
         initialCursor: opts.initialCursor ?? null,
         isReturn: opts.isReturn === true,
-        startWidened: opts.startWidened === true,
       });
     },
 
@@ -2717,6 +2768,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         origin?: SourcePickerOrigin | null;
       } = {},
     ) {
+      changeScope(repo);
+      setState("worktrees", null);
       setState("sourcePicker", {
         repo,
         initialCursor: opts.initialCursor ?? null,
@@ -3003,7 +3056,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   return {
     state,
     sortedSessions,
-    unfilteredSessions,
     filteredSessions,
     flatItems,
     invocationInFlightCount,

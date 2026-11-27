@@ -22,6 +22,7 @@
  * collapsing them costs.
  */
 
+import { runMetadataGit, type GitRun } from "./worktree-git";
 import type { BranchPR } from "../types/session";
 import {
   foldChecks,
@@ -29,6 +30,8 @@ import {
   type RollupEntry,
 } from "./pr-resolver";
 import {
+  parseRepoSlug,
+  sameRepo,
   ghProblem,
   readString,
   runGh,
@@ -45,7 +48,7 @@ import {
  * silently lose its oldest open PRs with nothing on screen to say so. 50 is
  * more rows than the panel can usefully show and still one request.
  */
-const PR_LIST_LIMIT = 50;
+export const PR_LIST_LIMIT = 50;
 
 /** The `--json` fields the section renders, in the order gh takes them. */
 const PR_LIST_FIELDS = [
@@ -58,11 +61,17 @@ const PR_LIST_FIELDS = [
   "statusCheckRollup",
   "headRefName",
   "headRefOid",
+  "headRepository",
+  "headRepositoryOwner",
+  "createdAt",
+  "labels",
 ].join(",");
 
 /** One open pull request, flattened to what a row shows. */
 export interface OpenPR {
   number: number;
+  createdAt?: string | null;
+  labels?: string[];
   /** Control characters already stripped; see {@link stripControlChars}. */
   title: string;
   url: string;
@@ -72,11 +81,14 @@ export interface OpenPR {
   reviewDecision: BranchPR["reviewDecision"];
   ciStatus: NonNullable<BranchPR["ciStatus"]>;
   headRefName: string;
+  /** Source repository identity, distinct from the PR author and base repo. */
+  headRepository?: { owner: string; name: string } | null;
   /**
    * SHA of the PR's head commit, or null when gh did not report one.
    *
-   * The ONLY thing that proves a local branch is this PR's. Never match a PR
-   * to a checkout by branch NAME: `gh pr list --head patch-1` on `cli/cli`
+   * For Start's checkout routing, only an exact SHA proves the destination.
+   * Badges can also use configured upstream identity via associatedBranchPRs.
+   * Never match a PR to a checkout by branch NAME: `gh pr list --head patch-1` on `cli/cli`
    * returns 25 PRs from 25 different forks, which is the namesake trap
    * `selectPRForBranch` exists to document.
    */
@@ -93,12 +105,14 @@ export interface OpenPR {
 export async function listOpenPRs(
   cwd: string,
   run: GhRun = runGh,
+  head?: string,
 ): Promise<SourceResult<OpenPR[]>> {
   const result = await run(cwd, [
     "pr",
     "list",
     "--state",
     "open",
+    ...(head ? ["--head", head] : []),
     "--limit",
     String(PR_LIST_LIMIT),
     "--json",
@@ -153,7 +167,13 @@ function readPR(raw: unknown): OpenPR | null {
   }
   return {
     number,
-    // Sanitized HERE, at the boundary GitHub's text enters through, rather
+    createdAt: readString(row, "createdAt"),
+    labels: Array.isArray(row.labels)
+      ? row.labels.flatMap((label) => {
+          const name = nestedString(label, "name");
+          return name ? [stripControlChars(name)] : [];
+        })
+      : [], // Sanitized HERE, at the boundary GitHub's text enters through, rather
     // than at each of the places it renders: a title reaches a TUI row, the
     // new-session dialog's note and (through `seedPrompt`) an agent's opening
     // message, and only one of those would have thought to strip it.
@@ -172,6 +192,11 @@ function readPR(raw: unknown): OpenPR | null {
     // rollup, an empty rollup is `"none"` rather than `"passing"`, and
     // CANCELLED counts as failing by design. See `pr-resolver.ts`.
     ciStatus: foldChecks(readRollup(row.statusCheckRollup)),
+    headRepository: (() => {
+      const owner = nestedString(row.headRepositoryOwner, "login");
+      const name = nestedString(row.headRepository, "name");
+      return owner && name ? { owner, name } : null;
+    })(),
     headRefName: readString(row, "headRefName") ?? "",
     headRefOid: readString(row, "headRefOid"),
   };
@@ -245,4 +270,134 @@ export type PRListBody = Partial<PRListResponse>;
 
 export function normalizePRList(data: PRListBody): PRListResponse {
   return { repos: data.repos ?? [], errors: data.errors ?? [] };
+}
+
+/** The head name a capped `gh` query should use. A local alias such as
+ *  `review-7` tracking `refs/heads/feature` must ask for `feature`. */
+export async function upstreamHeadName(
+  cwd: string,
+  branch: string,
+  git: GitRun = runMetadataGit,
+): Promise<string> {
+  const merge = await git(cwd, ["config", "--get", `branch.${branch}.merge`]);
+  // A timeout must not fall through to the local name: a tracking alias
+  // would then be queried as if it were the upstream head. Exit 1 (unset)
+  // and other config failures still use the local name.
+  if (merge.exitCode === 124) {
+    throw new Error(`git config failed (${merge.exitCode})`);
+  }
+  if (merge.exitCode !== 0) return branch;
+  const ref = merge.stdout.trim();
+  return ref.startsWith("refs/heads/")
+    ? ref.slice("refs/heads/".length)
+    : branch;
+}
+
+function looksLikeRemoteUrl(value: string): boolean {
+  return value.includes("://") || value.startsWith("git@");
+}
+
+/** `git config --get` exits 1 when the key is unset. Any other failure is
+ *  unreadable identity, which must not be reported as "no association". */
+async function configGet(
+  git: GitRun,
+  cwd: string,
+  key: string,
+): Promise<{ ok: true; value: string } | { ok: false }> {
+  const result = await git(cwd, ["config", "--get", key]);
+  if (result.exitCode === 1) return { ok: true, value: "" };
+  if (result.exitCode !== 0) return { ok: false };
+  return { ok: true, value: result.stdout.trim() };
+}
+
+/** An exact local tip always associates. Upstream identity additionally
+ * allows local-ahead commits, except a trunk tracked under another name: a
+ * branch cut from origin/main tracks main without being main's PR.
+ * These are local ref/config reads; never fetch or inspect dirty files.
+ * Fork checkouts store a URL in `branch.<name>.remote` with no named remote,
+ * so the upstream atoms on `for-each-ref` are empty even when that config is set. */
+export async function associatedBranchPRs(
+  cwd: string,
+  branch: string,
+  prs: OpenPR[],
+  git: GitRun = runMetadataGit,
+): Promise<SourceResult<OpenPR[]>> {
+  if (!prs.length) return { ok: true, value: [] };
+  const ref = `refs/heads/${branch}`;
+  const tipResult = await git(cwd, ["rev-parse", "--verify", "--quiet", ref]);
+  if (tipResult.exitCode !== 0 && tipResult.exitCode !== 1)
+    return { ok: false, error: "Cannot read branch identity" };
+  const tip = tipResult.exitCode === 0 ? tipResult.stdout.trim() : "";
+  if (!tip) return { ok: true, value: [] };
+  const remoteConfig = await configGet(git, cwd, `branch.${branch}.remote`);
+  const mergeConfig = await configGet(git, cwd, `branch.${branch}.merge`);
+  if (!remoteConfig.ok || !mergeConfig.ok)
+    return { ok: false, error: "Cannot read branch identity" };
+  const remote = remoteConfig.value;
+  const merge = mergeConfig.value;
+  let remoteRepo = null;
+  if (remote && remote !== "." && merge) {
+    if (looksLikeRemoteUrl(remote)) {
+      remoteRepo = parseRepoSlug(remote);
+    } else {
+      const url = await git(cwd, ["remote", "get-url", "--", remote]);
+      if (url.exitCode !== 0)
+        return { ok: false, error: "Cannot read branch remote" };
+      remoteRepo = parseRepoSlug(url.stdout);
+    }
+  }
+  const upstream = merge.startsWith("refs/heads/")
+    ? merge.slice("refs/heads/".length)
+    : "";
+  const tracksTrunk =
+    !!remoteRepo &&
+    !!upstream &&
+    upstream !== branch &&
+    prs.some((pr) => pr.headRefName === upstream) &&
+    (await isTrunk(git, cwd, remote, upstream));
+  return {
+    ok: true,
+    value: prs.filter((pr) => {
+      // An upstream can name an unrelated branch (one cut from origin/main
+      // tracks main), so it widens the SHA proof and never vetoes it.
+      if (pr.headRefOid === tip) return true;
+      if (!remoteRepo) return false;
+      const base = parseRepoSlug(pr.url);
+      if (merge === `refs/pull/${pr.number}/head`)
+        return sameRepo(remoteRepo, base);
+      const head =
+        base && pr.headRepository
+          ? {
+              host: base.host,
+              owner: pr.headRepository.owner.toLowerCase(),
+              repo: pr.headRepository.name.toLowerCase(),
+            }
+          : null;
+      return (
+        merge === `refs/heads/${pr.headRefName}` &&
+        !tracksTrunk &&
+        sameRepo(remoteRepo, head)
+      );
+    }),
+  };
+}
+
+/** `main`/`master`, or the remote's `HEAD` target when it is recorded. An
+ *  unreadable `HEAD` is not a trunk: the conventional names already cover
+ *  the common case, and a URL remote has no `HEAD` ref to read. */
+async function isTrunk(
+  git: GitRun,
+  cwd: string,
+  remote: string,
+  name: string,
+): Promise<boolean> {
+  if (name === "main" || name === "master") return true;
+  if (looksLikeRemoteUrl(remote)) return false;
+  const head = await git(cwd, [
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    `refs/remotes/${remote}/HEAD`,
+  ]);
+  return head.exitCode === 0 && head.stdout.trim() === `${remote}/${name}`;
 }
