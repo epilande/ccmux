@@ -3522,7 +3522,7 @@ describe("getServerSocketPath and /server-info", () => {
         out: "",
         err: "error connecting to /tmp/tmux-501/work (No such file or directory)\n",
       },
-      { code: 0, out: "p4242\nf5\nn/private/tmp/tmux-501/work\n" },
+      { code: 0, out: "p4242\nf5\nn/tmp/tmux-501/work\n" },
     ]);
     try {
       const data = (await (

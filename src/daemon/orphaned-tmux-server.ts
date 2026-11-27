@@ -33,19 +33,28 @@ export function missingSocketPath(message: string): string | null {
  * macOS resolves `/tmp` and `/var` through the `/private` symlink, and the two
  * sides of the comparison disagree on spelling: tmux reports (and binds) the
  * resolved path, but a label whose directory was deleted can only be spelled
- * unresolved by `attemptedTmuxSocketPath()`. Compare without the prefix.
+ * unresolved by `attemptedTmuxSocketPath()`. Compare without the prefix there,
+ * and only there: on Linux `/private/tmp` and `/tmp` are different directories.
  */
-function canonicalSocketPath(path: string): string {
+function canonicalSocketPath(path: string, platform: NodeJS.Platform): string {
+  if (platform !== "darwin") return path;
   return path.replace(/^\/private(?=\/(?:tmp|var)\/)/, "");
 }
 
+/** The socket type Linux lsof appends after a unix socket's full pathname
+ *  (`/tmp/tmux-1000/default type=STREAM`). One token, anchored at the end, so
+ *  a path that itself contains ` type=` keeps everything before the suffix. */
+const LINUX_SOCKET_TYPE_SUFFIX = / type=[A-Z0-9_]+$/;
+
 /**
  * The socket path an lsof `n` field names. Linux lsof follows the path with
- * the socket's type (`/tmp/tmux-1000/default type=STREAM`), where macOS prints
- * the bare path, so an exact comparison would never match on Linux.
+ * the socket's type, where macOS prints the bare path, so an exact comparison
+ * would never match on Linux. macOS names are kept exactly as printed.
  */
-function lsofSocketName(name: string): string {
-  return name.replace(/ type=\S+.*$/, "");
+function lsofSocketName(name: string, platform: NodeJS.Platform): string {
+  return platform === "linux"
+    ? name.replace(LINUX_SOCKET_TYPE_SUFFIX, "")
+    : name;
 }
 
 /**
@@ -58,8 +67,9 @@ function lsofSocketName(name: string): string {
 export function parseSocketHolders(
   lsofOutput: string,
   socketPath: string,
+  platform: NodeJS.Platform = process.platform,
 ): number[] {
-  const target = canonicalSocketPath(socketPath);
+  const target = canonicalSocketPath(socketPath, platform);
   const pids = new Set<number>();
   let pid: number | null = null;
   for (const line of lsofOutput.split("\n")) {
@@ -69,7 +79,8 @@ export function parseSocketHolders(
     } else if (
       line.startsWith("n") &&
       pid !== null &&
-      canonicalSocketPath(lsofSocketName(line.slice(1))) === target
+      canonicalSocketPath(lsofSocketName(line.slice(1), platform), platform) ===
+        target
     ) {
       pids.add(pid);
     }
@@ -109,11 +120,12 @@ const runLsof: LsofRunner = async (args) => {
 export async function findOrphanedTmuxServer(
   message: string,
   run: LsofRunner = runLsof,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<number | null> {
   const socketPath = missingSocketPath(message);
   if (!socketPath) return null;
   const out = await run(["-U", "-a", "-c", "tmux", "-F", "pn"]);
   if (out === null) return null;
-  const holders = parseSocketHolders(out, socketPath);
+  const holders = parseSocketHolders(out, socketPath, platform);
   return holders.length === 1 ? holders[0]! : null;
 }

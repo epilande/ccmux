@@ -57,20 +57,42 @@ describe("missingSocketPath", () => {
 describe("parseSocketHolders", () => {
   it("returns the server once, not once per fd, and never the client", () => {
     expect(
-      parseSocketHolders(LSOF_ORPHANED, "/private/tmp/tmux-501/default"),
+      parseSocketHolders(
+        LSOF_ORPHANED,
+        "/private/tmp/tmux-501/default",
+        "darwin",
+      ),
     ).toEqual([19086]);
   });
 
   it("matches across macOS's /private spelling in either direction", () => {
-    expect(parseSocketHolders(LSOF_ORPHANED, "/tmp/tmux-501/default")).toEqual(
-      [19086],
-    );
+    expect(
+      parseSocketHolders(LSOF_ORPHANED, "/tmp/tmux-501/default", "darwin"),
+    ).toEqual([19086]);
     expect(
       parseSocketHolders(
         "p7\nf3\nn/tmp/tmux-501/work\n",
         "/private/tmp/tmux-501/work",
+        "darwin",
       ),
     ).toEqual([7]);
+  });
+
+  it("keeps /private on Linux, where it is a different directory", () => {
+    expect(
+      parseSocketHolders(
+        "p7\nn/private/tmp/tmux-1000/default type=STREAM\n",
+        "/tmp/tmux-1000/default",
+        "linux",
+      ),
+    ).toEqual([]);
+    expect(
+      parseSocketHolders(
+        "p7\nn/tmp/tmux-1000/default type=STREAM\n",
+        "/private/tmp/tmux-1000/default",
+        "linux",
+      ),
+    ).toEqual([]);
   });
 
   it("reads the path out of Linux's `<path> type=STREAM` name", () => {
@@ -78,8 +100,25 @@ describe("parseSocketHolders", () => {
       parseSocketHolders(
         LSOF_ORPHANED_LINUX,
         "/tmp/ccv.RKcNR9/tt/tmux-1000/ccv",
+        "linux",
       ),
     ).toEqual([1524666]);
+  });
+
+  it("strips only the type Linux lsof appends, not a ` type=` in the path", () => {
+    const lsof = "p7\nn/tmp/review.sock type=backup type=STREAM\n";
+    expect(parseSocketHolders(lsof, "/tmp/review.sock", "linux")).toEqual([]);
+    expect(
+      parseSocketHolders(lsof, "/tmp/review.sock type=backup", "linux"),
+    ).toEqual([7]);
+  });
+
+  it("keeps a macOS name exactly as printed, ` type=` and all", () => {
+    const lsof = "p7\nf3\nn/tmp/review.sock type=backup\n";
+    expect(parseSocketHolders(lsof, "/tmp/review.sock", "darwin")).toEqual([]);
+    expect(
+      parseSocketHolders(lsof, "/tmp/review.sock type=backup", "darwin"),
+    ).toEqual([7]);
   });
 
   it("does not match a Linux socket that only shares a prefix", () => {
@@ -87,19 +126,20 @@ describe("parseSocketHolders", () => {
       parseSocketHolders(
         LSOF_ORPHANED_LINUX,
         "/tmp/ccv.RKcNR9/tt/tmux-1000/cc",
+        "linux",
       ),
     ).toEqual([]);
   });
 
   it("does not match a different socket in the same directory", () => {
-    expect(parseSocketHolders(LSOF_ORPHANED, "/tmp/tmux-501/work")).toEqual(
-      [],
-    );
+    expect(
+      parseSocketHolders(LSOF_ORPHANED, "/tmp/tmux-501/work", "darwin"),
+    ).toEqual([]);
   });
 
   it("does not strip /private from paths outside tmp and var", () => {
     expect(
-      parseSocketHolders("p7\nf3\nn/private/etc/sock\n", "/etc/sock"),
+      parseSocketHolders("p7\nf3\nn/private/etc/sock\n", "/etc/sock", "darwin"),
     ).toEqual([]);
   });
 });
