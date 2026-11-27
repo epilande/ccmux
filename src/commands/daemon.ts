@@ -4,6 +4,7 @@ import {
   startDaemon,
   stopDaemon,
   stopDaemonByPort,
+  stopForRestart,
   isDaemonRunning,
   isDaemonRunningAsync,
   getDaemonPid,
@@ -73,6 +74,7 @@ async function printTmuxServer(): Promise<void> {
       socketPath: string | null;
       socketError?: TmuxSocketError | null;
       build?: unknown;
+      orphanedBuild?: unknown;
     }>(response, "server info");
     if (info.socketPath) {
       console.log(`tmux socket: ${info.socketPath}`);
@@ -85,7 +87,14 @@ async function printTmuxServer(): Promise<void> {
       const hint = error ? socketRecoveryHint(error) : null;
       if (hint) console.log(`  ${hint.reason}\n    ${hint.command}`);
     }
-    printBuild(info.build);
+    for (const line of buildStatusLines(
+      info.build,
+      info.orphanedBuild,
+      BUILD_IDENTITY,
+      IS_TRANSIENT_SOURCE_RUN,
+    )) {
+      console.log(line);
+    }
   } catch {
     // The health line below already covers an unreachable daemon.
   }
@@ -94,38 +103,53 @@ async function printTmuxServer(): Promise<void> {
 /**
  * The daemon's build next to this CLI's, and the verdict the auto-start path
  * would reach (`classifyDaemonBuild`). A daemon predating the field prints
- * as `none`, which is outdated by definition.
+ * as `none`, which is outdated by definition. One whose binary was removed
+ * publishes no build either, but names the one it withheld
+ * (`orphanedBuild`), which is printed instead.
  */
-function printBuild(daemonBuild: unknown): void {
+export function buildStatusLines(
+  daemonBuild: unknown,
+  orphanedBuild: unknown,
+  cli: BuildIdentity,
+  transientSourceRun: boolean,
+): string[] {
   const daemon = parseBuildIdentity(daemonBuild);
-  const cli = BUILD_IDENTITY;
+  const orphan = daemon ? null : parseBuildIdentity(orphanedBuild);
   const describe = (b: BuildIdentity) =>
     `${b.version} ${b.artifact}${b.stamp ? ` (${b.stamp})` : ""}`;
-  console.log(
-    `Daemon build: ${daemon ? describe(daemon) : "none (predates build identity)"}`,
-  );
-  console.log(`CLI build: ${describe(cli)}`);
+  const lines = [
+    `Daemon build: ${
+      daemon
+        ? describe(daemon)
+        : orphan
+          ? `${describe(orphan)}, binary removed`
+          : "none (predates build identity)"
+    }`,
+    `CLI build: ${describe(cli)}`,
+  ];
   const verdict = classifyDaemonBuild(daemonBuild, cli);
   if (verdict === "current") {
-    console.log("Build: current");
+    lines.push("Build: current");
   } else if (verdict === "foreign") {
     const reason =
       daemon && daemon.version !== cli.version
         ? `daemon ${daemon.version} is newer than this CLI ${cli.version}`
         : `same version ${cli.version}, different install`;
-    console.log(
+    lines.push(
       `Build: foreign (${reason}); left alone, run ccmux daemon restart to switch`,
     );
   } else {
-    const head = `Build: OUTDATED (daemon ${daemon?.version ?? "unknown"}, cli ${cli.version}); `;
-    console.log(
-      IS_TRANSIENT_SOURCE_RUN
+    const version = daemon?.version ?? orphan?.version ?? "unknown";
+    const head = `Build: OUTDATED (daemon ${version}, cli ${cli.version}); `;
+    lines.push(
+      transientSourceRun
         ? head +
             "deferred, this CLI runs from source beside a built bundle; " +
             "the next launch from the bundle replaces it, or run ccmux daemon restart"
         : head + "replaced automatically when idle, or run ccmux daemon restart",
     );
   }
+  return lines;
 }
 
 export function createDaemonCommand(): Command {
@@ -219,7 +243,17 @@ export function createDaemonCommand(): Command {
         if (!isRunningPid && isRunningHealth) {
           console.log("(Detected orphaned daemon via health check)");
         }
-        await stopDaemonByPort();
+        // A daemon still serving after the stop would make the spawn below
+        // a second daemon that dies on bind. Refuse, and leave its pid file
+        // for `daemon stop`, which goes by it.
+        if ((await stopForRestart()) === "still-running") {
+          console.error(
+            `Could not stop the daemon: the process listening on port ${DAEMON_PORT} ` +
+              "could not be found (needs `lsof` or `ss` on PATH), or it is not " +
+              "a ccmux daemon. Run `ccmux daemon stop`, then `ccmux daemon start`.",
+          );
+          process.exit(1);
+        }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 

@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import {
   getPreferences,
   setPreferences,
+  VALID_COLUMN_HEADER_MODES,
   VALID_GROUP_BY,
   VALID_PROMPT_DISPLAYS,
   VALID_REVIEW_HANDBACK,
@@ -79,6 +80,12 @@ export const KNOWN_KEYS: Record<
     parse: (v) => v,
     description: `Prompt display mode (${VALID_PROMPT_DISPLAYS.join(", ")}; default inline)`,
     choices: VALID_PROMPT_DISPLAYS,
+  },
+  columnHeader: {
+    validate: (v) => (VALID_COLUMN_HEADER_MODES as readonly string[]).includes(v),
+    parse: (v) => v,
+    description: `Column-header line above the picker list (${VALID_COLUMN_HEADER_MODES.join(", ")}; default auto = every grouping)`,
+    choices: VALID_COLUMN_HEADER_MODES,
   },
   promptLines: {
     validate: (v) => isPromptLines(v),
@@ -187,6 +194,7 @@ export function completableConfigKeys(): string[] {
   return [
     ...Object.keys(KNOWN_KEYS),
     "ageFade.after",
+    "headerFacts.pr",
     "sidebar.width",
     "sidebar.position",
     "sidebar.promptLines",
@@ -342,6 +350,15 @@ export function createConfigCommand(): Command {
         return;
       }
 
+      if (key === "headerFacts.pr") {
+        if (value !== "true" && value !== "false") {
+          console.error("headerFacts.pr must be true or false");
+          process.exit(1);
+        }
+        await setPreferences({ headerFacts: { pr: value === "true" } });
+        console.log(`${key} = ${value}`);
+        return;
+      }
       if (key === "ageFade.after") {
         const after = Number(value);
         if (!value.trim() || !Number.isFinite(after) || after < 0) {

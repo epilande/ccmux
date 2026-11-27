@@ -1,3 +1,8 @@
+import { useStatusIcon } from "../utils/useStatusIcon";
+import { GroupHeader } from "./GroupHeader";
+import type { ViewMemory } from "../actions";
+import type { PanelEffects } from "./WorktreesPanel";
+import { useRenderer } from "@opentui/solid";
 import type { Component } from "solid-js";
 import {
   For,
@@ -6,92 +11,113 @@ import {
   createMemo,
   createSignal,
   onMount,
+  on,
+  onCleanup,
 } from "solid-js";
 import { useKeyboard } from "@opentui/solid";
-import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
+import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { IssueListResponse } from "../../daemon/issue-list";
 import type { PRListResponse } from "../../daemon/pr-list";
 import type { WorktreeListResponse } from "../../daemon/worktree-list";
 import { describeHttpFailure } from "../../daemon/worktree-prune";
 import { getDaemonUrl } from "../../lib/config";
 import type { IconStyle } from "../../lib/icons";
-import { theme } from "../theme";
-import { truncateText } from "../utils/format";
+import { getStatusColor } from "./StatusBadge";
+import { DIMMED_OPACITY, theme } from "../theme";
+import { padStartWidth, truncateText } from "../utils/format";
 import { fetchOpenIssues, fetchOpenPRs } from "../utils/source-lists";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
-import { useStatusIcon } from "../utils/useStatusIcon";
-import { fitHints } from "./Footer";
+import { FOOTER_BAR_ROWS, FooterBar, HintLine, SEARCH_HINTS } from "./Footer";
 import { isPRRowKey } from "./pr-rows";
+import { oneLine, scrollTargetFor, type VisualLayout } from "./row-segments";
 import {
-  fitSegments,
-  scrollTargetFor,
-  type RowSegment,
-  type VisualLayout,
-} from "./row-segments";
-import {
-  ISSUES_SECTION,
-  PRS_SECTION,
   buildSourceRepos,
   checkedOutPathFor,
   emptyStateText,
   filterRepos,
+  fitSourceCellWidths,
+  fitSourceLabel,
+  fitSourceRow,
   hasRows,
   isIssueRowKey,
   pickerRows,
-  sectionText,
-  sourceDetailPhrases,
+  sourceCellWidths,
+  sourceCheckoutSuffix,
+  sourceLabelMin,
+  sourceRowCells,
   sourceRowDim,
   sourceRowLabel,
   sourceRowMarker,
   type SourceRepo,
   type SourceRow,
+  type SourceRowCells,
 } from "./source-picker-rows";
 import { Text } from "./Text";
+import { SourcePreview } from "./SourcePreview";
 
-/**
- * The source picker (issue #151): one filterable list of a repo's open pull
- * requests and open issues, whose only verb is Enter.
- *
- * It is the SOURCE SELECTOR for a spawn, in the daemon's own vocabulary
- * (`gh-spawn-source.ts`). Pick a row and the existing new-session dialog
- * opens in the matching mode to cut a worktree and start an agent in it; pick
- * one already checked out and it jumps to the checkout instead. It is not a
- * survey — that is the Worktrees panel's PR view — and it renders nothing
- * that view does not already know how to render.
- *
- * Both sources share ONE list rather than two tabs, and the filter is why:
- * typing `notif` should reach a PR and an issue at once, because a user
- * remembers the words and not whether the thing they remember was filed as
- * one or the other. A tab boundary would answer a question nobody asked, and
- * a match on the far side of it would read as "nothing matches".
- *
- * The surface opens in NAV mode and `/` starts the filter, rather than being
- * permanently in search mode. That is a deliberate reversal of the first
- * design: one key means one thing on every surface here, so `j`/`k` move and
- * `q` closes exactly as they do in the panel and the picker.
- *
- * The filter row follows the session picker's search row exactly, down to
- * Esc: it is DRAWN only while filtering, and leaving clears what was typed
- * (`exitSearchMode` in `store.ts`). Those two halves are one decision. A row
- * that hid while the query stayed applied would leave a list narrowed to
- * three of forty with nothing on screen saying why.
- */
+/** Start is one filterable list across PRs and issues. Enter starts work or
+ * opens the checkout already holding the source. `/` gives the input the
+ * keyboard; Esc clears it before returning to navigation. */
 
 /** Independent of the list read, so a slow GitHub cannot hold up the local
  *  worktrees that mark a row as already checked out. */
 const LIST_TIMEOUT_MS = 20_000;
+/** Content columns below which a row's author is left out of its middle. */
+const AUTHOR_MIN_WIDTH = 96;
+export function sourceAge(
+  createdAt: string | null | undefined,
+  now = Date.now(),
+): string {
+  if (!createdAt) return "";
+  const ms = now - Date.parse(createdAt);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const days = Math.max(0, Math.floor(ms / 86_400_000));
+  return days ? `${days}d` : `${Math.max(0, Math.floor(ms / 3_600_000))}h`;
+}
 
 /** How the two GitHub reads are announced while they are in flight. */
 type LoadPhase = "loading" | "list" | "error";
 
 export interface SourcePickerOrigin {
   /** The Worktrees panel this was opened from, so Esc can reopen it. */
-  panelRepo: string | null;
   panelScope: string | null;
   panelCursor: string;
 }
 
 export interface SourcePickerProps {
+  activeSessionId?: string | null;
+  effects: PanelEffects;
+  memory?: ViewMemory;
+  onRemember?: (memory: ViewMemory) => void;
+  embedded?: boolean;
+  /** A dialog opened from this view sits over it: the view stays, dimmed,
+   *  so it is still the view the user is in. */
+  dimmed?: boolean;
+  /** The preview beside the list, as App's `P` and `Alt+H/L` set it. Never
+   *  drawn in the sidebar's compact overlay. */
+  showPreview?: boolean;
+  previewWidth?: number;
+  /** App owns focus (`Tab`) and its scroll keys; this only colors the
+   *  frame and hands App the scrollbox to scroll. */
+  previewFocused?: boolean;
+  onPreviewScrollbox?: (ref: ScrollBoxRenderable) => void;
+  enabled?: boolean;
+  onNavigate?: (event: KeyEvent, repo: string | null) => boolean;
+  onScope?: (repo: string | null) => void;
+  /** Shared App scope; standalone overlays may manage scope locally. */
+  scope?: string | null;
+  onRefresh?: () => void;
+  onNew?: (cwd: string) => void;
+  onRestart?: (id: string) => void;
+  onKill?: (ids: string[]) => void;
+  onReview?: (target: {
+    path: string;
+    sessionId: string | null;
+    branch: boolean;
+    cursor: string;
+    filter: string;
+  }) => void;
+
   /** Main checkout to scope to; null lists every known repo. */
   repo: string | null;
   /** The caller's directory, additive to `repo`, exactly as on `/worktrees`. */
@@ -129,16 +155,18 @@ export interface SourcePickerProps {
   }) => void;
 }
 
-/** Columns before a row's content: a space, the marker, a space. */
-const ROW_GUTTER = 3;
 /** Columns the scrollbox keeps for its scrollbar. */
 const SCROLLBAR_GUTTER = 1;
-/** The separator between detail phrases, muted so the facts carry the line. */
-const PHRASE_SEPARATOR = " · ";
+/** Columns a row spends before its label: the active bar, the index and its
+ *  space, and the status glyph and its space. */
+const ROW_PREFIX = 5;
+/** The column between the list and the preview's border, so a row's
+ *  right-aligned age cell does not touch it. */
+const PREVIEW_GAP = 1;
 
-/** How tall a row draws: one line, plus a detail line when it has one. */
-export function sourceRowHeight(row: SourceRow, compact = false): number {
-  return 1 + (sourceDetailPhrases(row, { compact }).length > 0 ? 1 : 0);
+/** One row in both overlays and the persistent Start view. */
+export function sourceRowHeight(_row: SourceRow, _compact = false): number {
+  return 1;
 }
 
 /**
@@ -158,9 +186,11 @@ export function sourcePickerLayout(
   const layout: VisualLayout = new Map();
   let line = 0;
   for (const repo of repos) {
-    if (opts.repoHeaders) line += 1;
+    if (opts.repoHeaders) {
+      layout.set(`repo:${repo.repoRoot}`, { line, height: 1 });
+      line += 1;
+    }
     for (const section of [repo.prs, repo.issues]) {
-      line += 1; // the section header
       for (const row of section) {
         const height = heightOf(row);
         layout.set(row.key, { line, height });
@@ -171,13 +201,31 @@ export function sourcePickerLayout(
   return layout;
 }
 
-/** Repo headers are drawn only where there is more than one repo to name. */
+/** Even a single repository retains its group header. */
 export function showsRepoHeaders(repos: SourceRepo[]): boolean {
-  return repos.length > 1;
+  return repos.length > 0;
+}
+
+/** The preview keys that carry no text, so the filter can pass them on. */
+function isPreviewKey(event: KeyEvent): boolean {
+  const key = event.name;
+  if (event.ctrl) return key === "d" || key === "u";
+  if (event.meta) return key === "h" || key === "l";
+  return key === "tab";
 }
 
 export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const dims = useSharedTerminalDimensions();
+  const renderer = useRenderer();
+  const [scope, setScope] = createSignal(
+    props.scope !== undefined ? props.scope : props.repo,
+  );
+  const [marks, setMarks] = createSignal(new Set<string>(props.memory?.marks));
+  const [collapsed, setCollapsed] = createSignal(
+    new Set<string>(props.memory?.collapsed),
+  );
+  let pendingG = false;
+  let pendingZ = false;
 
   const [phase, setPhase] = createSignal<LoadPhase>("loading");
   const [prs, setPrs] = createSignal<PRListResponse | null>(null);
@@ -188,7 +236,9 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     null,
   );
   const [error, setError] = createSignal<string | null>(null);
-  const [filter, setFilter] = createSignal(props.initialFilter ?? "");
+  const [filter, setFilter] = createSignal(
+    props.initialFilter ?? props.memory?.filter ?? "",
+  );
   /**
    * Whether the filter input has the keyboard. `/` enters, Esc leaves.
    *
@@ -197,10 +247,10 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
    * from a cancelled dialog restores the state the pick was made from.
    */
   const [filtering, setFiltering] = createSignal(
-    (props.initialFilter ?? "") !== "",
+    (props.initialFilter ?? props.memory?.filter ?? "") !== "",
   );
   const [cursorKey, setCursorKey] = createSignal<string | null>(
-    props.initialCursor ?? null,
+    props.initialCursor ?? props.memory?.cursor ?? null,
   );
   /**
    * Whether the user has typed into the filter. Releases the cursor hold
@@ -212,19 +262,44 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const [filterEdited, setFilterEdited] = createSignal(false);
   const [note, setNote] = createSignal<string | null>(null);
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
+  createEffect(() =>
+    props.onRemember?.({
+      scope: scope(),
+      cursor: cursorKey(),
+      marks: [...marks()],
+      collapsed: [...collapsed()],
+      filter: filter(),
+    }),
+  );
   let listBox: ScrollBoxRenderable | undefined;
   let loadGeneration = 0;
+  onCleanup(() => {
+    loadGeneration++;
+  });
   let activating = false;
 
   const width = () => dims().width;
   /** The box less its border and padding. */
-  const contentWidth = () => Math.max(8, width() - 4);
+  const contentWidth = () => Math.max(8, width() - (props.embedded ? 2 : 4));
+  const previewShown = () => !!props.showPreview && !props.compact;
+  const previewWidth = () => props.previewWidth ?? 50;
+  /** What the list may spend beside the preview, by the session list's own
+   *  formula. The footer still spans the whole view (`contentWidth`). */
+  const listArea = () =>
+    previewShown()
+      ? Math.max(
+          8,
+          Math.floor((width() * (100 - previewWidth())) / 100) - PREVIEW_GAP,
+        )
+      : contentWidth();
   /** Inside the scrollbox, which keeps a column for its bar. */
-  const listWidth = () => Math.max(4, contentWidth() - SCROLLBAR_GUTTER);
+  const listWidth = () => Math.max(4, listArea() - SCROLLBAR_GUTTER);
+  /** Bumped by `R`, so the preview re-reads past its caches too. */
+  const [detailRefresh, setDetailRefresh] = createSignal(0);
 
   function worktreesUrl(): URL {
     const listUrl = new URL(`${getDaemonUrl()}/worktrees`);
-    if (props.repo) listUrl.searchParams.set("repo", props.repo);
+    if (scope()) listUrl.searchParams.set("repo", scope()!);
     if (props.cwd) listUrl.searchParams.set("cwd", props.cwd);
     return listUrl;
   }
@@ -265,7 +340,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       });
 
     const query = {
-      repo: props.repo,
+      repo: scope(),
       cwd: props.cwd,
       refresh: opts.refresh,
     };
@@ -291,6 +366,24 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
 
   onMount(() => load());
 
+  function rescope(next: string | null) {
+    if (next === scope()) return;
+    setScope(next);
+    setMarks(new Set<string>());
+    setWorktrees(null);
+    load();
+  }
+  // Same-view W/N keeps this component mounted. Only external scope is a
+  // dependency: cursor, fetched rows and local s changes must not re-fetch.
+  createEffect(
+    on(
+      () => props.scope,
+      (next) => {
+        if (next !== undefined) rescope(next);
+      },
+    ),
+  );
+
   /** Every repo in scope, with each source's rows and state. */
   const repos = createMemo(() =>
     buildSourceRepos({
@@ -299,7 +392,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       issues: issues(),
       issueError: issueError(),
       worktrees: worktrees(),
-      home: props.repo,
+      home: scope(),
     }),
   );
 
@@ -315,7 +408,56 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   const visible = createMemo(() =>
     worktrees() === null ? [] : filterRepos(repos(), filter()),
   );
-  const rows = createMemo(() => pickerRows(visible()));
+  const rows = createMemo(() =>
+    pickerRows(visible().filter((r) => !collapsed().has(r.repoRoot))),
+  );
+  const navKeys = createMemo(() =>
+    visible()
+      .filter((r) => r.prs.length + r.issues.length > 0)
+      .flatMap((r) => [
+        `repo:${r.repoRoot}`,
+        ...(collapsed().has(r.repoRoot)
+          ? []
+          : [...r.prs, ...r.issues].map((row) => row.key)),
+      ]),
+  );
+  const headerRepo = () =>
+    visible().find((r) => `repo:${r.repoRoot}` === cursorKey());
+  const currentRepo = () =>
+    headerRepo()?.repoRoot ?? cursorRow()?.repoRoot ?? scope();
+  /**
+   * `zm` and `-`: fold every repo, and bring the cursor out with its own.
+   * A row's key outlives its group folding, and the re-seed effect has no
+   * rows left to re-seed from, so without this the cursor would name a
+   * hidden row: nothing highlighted, and every key acting on it unseen.
+   * Measured BEFORE the fold, while the row still says which repo it is in.
+   */
+  function collapseAll(): void {
+    const repo = headerRepo()?.repoRoot ?? cursorRow()?.repoRoot ?? null;
+    setCollapsed(new Set(visible().map((r) => r.repoRoot)));
+    const keys = navKeys();
+    const own = repo === null ? undefined : `repo:${repo}`;
+    setCursorKey(own && keys.includes(own) ? own : (keys[0] ?? null));
+  }
+  function toggleGroup(root: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(root)) next.delete(root);
+      else next.add(root);
+      return next;
+    });
+  }
+  function mark(keys: string[]) {
+    setMarks((prev) => {
+      const next = new Set(prev);
+      const remove = keys.every((k) => next.has(k));
+      for (const k of keys) {
+        if (remove) next.delete(k);
+        else next.add(k);
+      }
+      return next;
+    });
+  }
   const repoHeaders = createMemo(() => showsRepoHeaders(visible()));
 
   const cursorIndex = createMemo(() => {
@@ -342,7 +484,7 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
 
   /** The row a key acts on, or null while held — the no-row path Enter has. */
   const cursorRow = createMemo(() =>
-    cursorHeld() ? null : (rows()[cursorIndex()] ?? null),
+    cursorHeld() || headerRepo() ? null : (rows()[cursorIndex()] ?? null),
   );
 
   /**
@@ -374,7 +516,8 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     const live = rows();
     if (live.length === 0) return;
     const key = cursorKey();
-    if (key !== null && live.some((row) => row.key === key)) return;
+    if (key !== null && (headerRepo() || live.some((row) => row.key === key)))
+      return;
     // "Not delivered YET" is not "gone": the three reads land independently,
     // so a seeded key can be absent for reasons the filter had no part in.
     // Clobbering it is unrecoverable — the cursor then names a row that DOES
@@ -388,7 +531,11 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
 
   const layout = createMemo(() =>
     sourcePickerLayout(
-      visible(),
+      visible()
+        .filter((r) => r.prs.length + r.issues.length > 0)
+        .map((r) =>
+          collapsed().has(r.repoRoot) ? { ...r, prs: [], issues: [] } : r,
+        ),
       (row) => sourceRowHeight(row, props.compact === true),
       { repoHeaders: repoHeaders() },
     ),
@@ -423,13 +570,14 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   });
 
   function moveCursor(delta: number): void {
-    const live = rows();
-    if (live.length === 0) return;
-    // A held cursor sits BEFORE the list (`cursorIndex` says 0 for a key it
-    // cannot find), so the first movement lands on row one, not row two.
-    const base = cursorHeld() ? -1 : cursorIndex();
-    const next = Math.min(Math.max(base + delta, 0), live.length - 1);
-    setCursorKey(live[next]!.key);
+    const live = navKeys();
+    if (!live.length) return;
+    if (cursorHeld()) {
+      setCursorKey(rows()[0]?.key ?? null);
+      return;
+    }
+    const base = live.indexOf(cursorKey() ?? "");
+    setCursorKey(live[Math.min(Math.max(base + delta, 0), live.length - 1)]!);
   }
 
   /**
@@ -508,7 +656,11 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   }
 
   useKeyboard((event: KeyEvent) => {
+    if (props.enabled === false || event.defaultPrevented) return;
     const key = event.name;
+    const armedZ = pendingZ;
+    pendingZ = false;
+    if (key !== "g") pendingG = false;
 
     // FILTER mode. The input owns every text key, so only the keys handled
     // here may be preventDefault'd — a handler that defaults everything, the
@@ -544,6 +696,13 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         event.preventDefault();
         return;
       }
+      // The preview keys that are not text: `Tab` focuses the preview and
+      // `Ctrl+D/U` and `Alt+H/L` scroll and size it, so a filtered result can
+      // be read without leaving the filter. The query stays, and typing
+      // resumes where it was once focus comes back. `P` is a letter here,
+      // and so is every other key App's view keys would take.
+      if (isPreviewKey(event) && props.onNavigate?.(event, currentRepo()))
+        return;
       // Everything else falls through to the input, untouched.
       return;
     }
@@ -551,6 +710,17 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
     // NAV mode: one key, one meaning, the same as every other list here.
     event.preventDefault();
     setNote(null);
+    if (props.onNavigate?.(event, currentRepo())) return;
+    if (armedZ) {
+      if (key === "m") {
+        collapseAll();
+        return;
+      }
+      if (key === "r") {
+        setCollapsed(new Set<string>());
+        return;
+      }
+    }
     switch (key) {
       case "j":
       case "down":
@@ -562,6 +732,13 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
         break;
       case "n":
         if (event.ctrl) moveCursor(1);
+        else
+          props.onNew?.(
+            cursorRow()?.checkedOutPath ??
+              currentRepo() ??
+              props.cwd ??
+              process.cwd(),
+          );
         break;
       case "p":
         if (event.ctrl) moveCursor(-1);
@@ -573,31 +750,153 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       case "R":
         // An explicit refresh, which is the only thing that skips the
         // daemon's TTL: a PR merged a moment ago still reads open.
-        load({ refresh: true });
+        if (key === "R" || event.shift) {
+          props.onRefresh?.();
+          load({ refresh: true });
+          setDetailRefresh((n) => n + 1);
+        } else {
+          const path = cursorRow()?.checkedOutPath;
+          const session = worktrees()
+            ?.repos.flatMap((r) => r.worktrees)
+            .find((w) => w.path === path)?.sessions[0];
+          if (session) props.onRestart?.(session.id);
+        }
         break;
       case "return":
       case "enter": {
+        const header = headerRepo();
+        if (header) {
+          toggleGroup(header.repoRoot);
+          break;
+        }
         const row = cursorRow();
         if (row) activate(row);
         break;
       }
+      case "s": {
+        const next = scope() ? null : currentRepo();
+        rescope(next);
+        props.onScope?.(next);
+        break;
+      }
+      case "space":
+      case " ": {
+        const header = headerRepo();
+        const row = cursorRow();
+        if (header) mark([...header.prs, ...header.issues].map((r) => r.key));
+        else if (row) mark([row.key]);
+        break;
+      }
+      case "a":
+      case "A":
+        setMarks(
+          new Set(key === "A" || event.shift ? [] : rows().map((r) => r.key)),
+        );
+        break;
+      case "x":
+      case "X": {
+        const header = headerRepo();
+        const selected =
+          key === "X" || event.shift
+            ? rows()
+            : marks().size
+              ? pickerRows(visible()).filter((r) => marks().has(r.key))
+              : header
+                ? [...header.prs, ...header.issues]
+                : cursorRow()
+                  ? [cursorRow()!]
+                  : [];
+        const paths = new Set(
+          selected.map((r) => r.checkedOutPath).filter(Boolean),
+        );
+        const ids = [
+          ...new Set(
+            worktrees()
+              ?.repos.flatMap((r) => r.worktrees)
+              .filter((w) => paths.has(w.path))
+              .flatMap((w) => w.sessions.map((s) => s.id)) ?? [],
+          ),
+        ];
+        if (ids.length) props.onKill?.(ids);
+        else setNote("No attached sessions on the selected sources");
+        break;
+      }
+      case "d":
+      case "D": {
+        const row = cursorRow();
+        if (!row?.checkedOutPath) {
+          setNote("Check out this source before reviewing it");
+          break;
+        }
+        const checkout = worktrees()
+          ?.repos.flatMap((r) => r.worktrees)
+          .find((w) => w.path === row.checkedOutPath);
+        props.onReview?.({
+          path: row.checkedOutPath,
+          sessionId: checkout?.sessions[0]?.id ?? null,
+          branch: key === "D" || event.shift,
+          cursor: row.key,
+          filter: filter(),
+        });
+        break;
+      }
+      case "y":
+      case "o": {
+        const row = cursorRow();
+        if (row) {
+          const url = row.kind === "pr" ? row.pr.url : row.issue.url;
+          if (key === "o")
+            setNote(
+              props.effects.openUrl(url)
+                ? `opened ${url}`
+                : "no browser opener here",
+            );
+          else {
+            const copied = props.effects.copyText(url, renderer);
+            setNote(
+              copied.osc52 || copied.local
+                ? `copied ${url}`
+                : "copy needs OSC 52 or pbcopy",
+            );
+          }
+        }
+        break;
+      }
+      case "g":
+      case "G":
+        if (key === "G" || event.shift) setCursorKey(navKeys().at(-1) ?? null);
+        else if (pendingG) {
+          setCursorKey(navKeys()[0] ?? null);
+          pendingG = false;
+        } else pendingG = true;
+        break;
+      case "z":
+        pendingZ = true;
+        break;
+      case "-":
+        collapseAll();
+        break;
+      case "=":
+        setCollapsed(new Set<string>());
+        break;
       case "q":
       case "escape":
         close();
         break;
       default:
+        if (/^[1-9]$/.test(key)) {
+          const row = rows()[Number(key) - 1];
+          if (row) {
+            setCursorKey(row.key);
+            void activate(row);
+          }
+        }
         break;
     }
   });
 
-  const spinner = useStatusIcon(
-    () => (phase() === "loading" ? "working" : "idle"),
-    () => null,
-    () => props.iconStyle ?? "dot",
-  );
-
   const title = createMemo(() => {
-    const scoped = props.repo;
+    const scoped = scope();
     const name = scoped ? scoped.split("/").filter(Boolean).pop() : null;
     return truncateText(
       name ? `Start work · ${name}` : "Start work",
@@ -615,93 +914,148 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
       : emptyStateText(visible(), filter()),
   );
 
-  const hints = createMemo(() =>
-    fitHints(
-      filtering()
-        ? [
-            { text: "enter start", rank: 3 },
-            { text: "ctrl-n/p move", rank: 2 },
-            // "cancel", not "done": Esc drops the query, the same word the
-            // session picker's footer uses for the same key.
-            { text: "esc cancel", rank: 3 },
-          ]
-        : [
-            { text: "/ filter", rank: 3 },
-            { text: "enter start", rank: 3 },
-            { text: "j/k move", rank: 1 },
-            { text: "r refresh", rank: 1 },
-            { text: "q close", rank: 2 },
-          ],
-      contentWidth(),
+  /** Embedded and not the key owner: App's footer shows through instead. */
+  const footerYielded = () => !!props.embedded && props.enabled === false;
+  const footerLine = () => (
+    <Show
+      when={!filtering()}
+      fallback={
+        <Text fg={theme.subtext}>
+          {truncateText(SEARCH_HINTS, contentWidth())}
+        </Text>
+      }
+    >
+      <HintLine
+        view="start"
+        width={contentWidth()}
+        sidebar={props.compact}
+        note={note() ?? sourceNotice() ?? undefined}
+        noteColor={note() ? theme.yellow : theme.subtext}
+      />
+    </Show>
+  );
+  /** One width per fixed right cell across every visible row, minus the
+   *  cells the title cannot spare at this width. */
+  const cellWidths = createMemo(() =>
+    fitSourceCellWidths(
+      sourceCellWidths(
+        rows().map((row) =>
+          sourceRowCells(
+            row,
+            sourceAge(
+              row.kind === "pr" ? row.pr.createdAt : row.issue.createdAt,
+            ),
+            false,
+          ),
+        ),
+      ),
+      listWidth() - ROW_PREFIX,
+      rows().reduce((n, row) => Math.max(n, sourceLabelMin(row)), 0),
     ),
   );
-
-  /** One row's bright line: the marker, then the label. */
-  const primarySegments = (row: SourceRow, isCursor: boolean): RowSegment[] => {
-    const fg = isCursor
-      ? theme.text
-      : sourceRowDim(row)
-        ? theme.subtext
-        : theme.text;
-    return fitSegments(
-      [
-        { text: " ", fg: theme.overlay },
-        {
-          text: sourceRowMarker(row),
-          fg: isCursor ? theme.mauve : theme.overlay,
-        },
-        { text: " ", fg: theme.overlay },
-        { text: sourceRowLabel(row), fg },
-      ],
-      listWidth(),
-    );
+  const fixedCellsWidth = () => {
+    const { ci, review, age } = cellWidths();
+    return [ci, review, age].reduce((n, w) => n + (w ? w + 1 : 0), 0);
   };
-
-  /** Its dim line, indented under the label. */
-  const detailSegments = (row: SourceRow): RowSegment[] => {
-    const phrases = sourceDetailPhrases(row, {
-      compact: props.compact === true,
-    });
-    if (phrases.length === 0) return [];
-    const segments: RowSegment[] = [
-      { text: " ".repeat(ROW_GUTTER + 1), fg: theme.overlay },
-    ];
-    phrases.forEach((phrase, index) => {
-      if (index > 0) {
-        segments.push({ text: PHRASE_SEPARATOR, fg: theme.overlay });
-      }
-      segments.push({ text: phrase.text, fg: phrase.fg });
-    });
-    return fitSegments(segments, listWidth());
+  /** A row's fixed cells at the list's widths, blank where it has none. */
+  const fixedCells = (cells: SourceRowCells) => {
+    const { ci, review, age } = cellWidths();
+    return [
+      {
+        width: ci,
+        text: cells.ci?.text ?? "",
+        fg: cells.ci?.fg ?? theme.overlay,
+      },
+      {
+        width: review,
+        text: cells.review?.text ?? "",
+        fg: cells.review?.fg ?? theme.overlay,
+      },
+      { width: age, text: cells.age, fg: theme.overlay },
+    ].filter((cell) => cell.width > 0);
   };
-
+  const sourceNotice = () =>
+    prError() ??
+    issueError() ??
+    prs()?.errors[0]?.error ??
+    issues()?.errors[0]?.error ??
+    (prs() === null || issues() === null ? "Checking GitHub…" : null);
   const renderRow = (row: SourceRow) => {
-    const isCursor = createMemo(() => cursorKey() === row.key);
-    const detail = createMemo(() => detailSegments(row));
+    const isCursor = () => cursorKey() === row.key;
+    const index = () => rows().findIndex((r) => r.key === row.key) + 1;
+    const source = () => (row.kind === "pr" ? row.pr : row.issue);
+    const cells = createMemo(() =>
+      sourceRowCells(
+        row,
+        sourceAge(source().createdAt),
+        listWidth() >= AUTHOR_MIN_WIDTH,
+      ),
+    );
+    // CI, review and age are fixed cells sized for the list, like the
+    // session list's right-side columns; labels, branch and author are the
+    // flexible middle and yield first (`fitSourceRow`), before the title.
+    const fitted = createMemo(() => {
+      const title = `${sourceRowMarker(row)} ${oneLine(sourceRowLabel(row))}`;
+      const fit = fitSourceRow(
+        title + sourceCheckoutSuffix(row),
+        cells().middle,
+        Math.max(1, listWidth() - ROW_PREFIX - fixedCellsWidth()),
+      );
+      return {
+        label: fitSourceLabel(row, title, fit.titleRoom),
+        middle: fit.middle,
+      };
+    });
+    const sessions = () =>
+      worktrees()
+        ?.repos.flatMap((r) => r.worktrees)
+        .find((w) => w.path === row.checkedOutPath)?.sessions ?? [];
+    const status = () =>
+      sessions().some((s) => s.status === "waiting")
+        ? "waiting"
+        : sessions().some((s) => s.status === "working")
+          ? "working"
+          : "idle";
+    // The session list's icon for the same status, in the user's style.
+    const icon = useStatusIcon(
+      status,
+      () => null,
+      () => props.iconStyle,
+    );
+    const glyph = () => (sessions().length ? icon() || " " : " ");
     return (
-      <box flexDirection="column">
-        <box
-          height={1}
-          width="100%"
-          flexDirection="row"
-          backgroundColor={isCursor() ? theme.surface : undefined}
-        >
-          <For each={primarySegments(row, isCursor())}>
-            {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
-          </For>
-        </box>
-        <Show when={detail().length > 0}>
-          <box
-            height={1}
-            width="100%"
-            flexDirection="row"
-            backgroundColor={isCursor() ? theme.surface : undefined}
-          >
-            <For each={detail()}>
-              {(segment) => <Text fg={segment.fg}>{segment.text}</Text>}
-            </For>
-          </box>
-        </Show>
+      <box
+        height={1}
+        width="100%"
+        flexDirection="row"
+        backgroundColor={isCursor() ? theme.surface : undefined}
+        onMouseDown={() => {
+          // Behind a dialog the row under the cursor is the one the dialog
+          // returns to: a stray click must not move it.
+          if (props.enabled !== false) setCursorKey(row.key);
+        }}
+      >
+        <Text fg={theme.mauve}>
+          {sessions().some((s) => s.id === props.activeSessionId) ? "▎" : " "}
+        </Text>
+        <Text
+          fg={theme.overlay}
+        >{`${marks().has(row.key) ? "✓" : index() <= 9 ? index() : " "} `}</Text>
+        <Text fg={getStatusColor(status(), null)}>{glyph()} </Text>
+        <Text fg={sourceRowDim(row) ? theme.subtext : theme.text}>
+          {fitted().label}
+        </Text>
+        <box flexGrow={1} />
+        <For each={fitted().middle}>
+          {(phrase) => <Text fg={phrase.fg}>{phrase.text}</Text>}
+        </For>
+        <For each={fixedCells(cells())}>
+          {(cell) => (
+            <Text
+              fg={cell.fg}
+            >{` ${padStartWidth(cell.text, cell.width)}`}</Text>
+          )}
+        </For>
       </box>
     );
   };
@@ -709,127 +1063,197 @@ export const SourcePicker: Component<SourcePickerProps> = (props) => {
   return (
     <box
       position="absolute"
-      top={0}
+      top={props.embedded ? 1 : 0}
       left={0}
       width="100%"
-      height="100%"
+      height={
+        props.embedded
+          ? dims().height - 1 - (footerYielded() ? FOOTER_BAR_ROWS : 0)
+          : "100%"
+      }
       backgroundColor={theme.base}
-      borderStyle="single"
-      borderColor={theme.border}
+      border={props.embedded ? false : true}
+      borderColor={props.embedded ? undefined : theme.border}
       flexDirection="column"
-      paddingLeft={1}
-      paddingRight={1}
+      paddingLeft={0}
+      // Embedded, the footer bar runs edge to edge like the session list's,
+      // so the list's right margin moves onto the rows above it.
+      paddingRight={props.embedded ? 0 : 1}
     >
-      <box width="100%" height={1} flexDirection="row">
-        <Text fg={theme.text} attributes={1}>
-          {title()}
-        </Text>
-      </box>
-
-      {/* Drawn only while filtering, in the session picker's own shape: the
-          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
-          The footer's `/ filter` hint is what teaches the key, which is how
-          the session picker teaches it too. */}
-      <Show when={filtering()}>
-        <box width="100%" height={1} flexDirection="row">
-          <Text fg={theme.overlay} width={2}>
-            {"/ "}
-          </Text>
-          <input
-            value={filter()}
-            onInput={(value: string) => {
-              // 0.1.97 emits `input` for programmatic assignments too, the
-              // seed at mount included, so only a changed value is the user.
-              if (value !== filter()) setFilterEdited(true);
-              setFilter(value);
-            }}
-            focused
-            placeholder="Filter pull requests and issues..."
-            placeholderColor={theme.overlay}
-            textColor={theme.text}
-            focusedTextColor={theme.text}
-            cursorColor={theme.blue}
-            backgroundColor="transparent"
-            focusedBackgroundColor="transparent"
-            width="100%"
-          />
-        </box>
-      </Show>
-
-      <box flexGrow={1} flexDirection="column">
-        <Show when={phase() === "error"}>
-          <box paddingTop={1} flexDirection="column">
-            <Text fg={theme.red}>
-              {truncateText(error() ?? "", contentWidth())}
+      {/* Dimmed INSIDE the root, whose opaque base is what keeps the session
+          list underneath from showing through. */}
+      <box
+        flexGrow={1}
+        flexDirection="column"
+        opacity={props.dimmed ? DIMMED_OPACITY : 1}
+      >
+        <Show when={!props.embedded}>
+          <box width="100%" height={1} flexDirection="row">
+            <Text fg={theme.text} attributes={1}>
+              {title()}
             </Text>
-            <Text fg={theme.overlay}>r retry · q close</Text>
           </box>
         </Show>
 
-        <Show when={phase() !== "error"}>
-          <Show
-            when={hasRows(visible())}
-            fallback={
-              <box paddingTop={1}>
-                <Text fg={emptyState().fg}>
-                  {truncateText(emptyState().text, contentWidth())}
-                </Text>
-              </box>
-            }
+        {/* Drawn only while filtering, in the session picker's own shape: the
+          `/ ` prefix, a placeholder, and no line at all until `/` is pressed.
+          The footer's `/ filter` hint is what teaches the key, which is how
+          the session picker teaches it too. */}
+        <Show when={filtering()}>
+          <box
+            width="100%"
+            height={1}
+            flexDirection="row"
+            paddingRight={props.embedded ? 1 : 0}
           >
-            <scrollbox
-              flexGrow={1}
-              ref={(r: ScrollBoxRenderable) => {
-                listBox = r;
-                const bump = () => setScrollboxLayout((v) => v + 1);
-                r.viewport.on("resize", bump);
-                r.content.on("resize", bump);
+            <Text fg={theme.overlay} width={2}>
+              {"/ "}
+            </Text>
+            <input
+              value={filter()}
+              onInput={(value: string) => {
+                // 0.1.97 emits `input` for programmatic assignments too, the
+                // seed at mount included, so only a changed value is the user.
+                if (value !== filter()) setFilterEdited(true);
+                setFilter(value);
               }}
-            >
-              <For each={visible()}>
-                {(repo) => (
-                  <box flexDirection="column">
-                    <Show when={repoHeaders()}>
-                      <box height={1} width="100%">
-                        <Text fg={theme.mauve} attributes={1}>
-                          {truncateText(repo.repoName, listWidth())}
-                        </Text>
-                      </box>
-                    </Show>
-                    <box height={1} width="100%">
-                      <Text fg={theme.overlay}>
-                        {truncateText(
-                          sectionText(PRS_SECTION, repo.prSection, spinner()),
-                          listWidth(),
-                        )}
+              // Not while a dialog owns the keys: Enter in the filter opens one
+              // with the filter still up, and two focused inputs would both
+              // take the keystrokes.
+              focused={props.enabled !== false}
+              // `focused` only applies on change, and OpenTUI focuses what a
+              // left click lands on: behind a dialog, a click here would move
+              // the dialog's typing into this hidden filter.
+              onMouseDown={(event: MouseEvent) => {
+                if (props.enabled === false) event.preventDefault();
+              }}
+              placeholder="Filter pull requests and issues..."
+              placeholderColor={theme.overlay}
+              textColor={theme.text}
+              focusedTextColor={theme.text}
+              cursorColor={theme.blue}
+              backgroundColor="transparent"
+              focusedBackgroundColor="transparent"
+              width="100%"
+            />
+          </box>
+        </Show>
+
+        <box
+          flexGrow={1}
+          flexDirection="column"
+          paddingRight={props.embedded && !previewShown() ? 1 : 0}
+        >
+          <Show when={phase() === "error"}>
+            <box paddingTop={1} flexDirection="column">
+              <Text fg={theme.red}>
+                {truncateText(error() ?? "", listArea())}
+              </Text>
+              <Text fg={theme.subtext}>R retry · q back</Text>
+            </box>
+          </Show>
+
+          <Show when={phase() !== "error"}>
+            {/* The preview sits OUTSIDE the rows' gate: `R` empties the lists
+                while they reload, and a preview inside it would unmount,
+                taking its loader, cache and pending refresh with it. */}
+            <box flexDirection="row" flexGrow={1}>
+              <box flexDirection="column" flexGrow={1}>
+                <Show
+                  when={hasRows(visible())}
+                  fallback={
+                    <box paddingTop={1}>
+                      <Text fg={emptyState().fg}>
+                        {truncateText(emptyState().text, listArea())}
                       </Text>
                     </box>
-                    <For each={repo.prs}>{renderRow}</For>
-                    <box height={1} width="100%">
-                      <Text fg={theme.overlay}>
-                        {truncateText(
-                          sectionText(
-                            ISSUES_SECTION,
-                            repo.issueSection,
-                            spinner(),
-                          ),
-                          listWidth(),
-                        )}
-                      </Text>
-                    </box>
-                    <For each={repo.issues}>{renderRow}</For>
-                  </box>
-                )}
-              </For>
-            </scrollbox>
+                  }
+                >
+                  <scrollbox
+                    flexGrow={1}
+                    paddingRight={previewShown() ? PREVIEW_GAP : 0}
+                    ref={(r: ScrollBoxRenderable) => {
+                      listBox = r;
+                      const bump = () => setScrollboxLayout((v) => v + 1);
+                      r.viewport.on("resize", bump);
+                      r.content.on("resize", bump);
+                    }}
+                  >
+                    <For
+                      each={visible().filter(
+                        (r) => r.prs.length + r.issues.length > 0,
+                      )}
+                    >
+                      {(repo) => (
+                        <box flexDirection="column">
+                          <GroupHeader
+                            label={repo.repoName}
+                            count={repo.prs.length + repo.issues.length}
+                            width={listWidth()}
+                            // Rows here have no right padding, so neither does
+                            // the header: its rule ends where they do.
+                            flushRight
+                            collapsed={collapsed().has(repo.repoRoot)}
+                            selected={headerRepo()?.repoRoot === repo.repoRoot}
+                            members={[]}
+                            onActivate={() => {
+                              if (props.enabled === false) return;
+                              setCursorKey(`repo:${repo.repoRoot}`);
+                              toggleGroup(repo.repoRoot);
+                            }}
+                          />
+                          <Show when={!collapsed().has(repo.repoRoot)}>
+                            <For each={[...repo.prs, ...repo.issues]}>
+                              {renderRow}
+                            </For>
+                          </Show>
+                        </box>
+                      )}
+                    </For>
+                  </scrollbox>
+                </Show>
+              </box>
+              <Show when={previewShown()}>
+                <SourcePreview
+                  row={cursorRow()}
+                  age={(() => {
+                    const row = cursorRow();
+                    return row
+                      ? sourceAge(
+                          (row.kind === "pr" ? row.pr : row.issue).createdAt,
+                        )
+                      : "";
+                  })()}
+                  width={previewWidth()}
+                  focused={props.previewFocused}
+                  onScrollboxRef={(ref) => props.onPreviewScrollbox?.(ref)}
+                  refreshKey={detailRefresh()}
+                />
+              </Show>
+            </box>
+          </Show>
+        </box>
+
+        {/* The session list's footer, built from the same registry: same
+          order, same verbs, the same pinned four. While the filter owns the
+          keys it teaches the session search's keys instead. A note (a flash,
+          a source still loading or failing) leads the hints, never
+          displacing the pinned four. */}
+        <Show
+          when={props.embedded}
+          fallback={
+            <box width="100%" height={1} flexDirection="row">
+              {footerLine()}
+            </box>
+          }
+        >
+          {/* While a dialog, help or a confirmation owns the keys, the bar's
+            rows go back to App's footer, which shows THAT surface's keys;
+            the view ends two rows higher, so its list keeps its height. */}
+          <Show when={!footerYielded()}>
+            <FooterBar>{footerLine()}</FooterBar>
           </Show>
         </Show>
-      </box>
-
-      <box width="100%" height={1} flexDirection="row">
-        <Text fg={note() ? theme.yellow : theme.overlay}>
-          {truncateText(note() ?? hints(), contentWidth())}
-        </Text>
       </box>
     </box>
   );

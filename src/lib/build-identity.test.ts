@@ -4,6 +4,7 @@ import {
   mkdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   utimesSync,
 } from "fs";
@@ -15,8 +16,11 @@ import {
   classifyDaemonBuild,
   compareSemver,
   computeBuildIdentity,
+  executedFile,
   isTransientSourceRun,
+  ownPublishedBuild,
   parseBuildIdentity,
+  publishBuild,
   type BuildIdentity,
 } from "./build-identity";
 
@@ -342,5 +346,75 @@ describe("isTransientSourceRun", () => {
 
   it("IS_TRANSIENT_SOURCE_RUN is a boolean computed at import", () => {
     expect(typeof IS_TRANSIENT_SOURCE_RUN).toBe("boolean");
+  });
+});
+
+describe("executedFile", () => {
+  it("compiled binary: the binary's realpath, through a symlink", () => {
+    const bin = file(join(dir, "Cellar", "1.5.0", "ccmux"), "binary!", 1);
+    const link = join(dir, "ccmux");
+    symlinkSync(bin, link);
+    expect(
+      executedFile({
+        execPath: link,
+        argv1: "/$bunfs/root/ccmux",
+        version: "1.5.0",
+      }),
+    ).toBe(bin);
+  });
+
+  it("bun <script>: the script itself, not the checkout root the artifact names", () => {
+    const dist = file(join(dir, "dist", "index.js"), "bundled", 1);
+    const inputs = {
+      execPath: "/usr/local/bin/bun",
+      argv1: "dist/index.js",
+      cwd: dir,
+      version: "1.5.0",
+    };
+    expect(executedFile(inputs)).toBe(dist);
+    expect(computeBuildIdentity(inputs).artifact).toBe(dir);
+  });
+});
+
+describe("publishBuild", () => {
+  const identity: BuildIdentity = {
+    version: "1.5.0-rc.1",
+    artifact: "/opt/homebrew/Cellar/ccmux-rc/1.5.0-rc.1/bin/ccmux",
+    stamp: "7:1700000000000",
+  };
+
+  it("publishes the identity while the executed file is there", () => {
+    const bin = file(join(dir, "ccmux"), "binary!", 1);
+    expect(publishBuild(identity, bin)).toEqual({ build: identity });
+  });
+
+  it("publishes no build once the executed file is gone, and keeps it aside", () => {
+    expect(publishBuild(identity, join(dir, "uninstalled"))).toEqual({
+      build: null,
+      orphanedBuild: identity,
+    });
+  });
+
+  it("an orphaned newer daemon reads as outdated to an older CLI", () => {
+    // The downgrade: `brew uninstall ccmux-rc` leaves the 1.5 daemon running.
+    // With its identity published, a 1.4.8 CLI keeps it as foreign (newer);
+    // with none, every shipped CLI replaces it.
+    const older: BuildIdentity = {
+      version: "1.4.8",
+      artifact: "/opt/homebrew/Cellar/ccmux/1.4.8/bin/ccmux",
+      stamp: "5:1690000000000",
+    };
+    expect(classifyDaemonBuild(identity, older)).toBe("foreign");
+    const { build } = publishBuild(identity, join(dir, "uninstalled"));
+    expect(classifyDaemonBuild(build, older)).toBe("outdated");
+  });
+
+  it("publishes the identity when the executed file was never known", () => {
+    // Identity computation failed at import: nothing says the file is gone.
+    expect(publishBuild(identity, "")).toEqual({ build: identity });
+  });
+
+  it("this process publishes its own identity: its file exists", () => {
+    expect(ownPublishedBuild()).toEqual({ build: BUILD_IDENTITY });
   });
 });

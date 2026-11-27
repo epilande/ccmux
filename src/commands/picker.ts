@@ -75,8 +75,10 @@ export function createPickerCommand(): Command {
         await settleDaemon(daemonProbe, reconcileDeps);
         markStartup("daemon_ready");
 
+        // Undefined when nobody chose: the store then opens the preview on a
+        // terminal at least PREVIEW_AUTO_MIN_WIDTH columns wide.
         const showPreview =
-          options.preview ?? uiState.showPreview ?? prefs.showPreview ?? false;
+          options.preview ?? uiState.showPreview ?? prefs.showPreview;
         const iconStyle =
           (options.icons as IconStyle) ?? prefs.iconStyle ?? "dot";
         // State file takes precedence over prefs for previewWidth
@@ -102,6 +104,7 @@ export function createPickerCommand(): Command {
           promptLines: prefs.promptLines,
           breakpoints: prefs.breakpoints,
           ageFadeAfter: prefs.ageFade?.after,
+          columnHeader: prefs.columnHeader,
           attentionBand: prefs.attentionBand,
           searchPaneContent: prefs.searchPaneContent,
           searchPaneLines: prefs.searchPaneLines,
@@ -109,6 +112,8 @@ export function createPickerCommand(): Command {
           groupBy: uiState.groupBy ?? prefs.groupBy,
           collapsedGroups: uiState.collapsedGroups,
           pinnedGroups: uiState.pinnedGroups,
+          groupAliases: uiState.groupAliases,
+          groupLayouts: uiState.groupLayouts,
           hideIdle: uiState.hideIdle,
           promptDisplay: resolvePromptDisplay(uiState, prefs.promptDisplay),
           persistent,

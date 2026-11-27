@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import {
-  getGroupKey,
+  groupKeyOf,
   getGroupLabel,
   computeStatusSummary,
   buildFlatItems,
@@ -10,6 +10,12 @@ import {
   scrollTarget,
   sortGroups,
   groupSessions,
+  normalizeGroupAliases,
+  normalizeGroupLayouts,
+  resolveGroupName,
+  sanitizeGroupName,
+  GROUP_NAME_MAX_WIDTH,
+  NEEDS_YOU_GROUP_KEY,
   type FilteredSession,
   type GroupEntry,
 } from "./grouping";
@@ -33,15 +39,15 @@ function toFiltered(session: EnrichedSession): FilteredSession {
   return { session, highlights: null, paneMatch: false };
 }
 
-describe("getGroupKey", () => {
+describe("groupKeyOf", () => {
   it("groups by project name", () => {
     const session = mockSession({ project: "my-app" });
-    expect(getGroupKey(session, "project")).toBe("my-app");
+    expect(groupKeyOf(session, "project", {})).toBe("my-app");
   });
 
   it("falls back to cwd for project grouping when project is empty", () => {
     const session = mockSession({ project: "", cwd: "/some/path" });
-    expect(getGroupKey(session, "project")).toBe("/some/path");
+    expect(groupKeyOf(session, "project", {})).toBe("/some/path");
   });
 
   it("groups by cwd using paneCwd", () => {
@@ -49,37 +55,37 @@ describe("getGroupKey", () => {
       cwd: "/original",
       paneCwd: "/current/path",
     });
-    expect(getGroupKey(session, "cwd")).toBe("/current/path");
+    expect(groupKeyOf(session, "cwd", {})).toBe("/current/path");
   });
 
   it("falls back to cwd when paneCwd is null", () => {
     const session = mockSession({ cwd: "/original", paneCwd: null });
-    expect(getGroupKey(session, "cwd")).toBe("/original");
+    expect(groupKeyOf(session, "cwd", {})).toBe("/original");
   });
 
   it("groups by tmux session name", () => {
     const session = mockSession({ tmuxTarget: "my-session:2.0" });
-    expect(getGroupKey(session, "session")).toBe("my-session");
+    expect(groupKeyOf(session, "session", {})).toBe("my-session");
   });
 
   it("groups by tmux window", () => {
     const session = mockSession({ tmuxTarget: "my-session:2.0" });
-    expect(getGroupKey(session, "window")).toBe("my-session:2");
+    expect(groupKeyOf(session, "window", {})).toBe("my-session:2");
   });
 
   it("handles missing tmuxTarget for session", () => {
     const session = mockSession({ tmuxTarget: null });
-    expect(getGroupKey(session, "session")).toBe("(no tmux)");
+    expect(groupKeyOf(session, "session", {})).toBe("(no tmux)");
   });
 
   it("handles missing tmuxTarget for window", () => {
     const session = mockSession({ tmuxTarget: null });
-    expect(getGroupKey(session, "window")).toBe("(no tmux)");
+    expect(groupKeyOf(session, "window", {})).toBe("(no tmux)");
   });
 
   it("returns empty string for none", () => {
     const session = mockSession();
-    expect(getGroupKey(session, "none")).toBe("");
+    expect(groupKeyOf(session, "none", {})).toBe("");
   });
 
   it("groups background (paneless) sessions under (background) for session/window", () => {
@@ -88,8 +94,8 @@ describe("getGroupKey", () => {
       tmuxPane: null,
       tmuxTarget: null,
     });
-    expect(getGroupKey(session, "session")).toBe("(background)");
-    expect(getGroupKey(session, "window")).toBe("(background)");
+    expect(groupKeyOf(session, "session", {})).toBe("(background)");
+    expect(groupKeyOf(session, "window", {})).toBe("(background)");
   });
 
   it("co-locates background sessions by project/cwd under those modes", () => {
@@ -101,8 +107,8 @@ describe("getGroupKey", () => {
       cwd: "/home/user/repos",
       paneCwd: null,
     });
-    expect(getGroupKey(session, "project")).toBe("repos");
-    expect(getGroupKey(session, "cwd")).toBe("/home/user/repos");
+    expect(groupKeyOf(session, "project", {})).toBe("repos");
+    expect(groupKeyOf(session, "cwd", {})).toBe("/home/user/repos");
   });
 });
 
@@ -149,7 +155,7 @@ describe("groupSessions", () => {
       toFiltered(mockSession({ id: "b", project: "beta" })),
       toFiltered(mockSession({ id: "c", project: "alpha" })),
     ];
-    const groups = groupSessions(filtered, "project");
+    const groups = groupSessions(filtered, "project", {});
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === "alpha")?.members).toHaveLength(2);
     expect(groups.find((g) => g.key === "beta")?.members).toHaveLength(1);
@@ -161,14 +167,14 @@ describe("groupSessions", () => {
       toFiltered(mockSession({ id: "b1", project: "beta" })),
       toFiltered(mockSession({ id: "a2", project: "alpha" })),
     ];
-    const groups = groupSessions(filtered, "project");
+    const groups = groupSessions(filtered, "project", {});
     const alpha = groups.find((g) => g.key === "alpha")!;
     expect(alpha.members[0].session.id).toBe("a1");
     expect(alpha.members[1].session.id).toBe("a2");
   });
 
   it("returns empty array for empty input", () => {
-    expect(groupSessions([], "project")).toEqual([]);
+    expect(groupSessions([], "project", {})).toEqual([]);
   });
 
   it("groups by session", () => {
@@ -177,7 +183,7 @@ describe("groupSessions", () => {
       toFiltered(mockSession({ id: "b", tmuxTarget: "dev:1.0" })),
       toFiltered(mockSession({ id: "c", tmuxTarget: "work:0.0" })),
     ];
-    const groups = groupSessions(filtered, "session");
+    const groups = groupSessions(filtered, "session", {});
     expect(groups).toHaveLength(2);
     expect(groups.find((g) => g.key === "dev")?.members).toHaveLength(2);
     expect(groups.find((g) => g.key === "work")?.members).toHaveLength(1);
@@ -525,7 +531,7 @@ describe("toVisualLine", () => {
     expect(toVisualLine(items, 2)).toBe(4);
   });
 
-  it("counts first header as 1 line, subsequent headers as 2", () => {
+  it("counts every header as 1 line (the header draws its own rule)", () => {
     const items = buildFlatItems(
       [
         toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -537,12 +543,12 @@ describe("toVisualLine", () => {
       false,
     );
     // items: [header(alpha), session(a), session(b), header(beta), session(c)]
-    // visual: 0(header), 1-2(a), 3-4(b), 5-6(header beta), 7-8(c)
-    expect(toVisualLine(items, 0)).toBe(0); // header(alpha) - first header, no divider
+    // visual: 0(header), 1-2(a), 3-4(b), 5(header beta), 6-7(c)
+    expect(toVisualLine(items, 0)).toBe(0); // header(alpha)
     expect(toVisualLine(items, 1)).toBe(1); // session(a) - 2 lines
     expect(toVisualLine(items, 2)).toBe(3); // session(b) - 2 lines
-    expect(toVisualLine(items, 3)).toBe(5); // header(beta) - has divider above
-    expect(toVisualLine(items, 4)).toBe(7); // session(c) - after 2-line header
+    expect(toVisualLine(items, 3)).toBe(5); // header(beta) - 1 line, no divider
+    expect(toVisualLine(items, 4)).toBe(6); // session(c)
   });
 
   it("handles collapsed groups correctly", () => {
@@ -557,10 +563,10 @@ describe("toVisualLine", () => {
       false,
     );
     // items: [header(alpha, collapsed), header(beta), session(c)]
-    // visual: 0(header), 1-2(header beta), 3-4(c)
+    // visual: 0(header), 1(header beta), 2-3(c)
     expect(toVisualLine(items, 0)).toBe(0); // header(alpha)
-    expect(toVisualLine(items, 1)).toBe(1); // header(beta) - has divider
-    expect(toVisualLine(items, 2)).toBe(3); // session(c) - 2 lines
+    expect(toVisualLine(items, 1)).toBe(1); // header(beta)
+    expect(toVisualLine(items, 2)).toBe(2); // session(c) - 2 lines
   });
 
   it("accumulates offset across three or more groups", () => {
@@ -575,13 +581,13 @@ describe("toVisualLine", () => {
       false,
     );
     // items: [header(alpha), session(a), header(beta), session(b), header(charlie), session(c)]
-    // visual: 0(header), 1-2(a), 3-4(header beta), 5-6(b), 7-8(header charlie), 9-10(c)
+    // visual: 0(header), 1-2(a), 3(header beta), 4-5(b), 6(header charlie), 7-8(c)
     expect(toVisualLine(items, 0)).toBe(0); // header(alpha)
     expect(toVisualLine(items, 1)).toBe(1); // session(a) - 2 lines
     expect(toVisualLine(items, 2)).toBe(3); // header(beta)
-    expect(toVisualLine(items, 3)).toBe(5); // session(b) - 2 lines
-    expect(toVisualLine(items, 4)).toBe(7); // header(charlie)
-    expect(toVisualLine(items, 5)).toBe(9); // session(c) - 2 lines
+    expect(toVisualLine(items, 3)).toBe(4); // session(b) - 2 lines
+    expect(toVisualLine(items, 4)).toBe(6); // header(charlie)
+    expect(toVisualLine(items, 5)).toBe(7); // session(c) - 2 lines
   });
 
   it("returns 0 for index 0", () => {
@@ -611,7 +617,7 @@ describe("itemVisualHeight", () => {
     expect(itemVisualHeight(items, 2)).toBe(2);
   });
 
-  it("returns 1 for first header (no divider)", () => {
+  it("returns 1 for the first header", () => {
     const items = buildFlatItems(
       [toFiltered(mockSession({ id: "a", project: "alpha" }))],
       "project",
@@ -621,7 +627,7 @@ describe("itemVisualHeight", () => {
     expect(itemVisualHeight(items, 0)).toBe(1);
   });
 
-  it("returns 2 for non-first headers (divider + header)", () => {
+  it("returns 1 for later headers too: the header is its own rule", () => {
     const items = buildFlatItems(
       [
         toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -633,7 +639,7 @@ describe("itemVisualHeight", () => {
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
     expect(itemVisualHeight(items, 0)).toBe(1); // first header
-    expect(itemVisualHeight(items, 2)).toBe(2); // second header
+    expect(itemVisualHeight(items, 2)).toBe(1); // second header
   });
 });
 
@@ -643,8 +649,8 @@ describe("scrollTarget", () => {
   //   0: header(alpha) [1 line]
   //   1-2: session(a) [2 lines]
   //   3-4: session(b) [2 lines]
-  //   5-6: header(beta) [2 lines: divider + header]
-  //   7-8: session(c) [2 lines]
+  //   5: header(beta) [1 line]
+  //   6-7: session(c) [2 lines]
   const items = buildFlatItems(
     [
       toFiltered(mockSession({ id: "a", project: "alpha" })),
@@ -667,22 +673,20 @@ describe("scrollTarget", () => {
   });
 
   it("scrolls down for a session below viewport", () => {
-    // viewport shows lines 0-2, selecting session(c) at visual line 7
-    // lastLine = 7 + 2 - 1 = 8, scrollTop = 8 - 3 + 1 = 6
-    expect(scrollTarget(items, 4, 0, 3)).toBe(6);
+    // viewport shows lines 0-2, selecting session(c) at visual line 6
+    // lastLine = 6 + 2 - 1 = 7, scrollTop = 7 - 3 + 1 = 5
+    expect(scrollTarget(items, 4, 0, 3)).toBe(5);
   });
 
-  it("scrolls down to show full header including divider", () => {
-    // viewport shows lines 0-5, selecting header(beta) at visual line 5
-    // header(beta) has divider at line 5 and header at line 6 (lastLine = 6)
-    // scrollTop = 6 - 6 + 1 = 1
-    expect(scrollTarget(items, 3, 0, 6)).toBe(1);
+  it("scrolls down to a header just past the viewport", () => {
+    // viewport shows lines 0-4, selecting header(beta) at visual line 5
+    // scrollTop = 5 - 5 + 1 = 1
+    expect(scrollTarget(items, 3, 0, 5)).toBe(1);
   });
 
-  it("does not scroll when full header fits in viewport", () => {
-    // viewport shows lines 0-8, selecting header(beta)
-    // divider at 5, header at 6, both visible in viewport of height 9
-    expect(scrollTarget(items, 3, 0, 9)).toBeNull();
+  it("does not scroll when the header fits in viewport", () => {
+    // viewport shows lines 0-5, header(beta) sits on line 5
+    expect(scrollTarget(items, 3, 0, 6)).toBeNull();
   });
 });
 
@@ -744,7 +748,7 @@ describe("itemVisualHeight with lineCount", () => {
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
     expect(itemVisualHeight(items, 0, () => 1)).toBe(1); // first header
-    expect(itemVisualHeight(items, 2, () => 1)).toBe(2); // second header
+    expect(itemVisualHeight(items, 2, () => 1)).toBe(1); // second header
   });
 });
 
@@ -784,7 +788,7 @@ describe("toVisualLine with mixed session heights", () => {
     expect(toVisualLine(items, 2, lineCount)).toBe(3);
   });
 
-  it("accounts for header divider lines with 1-line sessions", () => {
+  it("counts headers as one line among 1-line sessions", () => {
     const items = buildFlatItems(
       [
         toFiltered(
@@ -797,12 +801,12 @@ describe("toVisualLine with mixed session heights", () => {
       false,
     );
     // items: [header(alpha), session(a), header(beta), session(b)]
-    // visual: 0(header), 1(a=1), 2-3(header beta), 4(b=1)
+    // visual: 0(header), 1(a=1), 2(header beta), 3(b=1)
     const lineCount = () => 1;
     expect(toVisualLine(items, 0, lineCount)).toBe(0);
     expect(toVisualLine(items, 1, lineCount)).toBe(1);
     expect(toVisualLine(items, 2, lineCount)).toBe(2);
-    expect(toVisualLine(items, 3, lineCount)).toBe(4);
+    expect(toVisualLine(items, 3, lineCount)).toBe(3);
   });
 });
 
@@ -1004,5 +1008,413 @@ describe("buildFlatItems with the attention band off", () => {
         i.type === "header" ? `# ${i.label}` : i.filteredSession.session.id,
       ),
     ).toEqual(["# alpha", "# beta", "c"]);
+  });
+});
+
+describe("buildFlatItems with waiting sessions the scope hides", () => {
+  const label = (i: ReturnType<typeof buildFlatItems>[number]) =>
+    i.type === "header"
+      ? `# ${i.label} (${i.count}) +${i.hiddenWaiting ?? 0}`
+      : i.filteredSession.session.id;
+
+  it("draws the band for hidden sessions alone, and closes it in a flat list", () => {
+    const rest = [toFiltered(mockSession({ id: "a", status: "idle" }))];
+    expect(
+      buildFlatItems(rest, "none", new Set(), false, [], true, 2).map(label),
+    ).toEqual(["# needs attention (0) +2", "# sessions (1) +0", "a"]);
+    expect(
+      buildFlatItems(rest, "project", new Set(), false, [], true, 2).map(label),
+    ).toEqual(["# needs attention (0) +2", "# my-project (1) +0", "a"]);
+  });
+
+  it("adds the count beside the band's own members", () => {
+    const items = buildFlatItems(
+      [toFiltered(mockSession({ id: "w", status: "waiting" }))],
+      "none",
+      new Set(),
+      false,
+      [],
+      true,
+      3,
+    );
+    expect(items.map(label)).toEqual(["# needs attention (1) +3", "w"]);
+  });
+
+  it("has no band to carry it when the band is off", () => {
+    const items = buildFlatItems(
+      [toFiltered(mockSession({ id: "a", status: "idle" }))],
+      "none",
+      new Set(),
+      false,
+      [],
+      false,
+      2,
+    );
+    expect(items.map(label)).toEqual(["a"]);
+  });
+});
+
+describe("group aliases", () => {
+  const headers = (items: ReturnType<typeof buildFlatItems>) =>
+    items.filter(
+      (i): i is Extract<(typeof items)[number], { type: "header" }> =>
+        i.type === "header",
+    );
+
+  it("folds an aliased raw key into its alias", () => {
+    const session = mockSession({ project: "px-api" });
+    expect(
+      groupKeyOf(session, "project", { project: { "px-api": "ProjectX" } }),
+    ).toBe("ProjectX");
+  });
+
+  it("namespaces aliases by groupBy mode", () => {
+    // The same string means a project in one mode and a tmux session in
+    // another; an alias for one never reaches the other.
+    const session = mockSession({ project: "dev", tmuxTarget: "dev:0.0" });
+    const aliases = { project: { dev: "Development" } };
+    expect(groupKeyOf(session, "project", aliases)).toBe("Development");
+    expect(groupKeyOf(session, "session", aliases)).toBe("dev");
+  });
+
+  it("is one hop: an alias's value is never itself looked up", () => {
+    const session = mockSession({ project: "a" });
+    expect(
+      groupKeyOf(session, "project", { project: { a: "b", b: "c" } }),
+    ).toBe("b");
+  });
+
+  it("never reads an inherited property as an alias", () => {
+    const session = mockSession({ project: "constructor" });
+    expect(groupKeyOf(session, "project", { project: {} })).toBe("constructor");
+  });
+
+  it("renames paneless buckets like any other raw key", () => {
+    const session = mockSession({ tmuxTarget: undefined, tmuxPane: undefined });
+    expect(
+      groupKeyOf(session, "session", { session: { "(no tmux)": "Loose" } }),
+    ).toBe("Loose");
+  });
+
+  it("merges groups renamed to the same name, carrying every raw key", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "px-web" })),
+      toFiltered(mockSession({ id: "b", project: "px-api" })),
+      toFiltered(mockSession({ id: "c", project: "other" })),
+      toFiltered(mockSession({ id: "d", project: "px-infra" })),
+    ];
+    const aliases = {
+      project: {
+        "px-api": "ProjectX",
+        "px-infra": "ProjectX",
+        "px-web": "ProjectX",
+      },
+    };
+    const groups = groupSessions(filtered, "project", aliases);
+    const merged = groups.find((g) => g.key === "ProjectX")!;
+    expect(merged.members.map((m) => m.session.id)).toEqual(["a", "b", "d"]);
+    expect(merged.rawKeys).toEqual(["px-api", "px-infra", "px-web"]);
+    expect(groups.find((g) => g.key === "other")!.rawKeys).toEqual(["other"]);
+  });
+
+  it("merges into an existing raw group without an alias of its own", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "alpha" })),
+      toFiltered(mockSession({ id: "b", project: "beta" })),
+    ];
+    const groups = groupSessions(filtered, "project", {
+      project: { beta: "alpha" },
+    });
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.key).toBe("alpha");
+    expect(groups[0]!.rawKeys).toEqual(["alpha", "beta"]);
+  });
+
+  it("sorts groups by their displayed names", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "apple" })),
+      toFiltered(mockSession({ id: "z", project: "zebra" })),
+    ];
+    const items = buildFlatItems(
+      filtered,
+      "project",
+      new Set(),
+      false,
+      [],
+      true,
+      0,
+      { project: { zebra: "Aardvark" } },
+    );
+    expect(headers(items).map((h) => h.label)).toEqual(["Aardvark", "apple"]);
+  });
+
+  it("puts rawKeys on headers and labels an aliased cwd key verbatim", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", paneCwd: "/home/user/work/api" })),
+      toFiltered(mockSession({ id: "b", paneCwd: "/home/user/work/web" })),
+    ];
+    const items = buildFlatItems(
+      filtered,
+      "cwd",
+      new Set(),
+      false,
+      [],
+      true,
+      0,
+      { cwd: { "/home/user/work/api": "API" } },
+    );
+    const api = headers(items).find((h) => h.groupKey === "API");
+    const web = headers(items).find(
+      (h) => h.groupKey === "/home/user/work/web",
+    );
+    expect(api!.label).toBe("API");
+    expect(api!.rawKeys).toEqual(["/home/user/work/api"]);
+    // An unaliased cwd key keeps the mode's formatting.
+    expect(web!.rawKeys).toEqual(["/home/user/work/web"]);
+    expect(web!.label).toBe(getGroupLabel("/home/user/work/web", "cwd"));
+  });
+
+  it("never home-shortens a typed name that looks like a path", () => {
+    const typed = `${process.env.HOME}/named`;
+    const items = buildFlatItems(
+      [toFiltered(mockSession({ id: "a", paneCwd: "/srv/api" }))],
+      "cwd",
+      new Set(),
+      false,
+      [],
+      true,
+      0,
+      { cwd: { "/srv/api": typed } },
+    );
+    expect(headers(items)[0]!.label).toBe(typed);
+  });
+
+  it("collapses and pins by the displayed name", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "a", project: "px-api" })),
+      toFiltered(mockSession({ id: "b", project: "px-web" })),
+      toFiltered(mockSession({ id: "c", project: "aaa" })),
+    ];
+    const aliases = { project: { "px-api": "ProjectX", "px-web": "ProjectX" } };
+    const items = buildFlatItems(
+      filtered,
+      "project",
+      new Set(["ProjectX"]),
+      false,
+      ["ProjectX"],
+      true,
+      0,
+      aliases,
+    );
+    expect(
+      items.map((i) =>
+        i.type === "header" ? i.label : i.filteredSession.session.id,
+      ),
+    ).toEqual(["ProjectX", "aaa", "c"]);
+    expect(headers(items)[0]!.collapsed).toBe(true);
+  });
+
+  it("gives synthetic headers no rawKeys", () => {
+    const filtered = [
+      toFiltered(mockSession({ id: "w", project: "a", status: "waiting" })),
+      toFiltered(mockSession({ id: "i", project: "a" })),
+    ];
+    const items = buildFlatItems(filtered, "project", new Set(), false);
+    const band = headers(items).find((h) => h.groupKey === NEEDS_YOU_GROUP_KEY);
+    expect(band?.rawKeys).toBeUndefined();
+  });
+});
+
+describe("sanitizeGroupName", () => {
+  it("trims the name", () => {
+    expect(sanitizeGroupName("  ProjectX  ")).toBe("ProjectX");
+  });
+
+  it("strips C0, DEL and C1 control characters", () => {
+    expect(sanitizeGroupName("Pro\0ject\x1b[31mX\x7f\x9b")).toBe(
+      "Project[31mX",
+    );
+  });
+
+  it("never yields a synthetic key", () => {
+    expect(sanitizeGroupName("\0needs-you")).toBe("needs-you");
+    expect(sanitizeGroupName("\0")).toBe("");
+  });
+
+  it("is empty for a blank or control-only name", () => {
+    expect(sanitizeGroupName("   ")).toBe("");
+    expect(sanitizeGroupName("\t\n")).toBe("");
+  });
+
+  it(`caps the name at ${GROUP_NAME_MAX_WIDTH} columns, not code units`, () => {
+    expect(sanitizeGroupName("x".repeat(100))).toBe(
+      "x".repeat(GROUP_NAME_MAX_WIDTH),
+    );
+    // A CJK glyph is two columns wide.
+    const wide = sanitizeGroupName("漢".repeat(40));
+    expect(wide).toBe("漢".repeat(GROUP_NAME_MAX_WIDTH / 2));
+  });
+
+  it("trims a space the cap leaves at the end", () => {
+    expect(sanitizeGroupName(`${"x".repeat(63)} y`)).toBe("x".repeat(63));
+  });
+});
+
+describe("normalizeGroupAliases", () => {
+  it("keeps string-to-string entries for known modes", () => {
+    expect(
+      normalizeGroupAliases({
+        project: { a: "A", b: 3, c: "" },
+        bogus: { x: "y" },
+        session: "nope",
+        cwd: { "/x": "X", "/y": "/y" },
+      }),
+    ).toEqual({ project: { a: "A" }, cwd: { "/x": "X" } });
+  });
+
+  it("drops names that sanitize to something else or to nothing", () => {
+    expect(
+      normalizeGroupAliases({ project: { a: "\0needs-you", b: " B " } }),
+    ).toEqual({
+      project: { a: "needs-you", b: "B" },
+    });
+  });
+
+  it("is empty for anything that is not an object", () => {
+    expect(normalizeGroupAliases(undefined)).toEqual({});
+    expect(normalizeGroupAliases(null)).toEqual({});
+    expect(normalizeGroupAliases([])).toEqual({});
+    expect(normalizeGroupAliases("x")).toEqual({});
+  });
+
+  it("keeps a raw key named __proto__ as data", () => {
+    const parsed = JSON.parse('{"project":{"__proto__":"Weird"}}');
+    const result = normalizeGroupAliases(parsed);
+    expect(Object.hasOwn(result.project!, "__proto__")).toBe(true);
+    expect(
+      groupKeyOf(mockSession({ project: "__proto__" }), "project", result),
+    ).toBe("Weird");
+  });
+});
+
+describe("resolveGroupName", () => {
+  const home = process.env.HOME ?? "/home/user";
+  const groups = (...keys: string[]) =>
+    groupSessions(
+      keys.map((k, i) => toFiltered(mockSession({ id: `s${i}`, paneCwd: k }))),
+      "cwd",
+      {},
+    );
+
+  it("resolves a displayed label to the group's key", () => {
+    const beta = `${home}/Code/beta`;
+    expect(
+      resolveGroupName(getGroupLabel(beta, "cwd"), groups(beta), "cwd"),
+    ).toBe(beta);
+  });
+
+  it("matches a key past the width cap before cutting it", () => {
+    const long = `/srv/${"nested-directory/".repeat(5)}beta`;
+    expect(resolveGroupName(` ${long} `, groups(long), "cwd")).toBe(long);
+    expect(resolveGroupName(long, groups(), "cwd")).toBe(
+      sanitizeGroupName(long),
+    );
+  });
+
+  it("prefers the group whose key is the name over one that only shows it", () => {
+    // `/srv/x` was already named after beta's shortened label (what this
+    // fix stops new renames from doing): the name's own group wins.
+    const beta = `${home}/Code/beta`;
+    const shown = getGroupLabel(beta, "cwd");
+    const twins = groupSessions(
+      [
+        toFiltered(mockSession({ id: "a", paneCwd: beta })),
+        toFiltered(mockSession({ id: "b", paneCwd: "/srv/x" })),
+      ],
+      "cwd",
+      { cwd: { "/srv/x": shown } },
+    );
+    expect(resolveGroupName(shown, twins, "cwd")).toBe(shown);
+  });
+
+  it("is empty for a blank name", () => {
+    expect(resolveGroupName("  \0 ", groups("/a"), "cwd")).toBe("");
+  });
+});
+
+describe("normalizeGroupAliases width", () => {
+  it("keeps a merge target past the name cap whole", () => {
+    const long = `/srv/${"nested-directory/".repeat(5)}beta`;
+    expect(normalizeGroupAliases({ cwd: { "/a": long } })).toEqual({
+      cwd: { "/a": long },
+    });
+  });
+});
+
+describe("normalizeGroupLayouts", () => {
+  it("keeps merge records for known modes, and their well-formed entries", () => {
+    expect(
+      normalizeGroupLayouts({
+        project: {
+          pins: ["a", "x", "b"],
+          merged: {
+            a: { collapsed: false },
+            b: { collapsed: true },
+            c: { collapsed: "yes" },
+            d: "nope",
+          },
+        },
+        // Nothing merged is left to record.
+        cwd: { pins: ["a"], merged: { a: { pin: 0 } } },
+        none: { pins: [], merged: { x: { collapsed: false } } },
+        bogus: { pins: [], merged: { y: { collapsed: false } } },
+      }),
+    ).toEqual({
+      project: {
+        pins: ["a", "x", "b"],
+        merged: { a: { collapsed: false }, b: { collapsed: true } },
+      },
+    });
+  });
+
+  it("drops a mode whose pins are not a list of keys", () => {
+    const merged = { a: { collapsed: false } };
+    expect(
+      normalizeGroupLayouts({
+        project: { pins: ["a", 7], merged },
+        session: { pins: "a", merged },
+        window: { merged },
+      }),
+    ).toEqual({});
+  });
+
+  it("drops the per-key maps earlier builds wrote", () => {
+    // An index alone, then neighbours by name, then by raw keys: none says
+    // where a pin goes, so the merge resets as an unrecorded one.
+    expect(
+      normalizeGroupLayouts({
+        project: { a: { pin: 0, collapsed: false } },
+        cwd: { s: { pin: 0, collapsed: false, order: ["s", "N", "t"] } },
+        session: {
+          b: { pin: 1, collapsed: true, order: [["x"], ["b"], ["y", "z"]] },
+        },
+      }),
+    ).toEqual({});
+  });
+
+  it("keeps a key spelled __proto__ as data", () => {
+    const { project } = normalizeGroupLayouts(
+      JSON.parse(
+        '{"project":{"pins":["__proto__"],"merged":{"__proto__":{"collapsed":true}}}}',
+      ),
+    );
+    expect(Object.hasOwn(project!.merged, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(project!.merged)).toBe(Object.prototype);
+    expect(project!.pins).toEqual(["__proto__"]);
+  });
+
+  it("is empty for anything that is not an object", () => {
+    expect(normalizeGroupLayouts(undefined)).toEqual({});
+    expect(normalizeGroupLayouts([])).toEqual({});
   });
 });

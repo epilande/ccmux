@@ -69,6 +69,7 @@ interface SessionItemProps {
   session: EnrichedSession;
   selected: boolean;
   index: number;
+  marked?: boolean;
   highlights?: SessionItemHighlights | null;
   /** Live transcript-search snippet, shown dim in the prompt cell to explain
    * why the row matched when no prompt highlight applies. */
@@ -315,6 +316,7 @@ export function prStateColor(
 interface FieldRenderContext {
   session: EnrichedSession;
   index: number;
+  marked?: boolean;
   iconStyle?: IconStyle;
   highlights?: SessionItemProps["highlights"];
   isActivePane?: boolean;
@@ -545,7 +547,7 @@ const FieldCell: Component<{
       return (
         <box width={width}>
           <Text fg={dimColor(ctx, theme.overlay)}>
-            {ctx.index < 9 ? `${ctx.index + 1}` : " "}
+            {ctx.marked ? "✓" : ctx.index < 9 ? `${ctx.index + 1}` : " "}
           </Text>
         </box>
       );
@@ -805,10 +807,20 @@ const FieldCell: Component<{
       // a state-less PR (background-agent PRs) keeps the neutral mauve.
       const color = () => prStateColor(prColorState(ctx.session) ?? "none");
       // Fixed-width cell so a flexible left side (the prompt) can never
-      // crush it out of the row.
+      // crush it out of the row. A list-sized column (`sizePrColumn`) keeps
+      // its width on every row, badge or not, and aligns like its neighbours.
+      const cellWidth = () => entry.width ?? label().length;
       return (
-        <box width={label().length} flexShrink={0}>
-          <Text fg={dimColor(ctx, color())}>{label()}</Text>
+        <box width={cellWidth()} flexShrink={0}>
+          <Text fg={dimColor(ctx, color())}>
+            {entry.width === undefined
+              ? label()
+              : alignText(
+                  truncateText(label(), entry.width),
+                  entry.width,
+                  side,
+                )}
+          </Text>
         </box>
       );
     }
@@ -1031,7 +1043,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     );
     const cells = siblings.reduce((acc, e) => {
       const w =
-        e.field === "pr"
+        e.field === "pr" && e.width === undefined
           ? prLabel(props.session, e.mode).length
           : entryRightWidth(e, props.iconStyle);
       return acc + (w > 0 ? w + 1 : 0); // +1 for the inter-cell gap
@@ -1048,7 +1060,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
       cells +
       (attn > 0 ? attn + 1 : 0) +
       promptFloor +
-      2 + // small margin so the truncated content sits inside its flex box
+      (props.sidebar ? 0 : 2) + // the narrow sidebar spends this margin on its index
       scrollbarReserve(); // scrollbox eats width the terminal size hides
     return Math.max(12, effectiveWidth() - reserved);
   });
@@ -1068,7 +1080,7 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
     );
     const cells = siblings.reduce((acc, e) => {
       const w =
-        e.field === "pr"
+        e.field === "pr" && e.width === undefined
           ? prLabel(props.session, e.mode).length
           : e.field === "project"
             ? projectCellWidth(
@@ -1132,6 +1144,9 @@ export const SessionItem: Component<SessionItemProps> = (props) => {
   const ctx: FieldRenderContext = {
     get session() {
       return props.session;
+    },
+    get marked() {
+      return props.marked;
     },
     get index() {
       return props.index;

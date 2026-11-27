@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockMouse } from "@opentui/core/testing";
 import { createSignal } from "solid-js";
-import { GroupPreview } from "./GroupPreview";
+import { RGBA } from "@opentui/core";
+import { TEXT_ROLES } from "../text-roles";
+import {
+  GroupPreview,
+  inventoryEntries,
+  repositoryLines,
+} from "./GroupPreview";
 import { TickContext } from "../store";
 import {
   mockEnrichedSession,
@@ -311,6 +317,232 @@ describe("GroupPreview scrollbar thumb", () => {
     setup.resize(40, 20);
     f = await frame();
     expect(expectContentSizedThumb(f.frame, f.box)).toBe(small);
+  });
+});
+
+describe("GroupPreview long paths", () => {
+  it("cuts a long path with an ellipsis instead of clipping it", async () => {
+    // 40% of 100 columns: the detail line has about 32 to draw in.
+    const frame = await renderGroupPreview(
+      {
+        label: "repo",
+        count: 1,
+        statusSummary: { ...emptySummary(), idle: 1 },
+      },
+      [
+        mockEnrichedSession({
+          id: "s1",
+          cwd: "/very/long/path/to/a/project/that/does/not/fit/the/preview",
+          gitBranch: "feature/branch",
+        }),
+      ],
+    );
+    const line = frame.split("\n").find((l) => l.includes("/very/long"))!;
+    expect(line).toContain("…");
+    expect(line).not.toContain("feature/branch");
+  });
+});
+
+describe("GroupPreview repository facts", () => {
+  const facts = {
+    repoRoot: "/code/ccmux",
+    repoName: "ccmux",
+    worktrees: {
+      value: {
+        repoRoot: "/code/ccmux",
+        repoName: "ccmux",
+        worktrees: [
+          { path: "/code/ccmux", branch: "main", isMain: true },
+          { path: "/code/wt/previews", branch: "feat/previews", isMain: false },
+          { path: "/code/wt/idle", branch: "chore/idle", isMain: false },
+        ],
+      },
+      updatedAt: 0,
+      stale: false,
+    },
+    counts: { value: { prs: 4, issues: 1 }, updatedAt: 0, stale: true },
+    branchPRs: {
+      "feat/previews": {
+        value: [
+          {
+            id: "206",
+            href: "https://github.com/o/r/pull/206",
+            ciStatus: "failing" as const,
+            reviewDecision: null,
+          },
+        ],
+        updatedAt: 0,
+        stale: false,
+      },
+    },
+  };
+  const sessions = [
+    mockEnrichedSession({
+      id: "s1",
+      worktreeRoot: "/code/wt/previews",
+      mainRepoRoot: "/code/ccmux",
+      isWorktree: true,
+      status: "waiting",
+    }),
+  ];
+
+  it("words the repo's facts, marking a stale answer", () => {
+    expect(repositoryLines(facts)).toEqual([
+      "main + 2 worktrees",
+      "4 open PRs · 1 open issue ~",
+    ]);
+    expect(repositoryLines(undefined)).toEqual([]);
+  });
+
+  it("lists every checkout, idle ones included, with its PR and sessions", () => {
+    const entries = inventoryEntries(facts, sessions);
+    expect(entries.map((e) => [e.name, e.branch, e.count])).toEqual([
+      ["⌂ main", "main", 0],
+      ["previews", "feat/previews", 1],
+      ["idle", "chore/idle", 0],
+    ]);
+    expect(entries[1]!.prs.map((p) => p.id)).toEqual(["206"]);
+    expect(inventoryEntries(facts, sessions, false)[1]!.prs).toEqual([]);
+  });
+
+  // Branch names are user data: one named after an Object.prototype member
+  // must read as "no PR yet" when the cache lacks it, and as its own entry
+  // when present, never as the inherited member.
+  for (const branch of ["constructor", "toString", "__proto__"]) {
+    it(`reads a branch named ${branch} as an own cache entry only`, () => {
+      const tree = (b: string) => ({
+        ...facts,
+        worktrees: {
+          ...facts.worktrees,
+          value: {
+            ...facts.worktrees.value,
+            worktrees: [{ path: "/code/wt/odd", branch: b, isMain: false }],
+          },
+        },
+      });
+      expect(inventoryEntries(tree(branch), [])[0]!.prs).toEqual([]);
+      // Parsed, as the wire delivers it: JSON.parse makes an OWN key even
+      // for __proto__, where a plain object literal would set the prototype.
+      const present = {
+        ...tree(branch),
+        branchPRs: JSON.parse(
+          `{${JSON.stringify(branch)}:${JSON.stringify(facts.branchPRs["feat/previews"])}}`,
+        ),
+      };
+      expect(Object.hasOwn(present.branchPRs, branch)).toBe(true);
+      expect(inventoryEntries(present, [])[0]!.prs.map((p) => p.id)).toEqual([
+        "206",
+      ]);
+    });
+  }
+
+  it("draws the Repository block and the inventory for a repo header", async () => {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <GroupPreview
+            header={{
+              label: "ccmux",
+              count: 1,
+              members: membersFromSummary({
+                ...emptySummary(),
+                waitingGeneric: 1,
+              }),
+              repoRoot: "/code/ccmux",
+            }}
+            sessions={sessions}
+            facts={[facts]}
+            width={60}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 20 },
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Repository");
+    expect(frame).toContain("main + 2 worktrees");
+    expect(frame).toContain("previews  feat/previews  PR #206 ✗");
+    // The idle checkout is listed too: the inventory, not just where
+    // sessions happen to be.
+    expect(frame).toContain("idle  chore/idle");
+  });
+});
+
+describe("GroupPreview renamed and merged groups", () => {
+  async function render(header: {
+    label: string;
+    groupKey: string;
+    rawKeys?: string[];
+  }) {
+    const [tick] = createSignal(0);
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <GroupPreview
+            header={{
+              ...header,
+              count: 2,
+              members: membersFromSummary({ ...emptySummary(), idle: 2 }),
+            }}
+            sessions={[]}
+            width={40}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 100, height: 20 },
+    );
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  }
+
+  it("lists the raw keys a merged group folds together, dimmed under its name", async () => {
+    const frame = await render({
+      label: "ProjectX",
+      groupKey: "ProjectX",
+      rawKeys: ["px-api", "px-infra", "px-web"],
+    });
+    const lines = frame.split("\n");
+    const name = lines.findIndex((l) => l.includes("ProjectX"));
+    expect(lines[name + 1]).toContain("3 sources: px-api · px-infra · px-web");
+    const span = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((s) => s.text.includes("3 sources"));
+    // Dimmed as far as the theme allows while still reading at 4.5:1.
+    expect(span?.fg.toInts()).toEqual(
+      RGBA.fromHex(TEXT_ROLES.groupSources.fg()).toInts(),
+    );
+  });
+
+  it("names the key a renamed group came from", async () => {
+    const frame = await render({
+      label: "Backend",
+      groupKey: "Backend",
+      rawKeys: ["beta"],
+    });
+    expect(frame).toContain("renamed from beta");
+  });
+
+  it("adds nothing for a group under its own name", async () => {
+    const frame = await render({
+      label: "alpha",
+      groupKey: "alpha",
+      rawKeys: ["alpha"],
+    });
+    expect(frame).not.toContain("renamed from");
+    expect(frame).not.toContain("sources");
+  });
+
+  it("cuts a long sources line to the pane", async () => {
+    const frame = await render({
+      label: "Big",
+      groupKey: "Big",
+      rawKeys: Array.from({ length: 12 }, (_, i) => `repository-${i}`),
+    });
+    const line = frame.split("\n").find((l) => l.includes("12 sources"))!;
+    expect(line).toContain("…");
   });
 });
 

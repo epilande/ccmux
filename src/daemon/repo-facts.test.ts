@@ -1,0 +1,425 @@
+import { describe, expect, it } from "bun:test";
+import { RepoFactsCache, wireRepoFacts } from "./repo-facts";
+import type { WorktreeRepo } from "./worktree-list";
+import { associatedBranchPRs, type OpenPR } from "./pr-list";
+import type { SourceResult } from "./gh-spawn-source";
+import type { GitRun } from "./worktree-git";
+
+function identityGit(branch: string): GitRun {
+  return async (_cwd, args) => {
+    if (args[0] === "rev-parse") {
+      return { exitCode: 0, stderr: "", stdout: "local-ahead\n" };
+    }
+    if (args[0] === "config") {
+      const key = args[args.length - 1] ?? "";
+      const value = key.endsWith(".merge") ? `refs/heads/${branch}` : "origin";
+      return { exitCode: 0, stderr: "", stdout: `${value}\n` };
+    }
+    if (args[0] === "remote") {
+      return { exitCode: 0, stderr: "", stdout: "git@github.com:o/r.git\n" };
+    }
+    return { exitCode: 1, stderr: "unexpected", stdout: "" };
+  };
+}
+
+const repo: WorktreeRepo = {
+  repoRoot: "/repo",
+  repoName: "repo",
+  worktrees: [],
+};
+const pr: OpenPR = {
+  number: 2,
+  title: "change",
+  url: "https://github.com/o/r/pull/2",
+  author: "dev",
+  isDraft: false,
+  reviewDecision: null,
+  ciStatus: "passing",
+  headRefName: "feature",
+  headRefOid: "abc",
+  headRepository: { owner: "o", name: "r" },
+};
+const failed = { ok: false as const, error: "gh unavailable" };
+function harness() {
+  let now = 0;
+  let enabled = true;
+  let answer: SourceResult<OpenPR[]> = { ok: true, value: [pr] };
+  const calls = { local: 0, prs: 0, issues: 0 };
+  const cache = new RepoFactsCache({
+    now: () => now,
+    roots: async () => ["/repo"],
+    headerPR: async () => enabled,
+    local: async () => {
+      calls.local++;
+      return repo;
+    },
+    prs: async () => {
+      calls.prs++;
+      return answer;
+    },
+    issues: async () => {
+      calls.issues++;
+      return { ok: true, value: [] };
+    },
+  });
+  return {
+    cache,
+    calls,
+    advance: (ms: number) => {
+      now += ms;
+    },
+    fail: () => {
+      answer = failed;
+    },
+    succeed: () => {
+      answer = { ok: true, value: [] };
+    },
+    disable: () => {
+      enabled = false;
+    },
+  };
+}
+describe("repo facts", () => {
+  it("has no value or stale marker before any lookup succeeds", async () => {
+    const h = harness();
+    h.fail();
+    await h.cache.refresh(["/repo"]);
+    expect(h.cache.snapshot(["/repo"])[0]?.prs).toBeUndefined();
+    expect(h.cache.snapshot(["/repo"])[0]?.worktrees?.value).toEqual(repo);
+  });
+  it("keeps the source lists off the wire and everything else on it", async () => {
+    const h = harness();
+    await h.cache.refresh(["/repo"]);
+    const snapshot = h.cache.snapshot(["/repo"]);
+    expect(snapshot[0]?.prs?.value).toEqual([pr]);
+    const [wire] = wireRepoFacts(snapshot);
+    expect(wire).not.toHaveProperty("prs");
+    expect(wire).not.toHaveProperty("issues");
+    expect(wire?.worktrees?.value).toEqual(repo);
+    expect(h.cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([pr]);
+  });
+  it("retains a successful value as stale after a failure, and recovers to zero", async () => {
+    const h = harness();
+    await h.cache.refresh(["/repo"]);
+    h.fail();
+    h.advance(60_001);
+    await h.cache.refresh(["/repo"]);
+    expect(h.cache.snapshot(["/repo"])[0]?.prs).toEqual({
+      value: [pr],
+      updatedAt: 0,
+      stale: true,
+    });
+    h.succeed();
+    h.advance(60_001);
+    await h.cache.refresh(["/repo"]);
+    expect(h.cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([]);
+    expect(h.cache.snapshot(["/repo"])[0]?.prs?.stale).toBe(false);
+  });
+  it("joins concurrent refreshes and throttles key repeat", async () => {
+    const h = harness();
+    await Promise.all([
+      h.cache.refresh(["/repo"], true),
+      h.cache.refresh(["/repo"], true),
+    ]);
+    expect(h.calls.prs).toBe(1);
+    await h.cache.refresh(["/repo"], true);
+    expect(h.calls.prs).toBe(1);
+    h.advance(2_001);
+    await h.cache.refresh(["/repo"], true);
+    expect(h.calls.prs).toBe(2);
+  });
+  it("runs a forced refresh after an in-flight timer read instead of joining it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    const refreshes: boolean[] = [];
+    const cache = new RepoFactsCache({
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => repo,
+      prs: async (_root, refresh) => {
+        refreshes.push(refresh);
+        if (!refresh) await gate;
+        return { ok: true, value: refresh ? [pr] : [] };
+      },
+      issues: async () => ({ ok: true, value: [] }),
+    });
+    const timer = cache.refresh(["/repo"]);
+    await new Promise((done) => setTimeout(done, 0));
+    const forced = cache.refresh(["/repo"], true);
+    const joined = cache.refresh(["/repo"], true);
+    release();
+    await Promise.all([timer, forced, joined]);
+    expect(refreshes).toEqual([false, true]);
+    expect(cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([pr]);
+  });
+  it("keeps ordinary reads fresh until the timer interval", async () => {
+    const h = harness();
+    await h.cache.refresh(["/repo"]);
+    h.advance(20_000);
+    await h.cache.refresh(["/repo"]);
+    expect(h.calls.local).toBe(1);
+    h.advance(40_001);
+    await h.cache.refresh(["/repo"]);
+    expect(h.calls.local).toBe(2);
+  });
+  it("disables background GitHub lookups while allowing Start to request sources", async () => {
+    const h = harness();
+    h.disable();
+    await h.cache.refresh(["/repo"]);
+    expect(h.calls).toEqual({ local: 1, prs: 0, issues: 0 });
+    await h.cache.refresh(["/repo"], false, true);
+    expect(h.calls).toEqual({ local: 1, prs: 1, issues: 1 });
+  });
+  it("publishes the local answer while GitHub is still pending", async () => {
+    let resolve!: (answer: SourceResult<OpenPR[]>) => void;
+    const pending = new Promise<SourceResult<OpenPR[]>>((done) => {
+      resolve = done;
+    });
+    const cache = new RepoFactsCache({
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => repo,
+      prs: () => pending,
+      issues: async () => failed,
+    });
+    const load = cache.refresh(["/repo"]);
+    await new Promise((done) => setTimeout(done, 0));
+    expect(cache.snapshot(["/repo"])[0]?.worktrees?.value).toEqual(repo);
+    expect(cache.snapshot(["/repo"])[0]?.prs).toBeUndefined();
+    resolve({ ok: true, value: [pr] });
+    await load;
+    expect(cache.snapshot(["/repo"])[0]?.prs?.value).toEqual([pr]);
+  });
+  function timed(interval: number, now?: () => number) {
+    const counter = { calls: 0 };
+    const cache = new RepoFactsCache(
+      {
+        roots: async () => ["/repo"],
+        headerPR: async () => false,
+        local: async () => {
+          counter.calls++;
+          return repo;
+        },
+        prs: async () => failed,
+        issues: async () => failed,
+        now,
+      },
+      interval,
+    );
+    return { cache, counter };
+  }
+  it("refreshes on the timer and stops on shutdown", async () => {
+    const { cache, counter } = timed(10);
+    cache.snapshot(["/repo"]);
+    const reading = setInterval(() => cache.snapshot(["/repo"]), 5);
+    cache.start();
+    try {
+      await new Promise((done) => setTimeout(done, 45));
+      expect(counter.calls).toBeGreaterThan(1);
+    } finally {
+      cache.stop();
+      clearInterval(reading);
+    }
+    const stopped = counter.calls;
+    await new Promise((done) => setTimeout(done, 30));
+    expect(counter.calls).toBe(stopped);
+  });
+  it("leaves the timer idle while nobody reads snapshots", async () => {
+    let clock = 0;
+    const { cache, counter } = timed(10, () => clock);
+    cache.start();
+    try {
+      await new Promise((done) => setTimeout(done, 35));
+      expect(counter.calls).toBe(0);
+      cache.snapshot(["/repo"]);
+      await new Promise((done) => setTimeout(done, 25));
+      expect(counter.calls).toBeGreaterThan(0);
+      const read = counter.calls;
+      clock = 21;
+      await new Promise((done) => setTimeout(done, 25));
+      expect(counter.calls).toBe(read);
+    } finally {
+      cache.stop();
+    }
+  });
+});
+
+describe("branch facts", () => {
+  const localRepo: WorktreeRepo = {
+    ...repo,
+    worktrees: [
+      {
+        repoRoot: "/repo",
+        repoName: "repo",
+        path: "/repo/wt",
+        name: "wt",
+        branch: "feature",
+        tip: "local-ahead",
+        detached: false,
+        isMain: false,
+        locked: false,
+        dirty: { dirty: false, modified: 0, untracked: 0 },
+        upstream: null,
+        sessions: [],
+      },
+    ],
+  };
+  it("keeps matching upstream PRs when local-ahead, excluding namesake forks", async () => {
+    const cache = new RepoFactsCache({
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, identityGit(branch)),
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => ({
+        ok: true,
+        value: [
+          pr,
+          { ...pr, number: 3 },
+          { ...pr, number: 4, headRepository: { owner: "fork", name: "r" } },
+        ],
+      }),
+      issues: async () => failed,
+    });
+    await cache.refresh(["/repo"]);
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value.map((p) => p.id),
+    ).toEqual(["2", "3"]);
+  });
+  it("looks beyond a capped repository snapshot, retains stale branch results, then clears a closed PR", async () => {
+    let now = 0;
+    let branchAnswer: SourceResult<OpenPR[]> = {
+      ok: true,
+      value: [
+        pr,
+        { ...pr, number: 4, headRepository: { owner: "fork", name: "r" } },
+      ],
+    };
+    let branchReads = 0;
+    const cache = new RepoFactsCache({
+      now: () => now,
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, identityGit(branch)),
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => ({
+        ok: true,
+        value: Array.from({ length: 50 }, (_, i) => ({
+          ...pr,
+          number: i + 100,
+          headRefName: "other",
+        })),
+      }),
+      issues: async () => failed,
+      branchPRs: async (root, branch) => {
+        expect([root, branch]).toEqual(["/repo", "feature"]);
+        branchReads++;
+        return branchAnswer;
+      },
+    });
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value[0]?.id).toBe(
+      "2",
+    );
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value,
+    ).toHaveLength(1);
+    expect(branchReads).toBe(1);
+    branchAnswer = failed;
+    now = 60_001;
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.stale).toBe(true);
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value,
+    ).toHaveLength(1);
+    branchAnswer = { ok: true, value: [] };
+    now += 60_001;
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs?.feature).toEqual({
+      value: [],
+      updatedAt: now,
+      stale: false,
+    });
+  });
+  it("finds a capped branch's PR under its own name when it tracks main", async () => {
+    const queried: string[] = [];
+    const trackingMain: GitRun = async (cwd, args) =>
+      args[0] === "config" && args[args.length - 1]?.endsWith(".merge")
+        ? { exitCode: 0, stderr: "", stdout: "refs/heads/main\n" }
+        : args[0] === "rev-parse"
+          ? { exitCode: 0, stderr: "", stdout: "abc\n" }
+          : identityGit("feature")(cwd, args);
+    const cache = new RepoFactsCache({
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, trackingMain),
+      upstream: async () => "main",
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => ({
+        ok: true,
+        value: Array.from({ length: 50 }, (_, i) => ({
+          ...pr,
+          number: i + 100,
+          headRefName: "other",
+          headRefOid: "other",
+        })),
+      }),
+      issues: async () => failed,
+      branchPRs: async (_root, branch) => {
+        queried.push(branch);
+        return { ok: true, value: branch === "feature" ? [pr] : [] };
+      },
+    });
+    await cache.refresh(["/repo"]);
+    expect(queried.sort()).toEqual(["feature", "main"]);
+    expect(
+      cache.snapshot(["/repo"])[0]?.branchPRs?.feature?.value.map((p) => p.id),
+    ).toEqual(["2"]);
+  });
+  for (const name of ["constructor", "toString", "__proto__"]) {
+    it(`does not fabricate stale facts for an unanswered ${name} branch`, async () => {
+      const local = {
+        ...localRepo,
+        worktrees: [
+          localRepo.worktrees[0]!,
+          { ...localRepo.worktrees[0]!, branch: name },
+        ],
+      };
+      const cache = new RepoFactsCache({
+        associate: (root, branch, prs) =>
+          associatedBranchPRs(root, branch, prs, identityGit(branch)),
+        roots: async () => ["/repo"],
+        headerPR: async () => true,
+        local: async () => local,
+        prs: async () => ({
+          ok: true,
+          value: Array.from({ length: 50 }, () => pr),
+        }),
+        issues: async () => failed,
+        branchPRs: async (_root, branch) =>
+          branch === name ? failed : { ok: true, value: [pr] },
+      });
+      await cache.refresh(["/repo"]);
+      const branches = cache.snapshot(["/repo"])[0]!.branchPRs!;
+      expect(Object.hasOwn(branches, "feature")).toBe(true);
+      expect(Object.hasOwn(branches, name)).toBe(false);
+    });
+  }
+  it("leaves branch facts absent when GitHub has never answered", async () => {
+    const cache = new RepoFactsCache({
+      associate: (root, branch, prs) =>
+        associatedBranchPRs(root, branch, prs, identityGit(branch)),
+      roots: async () => ["/repo"],
+      headerPR: async () => true,
+      local: async () => localRepo,
+      prs: async () => failed,
+      issues: async () => failed,
+    });
+    await cache.refresh(["/repo"]);
+    expect(cache.snapshot(["/repo"])[0]?.branchPRs).toBeUndefined();
+  });
+});

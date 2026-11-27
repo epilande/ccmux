@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { createMockKeys } from "@opentui/core/testing";
+import { createMockKeys, createMockMouse } from "@opentui/core/testing";
 import {
   deliverEscape,
   expectContentSizedThumb,
@@ -16,10 +16,13 @@ import type {
 } from "../../daemon/worktree-list";
 import {
   SourcePicker,
+  sourceAge,
+  type SourcePickerProps,
   sourcePickerLayout,
   sourceRowHeight,
 } from "./SourcePicker";
 import { buildSourceRepos } from "./source-picker-rows";
+import { displayWidth } from "../utils/format";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
 let setup: Setup | undefined;
@@ -78,6 +81,8 @@ const json = (body: unknown) =>
 
 interface Handlers {
   prs?: () => Promise<Response>;
+  /** `GET /prs/detail`, matched ahead of the `/prs` list. */
+  prDetail?: (url: URL) => Promise<Response>;
   issues?: () => Promise<Response>;
   worktrees?: () => Promise<Response>;
 }
@@ -87,6 +92,9 @@ function installFetch(handlers: Handlers) {
     input: unknown,
   ) => {
     const url = String(input);
+    if (url.includes("/prs/detail") && handlers.prDetail) {
+      return handlers.prDetail(new URL(url));
+    }
     if (url.includes("/issues")) {
       return handlers.issues?.() ?? json({ repos: [], errors: [] });
     }
@@ -118,27 +126,55 @@ async function mount(
     initialFilter?: string;
     initialCursor?: string | null;
     compact?: boolean;
+    showPreview?: boolean;
+    enabled?: boolean;
+    /** A focused input beside the picker, standing in for a dialog's. */
+    dialogInput?: boolean;
+    openResult?: boolean;
+    copyResult?: boolean;
+    prDetail?: Handlers["prDetail"];
+    actions?: Pick<
+      SourcePickerProps,
+      "onReview" | "onKill" | "onRestart" | "onNew" | "onScope" | "onNavigate"
+    >;
   } = {},
 ) {
   // BEFORE `testRender`, so the component's first load cannot reach a real
   // daemon.
-  installFetch(handlers);
+  installFetch({ prDetail: opts.prDetail, ...handlers });
   const picked: Picked = { prs: [], issues: [], worktrees: [], closes: 0 };
   setup = await testRender(
     () => (
-      <SourcePicker
-        repo={opts.repo ?? "/repo"}
-        cwd="/repo"
-        compact={opts.compact}
-        initialFilter={opts.initialFilter}
-        initialCursor={opts.initialCursor}
-        onClose={() => {
-          picked.closes += 1;
-        }}
-        onPickPR={(target) => picked.prs.push(target)}
-        onPickIssue={(target) => picked.issues.push(target)}
-        onOpenWorktree={(target) => picked.worktrees.push(target)}
-      />
+      <box flexDirection="column" width="100%" height="100%">
+        <SourcePicker
+          activeSessionId="s1"
+          enabled={opts.enabled}
+          {...opts.actions}
+          effects={{
+            openUrl: () => opts.openResult ?? true,
+            copyText: () => ({
+              osc52: opts.copyResult ?? true,
+              local: false,
+            }),
+          }}
+          repo={opts.repo ?? "/repo"}
+          cwd="/repo"
+          compact={opts.compact}
+          showPreview={opts.showPreview}
+          previewWidth={50}
+          initialFilter={opts.initialFilter}
+          initialCursor={opts.initialCursor}
+          onClose={() => {
+            picked.closes += 1;
+          }}
+          onPickPR={(target) => picked.prs.push(target)}
+          onPickIssue={(target) => picked.issues.push(target)}
+          onOpenWorktree={(target) => picked.worktrees.push(target)}
+        />
+        {opts.dialogInput ? (
+          <input id="dialog-field" focused width={30} value="" />
+        ) : null}
+      </box>
     ),
     { width: opts.width ?? 90, height: opts.height ?? 24 },
   );
@@ -154,7 +190,14 @@ async function mount(
     deliverEscape(setup!.renderer);
     await setup!.renderOnce();
   };
-  return { picked, keys, escape, frame, spans: () => setup!.captureSpans() };
+  return {
+    picked,
+    keys,
+    mouse: createMockMouse(setup.renderer),
+    escape,
+    frame,
+    spans: () => setup!.captureSpans(),
+  };
 }
 
 /** Everything answered, with one PR and one issue. */
@@ -196,16 +239,70 @@ async function mountSettled(
   return harness;
 }
 
+describe("SourcePicker preview", () => {
+  it("re-reads a cached PR body past the daemon's cache on R", async () => {
+    const asked: string[] = [];
+    let version = 1;
+    const harness = await mountSettled({
+      prs: [openPR()],
+      showPreview: true,
+      width: 140,
+      prDetail: async (url) => {
+        asked.push(url.searchParams.get("refresh") ?? "0");
+        // The daemon's cache: only a refresh sees the new body.
+        if (url.searchParams.get("refresh") === "1") version = 2;
+        return json({
+          ok: true,
+          detail: {
+            number: 156,
+            body: `Body v${version}`,
+            truncated: false,
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            checks: [],
+          },
+        });
+      },
+    });
+    await new Promise((r) => setTimeout(r, 350));
+    expect(await harness.frame()).toContain("Body v1");
+    expect(asked).toEqual(["0"]);
+
+    harness.keys.pressKey("R");
+    await new Promise((r) => setTimeout(r, 400));
+    const frame = await harness.frame();
+    expect(asked).toEqual(["0", "1"]);
+    expect(frame).toContain("Body v2");
+  });
+});
+
 describe("SourcePicker", () => {
-  it("lists both sources under their own headers, with counts", async () => {
+  it("ends the repo header's rule on the rows' last column", async () => {
+    // The rows have no right padding, so the header's rule must not either.
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [openIssue()],
+    });
+    const lines = (await harness.frame()).split("\n");
+    const header = lines.find((l) => /repo \(2\) ─+/.test(l));
+    const row = lines.find((l) => l.includes("#156"));
+    expect(header).toBeDefined();
+    expect(row).toBeDefined();
+    const end = (l: string) => l.replace(/[│█\s]+$/, "").length;
+    expect(end(header!)).toBe(end(row!));
+  });
+
+  it("lists both sources under one repo header with its count", async () => {
     const harness = await mountSettled({
       prs: [openPR()],
       issues: [openIssue()],
     });
     const frame = await harness.frame();
 
-    expect(frame).toContain("Pull requests 1");
-    expect(frame).toContain("Issues 1");
+    expect(frame).toContain("repo (2)");
+    expect(frame).toContain("#144");
     expect(frame).toContain("#156 park the renderer while hidden");
     expect(frame).toContain("#144 Notifications are swallowed");
     // The count sits against its own label: in this TUI `·` divides PEERS.
@@ -244,9 +341,9 @@ describe("SourcePicker", () => {
     });
     const frame = await harness.frame();
 
-    expect(frame).toContain("Pull requests 1");
-    expect(frame).toContain("checking GitHub");
-    expect(frame).not.toContain("Issues 0");
+    expect(frame).toContain("repo (1)");
+    expect(frame).toContain("Checking GitHub");
+    expect(frame).not.toContain("#144");
   });
 
   /**
@@ -269,7 +366,6 @@ describe("SourcePicker", () => {
     });
     const frame = await harness.frame();
 
-    expect(frame).toContain("Issues unavailable");
     expect(frame).toContain("ccmux daemon restart");
     // And it costs only its own section.
     expect(frame).toContain("#156 park the renderer while hidden");
@@ -280,7 +376,7 @@ describe("SourcePicker", () => {
       prs: [openPR()],
       worktrees: [worktreeRow({ name: "parking", tip: "sha-156" })],
     });
-    expect(await harness.frame()).toContain("checked out in parking");
+    expect(await harness.frame()).toContain("→ parking");
   });
 
   it("marks an issue whose worktree a previous spawn cut", async () => {
@@ -293,9 +389,7 @@ describe("SourcePicker", () => {
         }),
       ],
     });
-    expect(await harness.frame()).toContain(
-      "checked out in issue-144-notifications",
-    );
+    expect(await harness.frame()).toContain("→ issue-144");
   });
 
   it("renders detached legacy issue worktrees by their directory name", async () => {
@@ -309,7 +403,7 @@ describe("SourcePicker", () => {
         }),
       ],
     });
-    expect(await harness.frame()).toContain("checked out in issue-144-legacy");
+    expect(await harness.frame()).toContain("→ issue-144-legacy");
   });
 
   it("does not let a non-null branch defer to a matching issue directory", async () => {
@@ -322,13 +416,31 @@ describe("SourcePicker", () => {
         }),
       ],
     });
-    expect(await harness.frame()).not.toContain(
-      "checked out in issue-144-legacy",
-    );
+    expect(await harness.frame()).not.toContain("→ issue-144-legacy");
   });
 });
 
 describe("SourcePicker keys", () => {
+  it("says what o and y did, or that they could not", async () => {
+    const done = await mountSettled({ prs: [openPR()] });
+    await done.keys.pressKey("o");
+    expect(await done.frame()).toContain("opened https://");
+    await done.keys.pressKey("y");
+    expect(await done.frame()).toContain("copied https://");
+    setup?.renderer.destroy();
+    setup = undefined;
+
+    const failed = await mountSettled({
+      prs: [openPR()],
+      openResult: false,
+      copyResult: false,
+    });
+    await failed.keys.pressKey("o");
+    expect(await failed.frame()).toContain("no browser opener here");
+    await failed.keys.pressKey("y");
+    expect(await failed.frame()).toContain("copy needs OSC 52 or pbcopy");
+  });
+
   it("moves the cursor with j and k", async () => {
     const harness = await mountSettled({
       prs: [openPR(), openPR({ number: 155, title: "second" })],
@@ -713,6 +825,35 @@ describe("SourcePicker keys", () => {
 });
 
 describe("SourcePicker filter", () => {
+  // Behind a dialog the filter is still drawn, and OpenTUI focuses whatever a
+  // left click lands on: typing meant for the dialog's field would edit the
+  // hidden filter instead.
+  it("keeps a dialog's focus when the disabled filter is clicked", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [],
+      initialFilter: "park",
+      enabled: false,
+      dialogInput: true,
+    });
+    const focused = () =>
+      (
+        setup!.renderer as unknown as {
+          currentFocusedRenderable?: { id?: string } | null;
+        }
+      ).currentFocusedRenderable?.id;
+    expect(focused()).toBe("dialog-field");
+    const row = (await harness.frame())
+      .split("\n")
+      .findIndex((line) => line.includes("/ park"));
+    expect(row).toBeGreaterThanOrEqual(0);
+    await harness.mouse.click(10, row);
+    await harness.frame();
+    expect(focused()).toBe("dialog-field");
+    await harness.keys.typeText("zz");
+    expect(await harness.frame()).not.toContain("/ parkzz");
+  });
+
   it("narrows to what was typed, across both kinds at once", async () => {
     const harness = await mountSettled({
       prs: [openPR({ title: "auto-detect nested tmux" })],
@@ -741,8 +882,8 @@ describe("SourcePicker filter", () => {
 
     // A repo whose rows all failed to match keeps its headers and says zero,
     // which is the answer to "is it in this one".
-    expect(frame).toContain("Pull requests 0");
-    expect(frame).toContain("Issues 1");
+    expect(frame).not.toContain("#156");
+    expect(frame).toContain("#144");
   });
 
   it("says nothing matches rather than drawing an empty list", async () => {
@@ -760,6 +901,41 @@ describe("SourcePicker filter", () => {
    * inconsistency was the whole objection to it: one surface asking to be
    * searched while the other waits to be asked.
    */
+  it("hands the filter's non-text preview keys to App and keeps the query", async () => {
+    const forwarded: string[] = [];
+    const harness = await mountSettled({
+      prs: [openPR()],
+      actions: {
+        // App's: it claims the preview keys and nothing in nav mode's way.
+        onNavigate: (event) => {
+          const preview = event.ctrl || event.meta || event.name === "tab";
+          forwarded.push(
+            `${event.ctrl ? "C-" : event.meta ? "M-" : ""}${event.name}`,
+          );
+          if (preview) event.preventDefault();
+          return preview;
+        },
+      },
+    });
+    harness.keys.pressKey("/");
+    await harness.frame();
+    forwarded.length = 0;
+    await harness.keys.typeText("park");
+    expect(await harness.frame()).toContain("/ park");
+    // Tab focuses the preview, Ctrl+D/U scroll it and Alt+H/L size it.
+    harness.keys.pressTab();
+    harness.keys.pressKey("d", { ctrl: true });
+    harness.keys.pressKey("u", { ctrl: true });
+    harness.keys.pressKey("h", { meta: true });
+    await harness.frame();
+    expect(forwarded).toEqual(["tab", "C-d", "C-u", "M-h"]);
+    // Letters stay the input's, `P` and App's view keys included, and the
+    // query survived the trip.
+    await harness.keys.typeText("Plh");
+    expect(await harness.frame()).toContain("/ parkPlh");
+    expect(forwarded).toEqual(["tab", "C-d", "C-u", "M-h"]);
+  });
+
   it("draws no filter row until the filter is entered", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
     expect(await harness.frame()).not.toContain("Filter pull requests");
@@ -770,14 +946,17 @@ describe("SourcePicker filter", () => {
 
   it("hints the nav keys in nav mode and the input keys in filter mode", async () => {
     const harness = await mountSettled({ prs: [openPR()] });
-    expect(await harness.frame()).toContain("/ filter");
+    // The session list's verb for the same key.
+    expect(await harness.frame()).toContain("/ search");
 
     harness.keys.pressKey("/");
     const filtering = await harness.frame();
     // `q` types here, so the hint that names it must go: the surface would
-    // otherwise advertise a key that does something else entirely.
+    // otherwise advertise a key that does something else entirely. What
+    // replaces it is the session search's own line.
+    expect(filtering).toContain("type to search");
     expect(filtering).toContain("esc cancel");
-    expect(filtering).not.toContain("q close");
+    expect(filtering).not.toContain("q back");
   });
 
   /**
@@ -793,14 +972,14 @@ describe("SourcePicker filter", () => {
       initialFilter: "park",
     });
     // A carried query opens in the filter, so the row is there to leave.
-    expect(await harness.frame()).toContain("Issues 0");
+    expect(await harness.frame()).not.toContain("#144");
 
     await harness.escape();
     const frame = await harness.frame();
 
     expect(frame).not.toContain("Filter pull requests");
     // The whole list is back, both sections restated.
-    expect(frame).toContain("Issues 1");
+    expect(frame).toContain("#144");
     expect(frame).toContain("#144");
     // And the first Esc did not close the surface.
     expect(harness.picked.closes).toBe(0);
@@ -1119,7 +1298,7 @@ describe("SourcePicker filter", () => {
     // Refresh: the issue read is in flight again, and the cursor's row is
     // gone with it. The hold must come back rather than the PR inheriting
     // the cursor.
-    harness.keys.pressKey("r");
+    harness.keys.pressKey("R");
     await harness.frame();
     harness.keys.pressEnter();
     await harness.frame();
@@ -1186,7 +1365,7 @@ describe("SourcePicker filter", () => {
     // landing on the PR that answered first.
     harness.keys.pressKey("j");
     await harness.frame();
-    harness.keys.pressKey("r");
+    harness.keys.pressKey("R");
     await harness.frame();
     harness.keys.pressEnter();
     await harness.frame();
@@ -1319,10 +1498,9 @@ describe("sourcePickerLayout", () => {
       repoHeaders: false,
     });
 
-    // Line 0 is the PR header, so the PR row starts at 1 and is two lines
-    // tall; the Issues header takes line 3 and its row starts at 4.
-    expect(layout.get("pr:/repo#156")).toEqual({ line: 1, height: 2 });
-    expect(layout.get("issue:/repo#144")).toEqual({ line: 4, height: 2 });
+    // PRs and issues share one list, with compact metadata on the same line.
+    expect(layout.get("pr:/repo#156")).toEqual({ line: 0, height: 1 });
+    expect(layout.get("issue:/repo#144")).toEqual({ line: 1, height: 1 });
   });
 
   it("counts a repo header too, where one is drawn", () => {
@@ -1332,7 +1510,7 @@ describe("sourcePickerLayout", () => {
       (row) => sourceRowHeight(row),
       { repoHeaders: true },
     );
-    expect(withHeader.get("pr:/repo#156")?.line).toBe(2);
+    expect(withHeader.get("pr:/repo#156")?.line).toBe(1);
   });
 
   it("places a one-line row as one line", () => {
@@ -1345,6 +1523,406 @@ describe("sourcePickerLayout", () => {
     const layout = sourcePickerLayout(built, (row) => sourceRowHeight(row), {
       repoHeaders: false,
     });
-    expect(layout.get("issue:/repo#144")).toEqual({ line: 2, height: 1 });
+    expect(layout.get("issue:/repo#144")).toEqual({ line: 0, height: 1 });
   });
+});
+
+describe("Start key convergence", () => {
+  it("marks in the index column and kills attached sessions, never the source", async () => {
+    const killed: string[][] = [];
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [openIssue()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "idle",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+      actions: { onKill: (ids) => killed.push(ids) },
+    });
+    harness.keys.pressKey(" ");
+    expect(await harness.frame()).toContain("▎✓ ●");
+    harness.keys.pressKey("j");
+    harness.keys.pressKey("x");
+    await harness.frame();
+    expect(killed).toEqual([["s1"]]);
+    harness.keys.pressKey("A", { shift: true });
+    harness.keys.pressKey("x");
+    expect(await harness.frame()).toContain("No attached sessions");
+    expect(killed).toHaveLength(1);
+  });
+  it("uses d for working-tree review, D for branch review and r for restart", async () => {
+    const reviews: boolean[] = [];
+    const restarts: string[] = [];
+    const harness = await mountSettled({
+      prs: [openPR()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "idle",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+      actions: {
+        onReview: (target) => reviews.push(target.branch),
+        onRestart: (id) => restarts.push(id),
+      },
+    });
+    harness.keys.pressKey("d");
+    harness.keys.pressKey("D", { shift: true });
+    harness.keys.pressKey("r");
+    await harness.frame();
+    expect(reviews).toEqual([false, true]);
+    expect(restarts).toEqual(["s1"]);
+  });
+  it("lets Enter collapse a header and Space mark its group", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      issues: [openIssue()],
+    });
+    harness.keys.pressKey("k");
+    harness.keys.pressKey(" ");
+    expect(
+      (await harness.frame()).split("\n").filter((l) => l.includes("✓")),
+    ).toHaveLength(2);
+    harness.keys.pressEnter();
+    expect(await harness.frame()).not.toContain("#156");
+    harness.keys.pressKey("z");
+    harness.keys.pressKey("r");
+    expect(await harness.frame()).toContain("#156");
+  });
+
+  for (const fold of [["z", "m"], ["-"]]) {
+    it(`brings the cursor out to its repo's header on ${fold.join("")}`, async () => {
+      const harness = await mountSettled({
+        prs: [openPR()],
+        issues: [openIssue()],
+      });
+      // The cursor seeds onto the first PR row.
+      for (const key of fold) harness.keys.pressKey(key);
+      const folded = await harness.frame();
+      expect(folded).not.toContain("#156");
+      // On the header, Enter unfolds it. Left on the hidden row, Enter had
+      // no row to act on and the fold stayed shut.
+      harness.keys.pressEnter();
+      expect(await harness.frame()).toContain("#156");
+      expect(harness.picked.prs).toEqual([]);
+    });
+  }
+});
+
+it("keeps the PR number, title and checkout arrow in a compact overlay", async () => {
+  const h = await mountSettled({
+    width: 30,
+    height: 30,
+    compact: true,
+    prs: [openPR()],
+    worktrees: [worktreeRow({ tip: "sha-156" })],
+  });
+  const line = (await h.frame()).split("\n").find((l) => l.includes("#156"));
+  expect(line).toBeDefined();
+  // The checkout's name gives way to the title at this width; the arrow,
+  // which changes what Enter does, stays.
+  expect(line).toContain("#156 park the");
+  expect(line).toContain("→");
+  expect(line).not.toContain("→ a");
+});
+
+it("preserves branch, draft, review, checks and every label at picker width", async () => {
+  const h = await mountSettled({
+    width: 160,
+    prs: [
+      openPR({
+        headRefName: "feature/metadata",
+        isDraft: true,
+        reviewDecision: "CHANGES_REQUESTED",
+        ciStatus: "failing",
+        labels: ["bug", "frontend"],
+      }),
+    ],
+    issues: [openIssue({ labels: ["help wanted", "ux"] })],
+  });
+  const frame = await h.frame();
+  for (const field of [
+    "feature/metadata",
+    "draft",
+    "changes",
+    "CI ✗",
+    "bug,frontend",
+    "help wanted,ux",
+    "@epilande",
+  ])
+    expect(frame).toContain(field);
+  const lines = frame.split("\n");
+  const title = lines.findIndex((line) => line.includes("#156"));
+  expect(lines[title]).toContain("CI ✗");
+  expect(lines[title]).toContain("feature/metadata");
+});
+
+// The fixed cells are sized for the whole list, so one approved PR with
+// checks would spend the default sidebar's room on cells and leave every
+// row's title (number included) a lone ellipsis.
+for (const width of [30, 26]) {
+  it(`keeps every PR's number and title at a ${width}-column compact Start`, async () => {
+    const day = 86_400_000;
+    const h = await mountSettled({
+      width,
+      compact: true,
+      prs: [
+        openPR({
+          number: 201,
+          ciStatus: "passing",
+          reviewDecision: "APPROVED",
+          createdAt: new Date(Date.now() - 12 * day).toISOString(),
+        }),
+        openPR({
+          number: 202,
+          createdAt: new Date(Date.now() - 3 * day).toISOString(),
+        }),
+      ],
+      issues: [],
+    });
+    const frame = await h.frame();
+    for (const number of ["#201", "#202"]) {
+      const line = frame.split("\n").find((l) => l.includes(number));
+      expect(line).toBeDefined();
+      // The number and the start of the title, not just the number.
+      expect(line).toContain(`${number} p`);
+    }
+  });
+}
+
+// A checked-out source carries a `→ name` suffix as well. It used to take
+// half the title's room (#156 cut to `#1…`), and then, with the number
+// reserved, it still took the title down to `f…`. The number is the row's
+// identity and the title is what it says, so both outrank the checkout's
+// name: at a narrow width the suffix collapses to a bare `→` first.
+const TITLE = "fix(tui): Address the redesign review findings";
+/** The title text a row draws after its number, without the checkout. */
+const titleAfter = (line: string, number: number) =>
+  line
+    .slice(line.indexOf(`#${number} `) + `#${number} `.length)
+    .split(" →")[0]!
+    .split("  ")[0]!
+    .trim();
+async function checkedOutBesideUnchecked(width: number) {
+  const day = 86_400_000;
+  const h = await mountSettled({
+    width,
+    compact: true,
+    prs: [
+      openPR({
+        number: 259,
+        title: TITLE,
+        headRefOid: "sha-259",
+        ciStatus: "passing",
+        reviewDecision: "APPROVED",
+        createdAt: new Date(Date.now() - 12 * day).toISOString(),
+      }),
+      openPR({
+        number: 258,
+        title: TITLE,
+        headRefOid: "sha-258",
+        ciStatus: "passing",
+        reviewDecision: "APPROVED",
+        createdAt: new Date(Date.now() - 12 * day).toISOString(),
+      }),
+    ],
+    issues: [],
+    worktrees: [worktreeRow({ name: "parking", tip: "sha-259" })],
+  });
+  const lines = (await h.frame()).split("\n");
+  return {
+    checkedOut: lines.find((l) => l.includes("#259"))!,
+    unchecked: lines.find((l) => l.includes("#258"))!,
+  };
+}
+
+// Up to mid widths the checkout's name waits until the title has twice its
+// readable minimum, so a checked-out title is only the marker's two columns
+// short of its neighbour's.
+for (const width of [23, 30, 40]) {
+  it(`gives a checked-out PR's title all but the marker's columns at ${width}`, async () => {
+    const { checkedOut, unchecked } = await checkedOutBesideUnchecked(width);
+    expect(checkedOut).toMatch(/#259 \S/);
+    expect(checkedOut).toContain("→");
+    expect(checkedOut).not.toContain("→ p");
+    expect(unchecked).toMatch(/#258 \S/);
+    const mine = displayWidth(titleAfter(checkedOut, 259));
+    const theirs = displayWidth(titleAfter(unchecked, 258));
+    expect(mine).toBeGreaterThanOrEqual(theirs - 2);
+    expect(titleAfter(checkedOut, 259)).toMatch(/^fix/);
+  });
+}
+
+// Wide enough for both, the name shows, beside a title still at least twice
+// its readable minimum (`fix(tui): Add…`).
+it("shows a checked-out PR's checkout name at 60 columns", async () => {
+  const { checkedOut } = await checkedOutBesideUnchecked(60);
+  expect(checkedOut).toMatch(/#259 \S/);
+  expect(checkedOut).toContain("→ park");
+  expect(displayWidth(titleAfter(checkedOut, 259))).toBeGreaterThanOrEqual(13);
+});
+
+it("keeps failing checks ahead of a long author and branch in compact Start", async () => {
+  const h = await mountSettled({
+    width: 30,
+    compact: true,
+    prs: [
+      openPR({
+        author: "a-very-long-github-login",
+        headRefName: "a-very-long-branch-name",
+        ciStatus: "failing",
+      }),
+    ],
+    issues: [],
+  });
+  expect(await h.frame()).toContain("CI ✗");
+});
+
+it("x retains marked sources inside collapsed groups while X only uses expanded rows", async () => {
+  const kills: string[][] = [];
+  const h = await mountSettled({
+    prs: [openPR()],
+    worktrees: [
+      worktreeRow({
+        tip: "sha-156",
+        sessions: [
+          {
+            id: "attached",
+            status: "idle",
+            agentType: "claude",
+            tmuxPane: "%1",
+            tmuxTarget: "test:0.1",
+            pid: null,
+          },
+        ],
+      }),
+    ],
+    actions: { onKill: (ids) => kills.push(ids) },
+  });
+  await h.keys.pressKey(" ");
+  await h.keys.pressKey("g");
+  await h.keys.pressKey("g");
+  await h.keys.pressEnter();
+  expect(await h.frame()).not.toContain("#156");
+  await h.keys.pressKey("X");
+  expect(kills).toEqual([]);
+  await h.keys.pressKey("x");
+  expect(kills).toEqual([["attached"]]);
+});
+
+it("omits missing, invalid and future ages without hiding valid zero-hour ages", () => {
+  const now = Date.parse("2024-01-15T12:00:00Z");
+  for (const value of [undefined, null, "nonsense", "2024-01-15T12:00:01Z"])
+    expect(sourceAge(value, now)).toBe("");
+  expect(sourceAge("2024-01-15T12:00:00Z", now)).toBe("0h");
+  expect(sourceAge("2024-01-14T12:00:00Z", now)).toBe("1d");
+});
+
+it("opening help consumes a pending z prefix before the next restart", async () => {
+  const restarted: string[] = [];
+  const h = await mountSettled({
+    prs: [openPR()],
+    worktrees: [
+      worktreeRow({
+        tip: "sha-156",
+        sessions: [
+          {
+            id: "s1",
+            agentType: "claude",
+            status: "idle",
+            tmuxPane: "%1",
+            tmuxTarget: "s:0.1",
+            pid: 1,
+          },
+        ],
+      }),
+    ],
+    actions: {
+      onNavigate: (event) => event.name === "?",
+      onRestart: (id) => restarted.push(id),
+    },
+  });
+  await h.keys.pressKey("z");
+  await h.keys.pressKey("?");
+  await h.keys.pressKey("r");
+  expect(restarted).toEqual(["s1"]);
+});
+
+describe("Start status glyphs", () => {
+  it("draws a waiting checkout with the session list's icon, not the background diamond", async () => {
+    const harness = await mountSettled({
+      prs: [openPR()],
+      worktrees: [
+        worktreeRow({
+          tip: "sha-156",
+          sessions: [
+            {
+              id: "s1",
+              agentType: "gemini",
+              status: "waiting",
+              tmuxPane: "%1",
+              tmuxTarget: "test:1.0",
+              pid: 1,
+            },
+          ],
+        }),
+      ],
+    });
+    const line =
+      (await harness.frame()).split("\n").find((l) => l.includes("#156")) ?? "";
+    expect(line).toContain("■");
+    expect(line).not.toContain("◆");
+  });
+});
+
+it("lines CI and age up across rows, with the middle yielding before the title", async () => {
+  const day = 86_400_000;
+  const h = await mountSettled({
+    width: 96,
+    prs: [
+      openPR({
+        number: 7,
+        title: "short",
+        ciStatus: "passing",
+        headRefName: "a",
+        createdAt: new Date(Date.now() - 3 * day).toISOString(),
+      }),
+      openPR({
+        number: 8,
+        title: "a much longer title that takes most of the row on its own",
+        ciStatus: "failing",
+        headRefName: "a-branch-name-long-enough-to-yield",
+        createdAt: new Date(Date.now() - 120 * day).toISOString(),
+      }),
+    ],
+  });
+  const lines = (await h.frame()).split("\n");
+  const seven = lines.find((l) => l.includes("#7 short"))!;
+  const eight = lines.find((l) => l.includes("#8 a much"))!;
+  // Fixed cells: CI starts, and age ends, on the same column on both rows.
+  expect(seven.indexOf("CI ✓")).toBe(eight.indexOf("CI ✗"));
+  expect(seven.indexOf("3d") + 2).toBe(eight.indexOf("120d") + 4);
+  // The long title kept its words; the branch yielded instead.
+  expect(eight).toContain("takes most of the row on its own");
+  expect(eight).not.toContain("a-branch-name-long-enough-to-yield");
 });

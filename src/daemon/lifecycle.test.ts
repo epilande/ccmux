@@ -10,12 +10,13 @@ import {
   waitForDaemon,
   findDaemonPidByPort,
   stopDaemonByPort,
+  stopForRestart,
   isStandaloneBinary,
   daemonSpawnArgv,
   shouldRetryHealthProbe,
   type HealthFetch,
 } from "./lifecycle";
-import { getPidFilePath } from "../lib/config";
+import { DAEMON_PORT, getPidFilePath } from "../lib/config";
 
 /**
  * Tests spawn real "sleep" processes and use signal delivery
@@ -78,18 +79,49 @@ function mockFetch(fn: (input: any, init?: any) => any) {
   globalThis.fetch = fn as typeof globalThis.fetch;
 }
 
-// Routes by command: `lsof` (port discovery) returns `lsofStdout`, `ps`
-// (identity check / diagnostics) returns `psStdout`. The ps default looks like
-// a real ccmux daemon so port-kill tests pass without restating it; pass a
-// non-daemon command line to exercise the foreign-squatter guard.
+// Routes by command: `lsof` (port discovery) returns `lsofStdout`, `ss` (the
+// Linux fallback for port discovery) returns `ssStdout`, `ps` (identity check
+// / diagnostics) returns `psStdout`. The ps default looks like a real ccmux
+// daemon so port-kill tests pass without restating it; pass a non-daemon
+// command line to exercise the foreign-squatter guard. A tool named in
+// `missing` throws on spawn, the way Bun.spawn does for a binary that is not
+// on PATH.
 function mockBunSpawn(
   lsofStdout: string,
   psStdout = "/usr/bin/bun /app/src/index.ts daemon start",
+  options: {
+    ssStdout?: string;
+    ssExit?: number;
+    lsofExit?: number;
+    missing?: string[];
+  } = {},
 ) {
-  Bun.spawn = ((cmd: string[]) => ({
-    stdout: new Blob([cmd[0] === "ps" ? psStdout : lsofStdout]).stream(),
-  })) as unknown as typeof Bun.spawn;
+  const { ssStdout = "", ssExit = 0, lsofExit = 0, missing = [] } = options;
+  Bun.spawn = ((cmd: string[]) => {
+    if (missing.includes(cmd[0]!)) {
+      throw new Error(`Executable not found in $PATH: "${cmd[0]}"`);
+    }
+    const stdout =
+      cmd[0] === "ps" ? psStdout : cmd[0] === "ss" ? ssStdout : lsofStdout;
+    return {
+      stdout: new Blob([stdout]).stream(),
+      exited: Promise.resolve(
+        cmd[0] === "ss" ? ssExit : cmd[0] === "lsof" ? lsofExit : 0,
+      ),
+    };
+  }) as unknown as typeof Bun.spawn;
 }
+
+/** An `ss` LISTEN line with no owner: the socket of a process ss may not name. */
+const SS_OWNERLESS = "LISTEN 0      512    127.0.0.1:2269 0.0.0.0:*\n";
+
+/** One `ss -ltnpH` line for a listener on the daemon port owned by `pid`. */
+function ssListener(pid: number): string {
+  return `LISTEN 0      512    127.0.0.1:2269 0.0.0.0:* users:(("bun",pid=${pid},fd=11))\n`;
+}
+
+/** Neither port-lookup tool is on PATH. */
+const NO_LOOKUP_TOOLS = { missing: ["lsof", "ss"] };
 
 describe("isProcessAlive", () => {
   it("returns true for a live process", () => {
@@ -239,6 +271,46 @@ describe("findDaemonPidByPort", () => {
     }) as unknown as typeof Bun.spawn;
     expect(await findDaemonPidByPort()).toBeNull();
   });
+
+  it("falls back to ss when lsof is not on PATH", async () => {
+    // The common Linux shape: lsof is an optional package, ss (iproute2) is not.
+    mockBunSpawn("", undefined, {
+      missing: ["lsof"],
+      ssStdout: ssListener(4321),
+    });
+    expect(await findDaemonPidByPort()).toBe(4321);
+  });
+
+  it("falls back to ss when lsof runs but names no listener", async () => {
+    // Also what a no-op `lsof` stub looks like, so a stub cannot hide ss.
+    mockBunSpawn("", undefined, { ssStdout: ssListener(4321) });
+    expect(await findDaemonPidByPort()).toBe(4321);
+  });
+
+  it("prefers lsof's answer when both tools name a listener", async () => {
+    mockBunSpawn("12345\n", undefined, { ssStdout: ssListener(4321) });
+    expect(await findDaemonPidByPort()).toBe(12345);
+  });
+
+  it("returns null when ss shows the socket without an owner (another user's)", async () => {
+    mockBunSpawn("", undefined, {
+      missing: ["lsof"],
+      ssStdout: SS_OWNERLESS,
+    });
+    expect(await findDaemonPidByPort()).toBeNull();
+  });
+
+  it("asks ss for the daemon port's listening TCP sockets only", async () => {
+    const calls: string[][] = [];
+    Bun.spawn = ((cmd: string[]) => {
+      calls.push(cmd);
+      if (cmd[0] === "lsof") throw new Error("not found");
+      return { stdout: new Blob([ssListener(4321)]).stream() };
+    }) as unknown as typeof Bun.spawn;
+    await findDaemonPidByPort();
+    const ss = calls.find((cmd) => cmd[0] === "ss");
+    expect(ss).toEqual(["ss", "-ltnpH", `sport = :${DAEMON_PORT}`]);
+  });
 });
 
 describe("stopDaemonByPort", () => {
@@ -310,6 +382,174 @@ describe("stopDaemonByPort", () => {
     expect(await stopDaemonByPort(listener)).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(isProcessAlive(listener)).toBe(false);
+  });
+
+  it("kills the daemon ss finds when lsof is not on PATH", async () => {
+    const pid = spawnSleepProcess();
+    mockBunSpawn("", undefined, {
+      missing: ["lsof"],
+      ssStdout: ssListener(pid),
+    });
+    expect(await stopDaemonByPort()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(pid)).toBe(false);
+  });
+
+  it("clears the pid file when a lookup ran and found no listener", async () => {
+    // Zombie recovery depends on this: no listener means no daemon, so a pid
+    // file left behind would only block the fresh `Daemon.start`.
+    const innocent = spawnSleepProcess();
+    writePidFile(innocent);
+    mockBunSpawn("", undefined, { missing: ["lsof"] }); // ss ran, found nothing
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(false);
+    expect(isProcessAlive(innocent)).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when no lookup tool can run", async () => {
+    // Nothing can say who holds the port, and the daemon may well be up. Its
+    // pid file is what `daemon stop` and `daemon status` still go by.
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, NO_LOOKUP_TOOLS);
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+    expect(isProcessAlive(daemon)).toBe(true);
+  });
+
+  it("drops a pid file whose live pid is not a ccmux daemon when no lookup tool can run", async () => {
+    // A recycled pid: kept, it would make the next `Daemon.start` refuse.
+    const squatter = spawnSleepProcess();
+    writePidFile(squatter);
+    mockBunSpawn("", "python3 -m http.server 8000", NO_LOOKUP_TOOLS);
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(false);
+    expect(isProcessAlive(squatter)).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when ss sees the listener but cannot name it", async () => {
+    // A socket is listening, so this is not "no listener": it is one that
+    // cannot be identified, and the pid file may be all there is to stop it by.
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { missing: ["lsof"], ssStdout: SS_OWNERLESS });
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+    expect(isProcessAlive(daemon)).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when ss fails", async () => {
+    // ss exits 0 when nothing matches, so a non-zero exit (a filter it does
+    // not support, a kernel without sock_diag) is a lookup that did not run.
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { missing: ["lsof"], ssExit: 1 });
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when lsof fails empty and ss is missing", async () => {
+    // lsof exits 1 with nothing on stdout both for "no match" and for an
+    // error, so on its own it cannot confirm that nothing is listening.
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { lsofExit: 1, missing: ["ss"] });
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+    expect(isProcessAlive(daemon)).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when lsof fails empty and ss fails", async () => {
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { lsofExit: 1, ssExit: 1 });
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+  });
+
+  it("clears the pid file when lsof fails empty but ss confirms no listener", async () => {
+    const innocent = spawnSleepProcess();
+    writePidFile(innocent);
+    mockBunSpawn("", undefined, { lsofExit: 1 }); // ss ran clean, found nothing
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(false);
+  });
+
+  it("still kills the pid lsof names, whatever its exit code", async () => {
+    const pid = spawnSleepProcess();
+    mockBunSpawn(`${pid}\n`, undefined, { lsofExit: 1, missing: ["ss"] });
+    expect(await stopDaemonByPort()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(pid)).toBe(false);
+  });
+
+  it("drops a dead pid file when no lookup tool can run", async () => {
+    const dead = spawnSleepProcess();
+    process.kill(dead, "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    writePidFile(dead);
+    mockBunSpawn("", undefined, NO_LOOKUP_TOOLS);
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(false);
+  });
+});
+
+describe("stopForRestart", () => {
+  beforeEach(setupTempHome);
+  afterEach(teardown);
+
+  it("refuses when the daemon still answers and no lookup tool can find it", async () => {
+    // The no-lsof machine before this fix: restart removed the live daemon's
+    // pid file, spawned a second daemon that died on bind, and left `daemon
+    // stop` with nothing to go by. Now nothing is touched.
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, NO_LOOKUP_TOOLS);
+    mockFetch(async () => new Response("ok", { status: 200 }));
+    expect(await stopForRestart()).toBe("still-running");
+    expect(existsSync(getPidFilePath())).toBe(true);
+    expect(isProcessAlive(daemon)).toBe(true);
+  });
+
+  it("refuses when ss sees the listener but cannot name it", async () => {
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { missing: ["lsof"], ssStdout: SS_OWNERLESS });
+    mockFetch(async () => new Response("ok", { status: 200 }));
+    expect(await stopForRestart()).toBe("still-running");
+    expect(existsSync(getPidFilePath())).toBe(true);
+    expect(isProcessAlive(daemon)).toBe(true);
+  });
+
+  it("refuses when the listener is not a ccmux daemon", async () => {
+    const squatter = spawnSleepProcess();
+    mockBunSpawn(`${squatter}\n`, "python3 -m http.server 2269");
+    mockFetch(async () => new Response("ok", { status: 200 }));
+    expect(await stopForRestart()).toBe("still-running");
+    expect(isProcessAlive(squatter)).toBe(true);
+  });
+
+  it("clears the way once ss finds and kills the daemon", async () => {
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, {
+      missing: ["lsof"],
+      ssStdout: ssListener(daemon),
+    });
+    expect(await stopForRestart()).toBe("stopped");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(daemon)).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(false);
+  });
+
+  it("clears the way when nothing is left serving", async () => {
+    // The stop found nothing to kill, but nothing answers either (a daemon
+    // that died on its own): the restart can go ahead and spawn.
+    mockBunSpawn("", undefined, NO_LOOKUP_TOOLS);
+    mockFetch(() => {
+      throw new Error("connection refused");
+    });
+    expect(await stopForRestart()).toBe("stopped");
   });
 });
 

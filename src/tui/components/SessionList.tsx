@@ -1,18 +1,7 @@
-import { getDaemonUrl } from "../../lib/config";
-import type {
-  WorktreeCount,
-  WorktreeCountsResponse,
-} from "../../daemon/worktree-list";
-import { groupWorktreeFacts } from "./session-columns";
+import type { RepoFactsResponse } from "../../daemon/repo-facts";
+import { branchPRs, factsText } from "../utils/repo-facts";
 import type { Accessor, Component } from "solid-js";
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  Show,
-  onCleanup,
-} from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import type { EnrichedSession, TmuxSocketError } from "../../types";
@@ -22,26 +11,33 @@ import type {
   BreakpointConfig,
   PromptDisplay,
 } from "../../lib/preferences";
-import { DEFAULT_PROMPT_DISPLAY } from "../../lib/preferences";
+import {
+  DEFAULT_BREAKPOINTS,
+  DEFAULT_PROMPT_DISPLAY,
+} from "../../lib/preferences";
 import {
   type FlatItem,
-  type FilteredSession,
-  type GroupBy,
   flatItemIdentity,
-  groupSessions,
-  groupRepoRoot,
   NEEDS_YOU_GROUP_KEY,
   getSessionIndex,
+  groupSources,
   scrollTarget,
   itemVisualHeight,
   toVisualLine,
 } from "../utils/grouping";
 import { SessionItem } from "./SessionItem";
-import { GroupHeader } from "./GroupHeader";
-import type { ResolvedColumns } from "./session-columns";
+import { GroupHeader, type HeaderNotice } from "./GroupHeader";
+import { getStatusColor } from "./StatusBadge";
+import type { HeaderCells, ResolvedColumns } from "./session-columns";
 import {
   resolveLayout,
   applyPromptDisplay,
+  columnHeaderCells,
+  labelsToolCell,
+  TOOL_LABEL,
+  prColumnWidth,
+  sizePrColumn,
+  hasHeaderLabels,
   rowHasContent,
   normalizePrompt,
   promptBlockWidth,
@@ -52,26 +48,19 @@ import {
 } from "./session-columns";
 import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
+import { TEXT_ROLES } from "../text-roles";
+import { Text } from "./Text";
 import {
   socketErrorMessage,
   socketRecoveryHint,
   type SocketRecoveryHint,
 } from "../../lib/tmux-socket";
-import { Text } from "./Text";
+import { displayWidth, padStartWidth } from "../utils/format";
 
 interface SessionListProps {
   items: FlatItem[];
-  /**
-   * Full session membership: before the search and status filters that shape
-   * `items`, and before waiting rows are moved out of their home groups.
-   *
-   * Only the worktree-counts scope below reads it. That scope costs a
-   * `git worktree list` per repo on the daemon, so it must change when
-   * sessions come and go and stay put while the user is only narrowing what
-   * is displayed.
-   */
-  sessions?: FilteredSession[];
-  groupBy?: GroupBy;
+  repoFacts?: RepoFactsResponse;
+  marks?: Set<string>;
   selectedIndex: number;
   iconStyle?: IconStyle;
   showPreview?: boolean;
@@ -82,8 +71,13 @@ interface SessionListProps {
   breakpoints?: BreakpointConfig;
   dimmed?: boolean;
   ageFadeAfter?: number;
-  connectionState?: string;
   sidebar?: boolean;
+  /**
+   * Draw the column-header line above the rows. The list still withholds it
+   * on a terminal below the `md` breakpoint, and when the resolved layout
+   * leaves nothing to label.
+   */
+  columnHeader?: boolean;
   /** Prompt display mode (cycled by the `p` key): inline, own row, or off. */
   promptDisplay?: PromptDisplay;
   /** Height of the wrapped prompt block, in lines. 0 (the default) is off. */
@@ -144,91 +138,63 @@ export function isActivePaneRow(
   return session.tmuxPane !== null && session.tmuxPane === activePaneId;
 }
 
+/**
+ * What the `needs attention` band says about waiting sessions the repo scope
+ * hides, or undefined when it hides none. In the waiting color: these are
+ * sessions that need the user, just not on this list.
+ */
+export function hiddenWaitingNotice(
+  hidden: number | undefined,
+): { text: string; short: string; color: string } | undefined {
+  if (!hidden) return undefined;
+  return {
+    text: `+${hidden} waiting in other repos`,
+    short: `+${hidden} elsewhere`,
+    color: getStatusColor("waiting", null),
+  };
+}
+
+/**
+ * The marker a renamed or merged group's header carries after its count, so
+ * the list itself says a group is not under its derived name: the sidebar
+ * and a picker with the preview closed have nothing else that does. It is
+ * the header's `notice`, so it never drops: `from px-api` or `3 sources`
+ * (the group preview's vocabulary) where the label still fits beside it,
+ * else a single `*`. Dimmed where the theme allows (`TEXT_ROLES`), with its
+ * own color on a selected row's raised background.
+ */
+export function aliasNotice(
+  item: Extract<FlatItem, { type: "header" }>,
+): HeaderNotice | undefined {
+  const sources = groupSources(item.groupKey, item.rawKeys);
+  if (!sources) return undefined;
+  return {
+    text:
+      sources.length === 1 ? `from ${sources[0]}` : `${sources.length} sources`,
+    short: "*",
+    color: TEXT_ROLES.groupMarker.fg(),
+    selectedColor: TEXT_ROLES.groupMarkerSelected.fg(),
+  };
+}
+
 /** Columns a keyboard-opened row menu is inset from the list's left edge, so
  *  the row it belongs to is still identifiable underneath it. */
 const ROW_MENU_INDENT = 2;
-const WORKTREE_REFRESH_MS = 30_000;
 
 export const SessionList: Component<SessionListProps> = (props) => {
   let scrollboxRef: ScrollBoxRenderable | undefined;
   const promptBlockCache = createPromptBlockCache(normalizePrompt);
   const [scrollboxLayout, setScrollboxLayout] = createSignal(0);
+  // Columns the scrollbox's viewport is narrower than the list: the
+  // scrollbar and content inset the rows are laid out inside. The header
+  // line renders OUTSIDE the scrollbox and pads by this much on the right so
+  // its cells end on the same column the rows' do.
+  const [viewportInset, setViewportInset] = createSignal(0);
   const dims = useSharedTerminalDimensions();
   const effectiveWidth = () =>
     props.showPreview
       ? Math.floor((dims().width * (100 - props.previewWidth)) / 100)
       : dims().width;
-
-  const [worktreeRepos, setWorktreeRepos] = createSignal<WorktreeCount[]>([]);
-  const repoScope = createMemo(() =>
-    JSON.stringify(
-      [
-        ...new Set(
-          groupSessions(props.sessions ?? [], props.groupBy ?? "none").flatMap(
-            ({ members }) => {
-              const root = groupRepoRoot(members, props.groupBy ?? "none");
-              return root ? [root] : [];
-            },
-          ),
-        ),
-      ].sort(),
-    ),
-  );
-  createEffect(() => {
-    const roots: string[] = JSON.parse(repoScope());
-    const connected = props.connectionState;
-    const scope = new Set(roots);
-    setWorktreeRepos((repos) =>
-      repos.filter((repo) => scope.has(repo.repoRoot)),
-    );
-    if (roots.length === 0 || connected !== "connected") return;
-    const query = new URLSearchParams();
-    for (const root of roots) query.append("repo", root);
-    const controller = new AbortController();
-    let latestRequest = 0;
-    const refresh = () => {
-      const request = ++latestRequest;
-      return fetch(`${getDaemonUrl()}/worktrees/counts?${query}`, {
-        signal: AbortSignal.any([
-          controller.signal,
-          AbortSignal.timeout(15_000),
-        ]),
-      })
-        .then((response) =>
-          response.ok
-            ? (response.json() as Promise<WorktreeCountsResponse>)
-            : null,
-        )
-        .then((response) => {
-          if (
-            !controller.signal.aborted &&
-            request === latestRequest &&
-            response
-          )
-            setWorktreeRepos((prev) => {
-              const returned = new Set(
-                response.repos.map((repo) => repo.repoRoot),
-              );
-              return [
-                ...prev.filter(
-                  (repo) =>
-                    scope.has(repo.repoRoot) && !returned.has(repo.repoRoot),
-                ),
-                ...response.repos,
-              ];
-            });
-        })
-        .catch(() => {});
-    };
-    void refresh();
-    // Worktrees can change through another picker or the CLI without any
-    // session membership changing. Keep the last answer until a refresh lands.
-    const timer = setInterval(() => void refresh(), WORKTREE_REFRESH_MS);
-    onCleanup(() => {
-      clearInterval(timer);
-      controller.abort();
-    });
-  });
 
   /**
    * Whether rows draw the wrapped block at all, decided ONCE for the list.
@@ -252,7 +218,7 @@ export const SessionList: Component<SessionListProps> = (props) => {
   // rows at a given width/config) and passed down to each SessionItem.
   // The scroll-target math below reads the same object, so row heights
   // and scroll positions can't disagree.
-  const layout = createMemo(() => {
+  const displayed = createMemo(() => {
     const resolved = resolveLayout(
       !!props.sidebar,
       effectiveWidth(),
@@ -265,6 +231,40 @@ export const SessionList: Component<SessionListProps> = (props) => {
       !!props.sidebar,
     );
   });
+
+  function enriched(item: Extract<FlatItem, { type: "session" }>) {
+    const session = item.filteredSession.session;
+    if (!props.repoFacts) return session;
+    return {
+      ...session,
+      branchPRs: props.repoFacts.headerPR
+        ? branchPRs(session, props.repoFacts.repos)
+        : [],
+    };
+  }
+
+  /**
+   * One width for the list's right-side `pr` column (see `sizePrColumn`).
+   * Its own memo so that a list update which changes no badge, which is
+   * nearly every one, leaves the number, and so the layout, untouched. The
+   * sidebar keeps its badge sized per row: it has no header to label the
+   * column, and a 30-column rail cannot spare a blank one.
+   */
+  const prWidth = createMemo(() => {
+    if (props.sidebar) return 0;
+    const entry = displayed().row1.right.find((e) => e.field === "pr");
+    if (!entry) return 0;
+    return prColumnWidth(
+      props.items.flatMap((item) =>
+        item.type === "session" ? [enriched(item)] : [],
+      ),
+      entry.mode,
+    );
+  });
+
+  const layout = createMemo(() =>
+    props.sidebar ? displayed() : sizePrColumn(displayed(), prWidth()),
+  );
 
   /**
    * The layout for a row whose block is drawn and whose agent DID write a
@@ -515,21 +515,12 @@ export const SessionList: Component<SessionListProps> = (props) => {
    * scroll offset and plus the viewport's own origin — so the answer is in
    * the absolute screen coordinates a mouse event would have carried, which
    * is what `ContextMenu` clamps against.
-   *
-   * A non-first header draws a divider line above itself and `toVisualLine`
-   * counts it, so the header's own row is one line further down; anchoring on
-   * the divider would open the menu a row above the thing it belongs to.
    */
   const rowAnchor: RowAnchor = (index) => {
     const scrollbox = scrollboxRef;
     if (!scrollbox || index < 0 || index >= props.items.length) return null;
-    const item = props.items[index];
-    if (!item) return null;
-    const divider = item.type === "header" && index > 0 ? 1 : 0;
     const line =
-      toVisualLine(props.items, index, sessionLines) -
-      scrollbox.scrollTop +
-      divider;
+      toVisualLine(props.items, index, sessionLines) - scrollbox.scrollTop;
     return {
       // Indented off the list's left edge: the menu covers the row it belongs
       // to either way, and leaving the selection marker and status glyph
@@ -539,6 +530,17 @@ export const SessionList: Component<SessionListProps> = (props) => {
     };
   };
 
+  const headerFacts = (item: Extract<FlatItem, { type: "header" }>) => {
+    const root = item.repoRoot;
+    if (
+      !root ||
+      !item.members.every(
+        (m) => (m.session.mainRepoRoot ?? m.session.worktreeRoot) === root,
+      )
+    )
+      return undefined;
+    return props.repoFacts?.repos.find((r) => r.repoRoot === root);
+  };
   const renderItem = (item: FlatItem, index: Accessor<number>) => {
     const onActivate = props.onActivate
       ? () => {
@@ -557,18 +559,16 @@ export const SessionList: Component<SessionListProps> = (props) => {
     if (item.type === "header") {
       return (
         <>
-          <Show when={index() > 0}>
-            <box height={1} paddingLeft={1} paddingRight={1}>
-              <Text fg={theme.border}>
-                {"─".repeat(Math.max(0, effectiveWidth() - 5))}
-              </Text>
-            </box>
-          </Show>
           <GroupHeader
             label={item.label}
             count={item.count}
-            width={effectiveWidth() - 3}
-            facts={groupWorktreeFacts(item, worktreeRepos())}
+            // The viewport's width, scrollbar or not, as the label budget.
+            // The rule itself is sized by layout.
+            width={effectiveWidth() - viewportInset()}
+            facts={factsText(headerFacts(item))}
+            notice={
+              hiddenWaitingNotice(item.hiddenWaiting) ?? aliasNotice(item)
+            }
             collapsed={item.collapsed}
             selected={index() === props.selectedIndex}
             members={item.members}
@@ -582,7 +582,8 @@ export const SessionList: Component<SessionListProps> = (props) => {
     }
     return (
       <SessionItem
-        session={item.filteredSession.session}
+        session={enriched(item)}
+        marked={props.marks?.has(item.filteredSession.session.id)}
         selected={index() === props.selectedIndex}
         index={getSessionIndex(props.items, index())}
         highlights={item.filteredSession.highlights}
@@ -615,12 +616,100 @@ export const SessionList: Component<SessionListProps> = (props) => {
     );
   };
 
+  // The head is the quietest line on screen on purpose: the strip above it
+  // owns weight and accent, rows own semantic color, and the head is told
+  // apart by being dimmer than both (the subtext color, lowercase). Caps,
+  // bold, underline and a rule beneath were all tried; each either fought
+  // the strip for its cue or cost a row. Not the overlay color: that is
+  // under 4.5:1 on base in every built-in theme (2.3:1 in latte), and these
+  // labels are read, not decoration.
+  const headerFg = () => (props.dimmed ? theme.border : theme.subtext);
+
+  /**
+   * Header cells for THIS layout, or null when no line should draw. Read off
+   * the same `layout()` the rows use (post prompt-mode), so an inline
+   * collapse that moves `pr` next to the project moves the labels with it.
+   * While the wrapped prompt block is on, rows drop the `prompt` cell
+   * (`withBlock`). The header follows that summary-row layout. A row with
+   * no summary also drops the flex cell, so its right edge can sit left of
+   * the labels; that case is the exception, not a second header.
+   */
+  const headerCells = createMemo(() => {
+    if (!props.columnHeader || props.sidebar) return null;
+    const md = props.breakpoints?.md ?? DEFAULT_BREAKPOINTS.md;
+    // The TERMINAL's width, not the list's: with the preview open the list
+    // lays out a smaller breakpoint, whose labels still fit or blank cell by
+    // cell (`labelFor`). Only a line with nothing left to label is withheld.
+    if (dims().width < md) return null;
+    const row1 = blockActive() ? withBlock().row1 : layout().row1;
+    const cells = columnHeaderCells(row1, props.iconStyle);
+    const tool = labelsToolCell(
+      row1,
+      cells,
+      props.items.flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session] : [],
+      ),
+    );
+    return hasHeaderLabels(cells) || tool ? { ...cells, tool } : null;
+  });
+
   return (
     <box
       flexDirection="column"
       width={props.showPreview ? `${100 - props.previewWidth}%` : "100%"}
       flexShrink={1}
     >
+      <Show when={props.items.length > 0 && headerCells()}>
+        {(cells: () => HeaderCells & { tool: boolean }) => (
+          // Same geometry as a row: the item's 1-column padding either side
+          // (the left one is where the active `▎` draws), cells one gap
+          // apart, right-side labels right-aligned in their fixed boxes.
+          <box
+            flexDirection="row"
+            gap={1}
+            width="100%"
+            height={1}
+            paddingLeft={1}
+            paddingRight={1 + viewportInset()}
+          >
+            <For each={cells().left}>
+              {(cell) =>
+                cell.width > 0 ? (
+                  <box width={cell.width} flexShrink={0}>
+                    <Text fg={headerFg()}>{cell.text}</Text>
+                  </box>
+                ) : (
+                  <box flexGrow={1} flexShrink={1}>
+                    <Text fg={headerFg()}>{cell.text}</Text>
+                  </box>
+                )
+              }
+            </For>
+            <Show when={!cells().left.some((c) => c.width === 0)}>
+              <box flexGrow={1} flexShrink={1} />
+            </Show>
+            {/* Ends where every row's tool cell ends: one gap before the
+                first right-side cell. */}
+            <Show when={cells().tool}>
+              <box width={displayWidth(TOOL_LABEL)} flexShrink={0}>
+                <Text fg={headerFg()}>{TOOL_LABEL}</Text>
+              </box>
+            </Show>
+            {/* `span` is the label box when it differs from the column: a
+                borrowed label fills its box exactly, starting on its own
+                column, and the lender's label still ends on its own. */}
+            <For each={cells().right}>
+              {(cell) => (
+                <box width={cell.span ?? cell.width} flexShrink={0}>
+                  <Text fg={headerFg()}>
+                    {padStartWidth(cell.text, cell.span ?? cell.width)}
+                  </Text>
+                </box>
+              )}
+            </For>
+          </box>
+        )}
+      </Show>
       <Show
         when={props.items.length > 0}
         fallback={
@@ -682,7 +771,10 @@ export const SessionList: Component<SessionListProps> = (props) => {
             });
             // The root's resize fires before its children are measured, so
             // listen on the two nodes whose sizes the scroll effect reads.
-            const bump = () => setScrollboxLayout((v) => v + 1);
+            const bump = () => {
+              setScrollboxLayout((v) => v + 1);
+              setViewportInset(Math.max(0, r.width - r.viewport.width));
+            };
             r.viewport.on("resize", bump);
             r.content.on("resize", bump);
           }}

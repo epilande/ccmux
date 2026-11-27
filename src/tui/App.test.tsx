@@ -10,6 +10,8 @@ import {
 } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockMouse, MouseButtons } from "@opentui/core/testing";
+import { RGBA, TextAttributes } from "@opentui/core";
+import { theme } from "./theme";
 import type { SSECallbacks } from "./utils/sse";
 import * as clipboard from "./utils/clipboard";
 import {
@@ -282,7 +284,11 @@ async function renderApp(
   props: Record<string, unknown> = {},
 ) {
   setup?.renderer.destroy();
-  setup = await testRender(() => <App {...props} />, { width, height });
+  // The column-header line is on by default in every grouping and would
+  // push every row down one line under the pointer coordinates these tests
+  // aim at; they opt out the way a user can. Its own tests pass the mode.
+  const withDefaults = { columnHeader: "never" as const, ...props };
+  setup = await testRender(() => <App {...withDefaults} />, { width, height });
   await setup.renderOnce();
   return setup.captureCharFrame();
 }
@@ -546,6 +552,117 @@ describe("App", () => {
     const frame = setup.captureCharFrame();
     expect(frame).toContain("Search sessions...");
     expect(frame).toContain("type to search");
+  });
+
+  it("keeps a strip click from switching views under an open search", async () => {
+    // The search input owns the text keys and stays mounted while search is
+    // on, so a view switched in under it would take every typed letter as a
+    // panel key at the same time as the input took it as text.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({})) as unknown as typeof fetch;
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" })],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("/");
+      await setup.renderOnce();
+      await setup.mockInput.typeText("al");
+      await setup.renderOnce();
+      const strip = setup.captureCharFrame().split("\n")[0]!;
+      await setup.mockMouse.click(strip.indexOf("Start") + 1, 0);
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+      await setup.mockInput.typeText("pn");
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Filter pull requests");
+      expect(frame).not.toContain("New session");
+      expect(frame).toContain("alpn");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("keeps the group menu's Worktrees from opening the panel under an open search", async () => {
+    // The strip refuses a switch under the search, and the group menu's
+    // Worktrees is the same entry into the same view. Taken directly, it
+    // put the panel up disabled (search owns the keys) over a search whose
+    // Esc never ran (the panel's early return comes first), and the strip
+    // refused the way back: nothing recovered.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({})) as unknown as typeof fetch;
+    const settle = async () => {
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+    };
+    const lineOf = (text: string) =>
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes(text));
+    const colOf = (line: number, text: string) =>
+      setup.captureCharFrame().split("\n")[line]!.indexOf(text) + 1;
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            mainRepoRoot: "/code/alpha",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await settle();
+      setup.mockInput.pressKey("/");
+      await settle();
+      await setup.mockInput.typeText("al");
+      await settle();
+      const header = lineOf("alpha (1)");
+      expect(header).toBeGreaterThan(-1);
+      await setup.mockMouse.click(5, header, MouseButtons.RIGHT);
+      await settle();
+      const item = lineOf("│ Worktrees");
+      expect(item).toBeGreaterThan(-1);
+      await setup.mockMouse.click(colOf(item, "Worktrees"), item);
+      await settle();
+      let frame = setup.captureCharFrame();
+      // Refused, and said why: still Sessions, unscoped, still searching.
+      expect(frame).toContain("scope: all repos");
+      expect(frame).toContain("/ al");
+      expect(frame).toContain("alpha (1)");
+      expect(frame).not.toContain("│ Worktrees");
+      expect(frame).toContain("Esc ends the search first");
+      // And the search is still the search's: typing lands in it, and Esc
+      // ends it.
+      await setup.mockInput.typeText("p");
+      await settle();
+      expect(setup.captureCharFrame()).toContain("alp");
+      deliverEscape(setup.renderer);
+      await settle();
+      frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Search sessions");
+      expect(frame).not.toContain("alp ");
+      // With the search over, the same menu item opens the panel, narrowed
+      // to the group's repo.
+      await setup.mockMouse.click(5, lineOf("alpha (1)"), MouseButtons.RIGHT);
+      await settle();
+      const again = lineOf("│ Worktrees");
+      await setup.mockMouse.click(colOf(again, "Worktrees"), again);
+      await settle();
+      expect(setup.captureCharFrame()).toContain("scope: alpha");
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 
   it("toggles help overlay on ? key", async () => {
@@ -1050,9 +1167,202 @@ describe("App", () => {
     expect(frame).not.toContain("Select a session to preview");
   });
 
+  it("runs the palette's Toggle preview through the P key's own path", async () => {
+    await renderApp();
+    expect(setup.captureCharFrame()).not.toContain(
+      "Select a session to preview",
+    );
+
+    setup.mockInput.pressKey(":");
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Type a command");
+
+    for (const ch of "toggle pre") setup.mockInput.pressKey(ch);
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("Toggle preview");
+    setup.mockInput.pressEnter();
+    // The palette closes first; the key it stands for is replayed on the
+    // next microtask, through the same keyboard handler a real `P` reaches.
+    await Promise.resolve();
+    await setup.renderOnce();
+
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Select a session to preview");
+    expect(frame).not.toContain("Toggle preview");
+    // The same debounced write a `P` makes.
+    await Bun.sleep(350);
+    expect(uiStateWrites).toContainEqual({ showPreview: true });
+  });
+
+  describe("the : palette", () => {
+    const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+    const type = async (text: string) => {
+      for (const ch of text) setup.mockInput.pressKey(ch);
+      await setup.renderOnce();
+    };
+    const run = async (query: string) => {
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      await type(query);
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+    };
+    const oneSession = (overrides: Record<string, unknown> = {}) => {
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%1",
+            ...overrides,
+          }),
+        ],
+        null,
+      );
+    };
+
+    it("opens on : and closes on Esc without running anything", async () => {
+      await renderApp();
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("Type a command");
+      expect(setup.captureCharFrame()).toContain("enter run");
+
+      deliverEscape(setup.renderer);
+      await settle(30);
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Type a command");
+      // Esc closed the palette; it did not also quit or go back.
+      expect(frame).toContain("Sessions (0)");
+    });
+
+    it("runs a palette-only command: Group by directory", async () => {
+      await renderApp(120, 20, { groupBy: "project" });
+      await run("group by dir");
+      await settle(350);
+      expect(uiStateWrites).toContainEqual(
+        expect.objectContaining({ groupBy: "cwd" }),
+      );
+    });
+
+    it("is not offered in the sidebar", async () => {
+      await renderApp(30, 20, { sidebar: true });
+      setup.mockInput.pressKey(":");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("Type a command");
+    });
+
+    it("copies the agent's own session id", async () => {
+      const copied: string[] = [];
+      const copySpy = spyOn(clipboard, "copyToClipboard").mockImplementation(
+        async (text: string) => {
+          copied.push(text);
+          return { ok: true, via: "command" };
+        },
+      );
+      try {
+        await renderApp(120, 20, { groupBy: "none" });
+        oneSession({ nativeSessionId: "native-123" });
+        await setup.renderOnce();
+        await run("copy session id");
+        expect(copied).toEqual(["native-123"]);
+      } finally {
+        copySpy.mockRestore();
+      }
+    });
+
+    // The test renderer never finished a real terminal setup, so its own
+    // suspend() rejects, which OpenTUI 0.8's awaited suspend now reports. A
+    // real terminal suspends; stand in for one.
+    const stubSuspend = () => {
+      const suspend = spyOn(setup.renderer, "suspend").mockImplementation(
+        async () => {},
+      );
+      const resume = spyOn(setup.renderer, "resume").mockImplementation(
+        async () => {},
+      );
+      return { suspend, resume };
+    };
+
+    it("says so when the pager exits nonzero", async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL) =>
+        String(url).includes("/transcript")
+          ? Response.json({
+              source: "transcript",
+              turns: [{ role: "assistant", text: "fixed it" }],
+            })
+          : Response.json({})) as unknown as typeof fetch;
+      try {
+        await renderApp(120, 20, {
+          groupBy: "none",
+          pager: { env: { PAGER: "nope" }, spawn: async () => 127 },
+        });
+        stubSuspend();
+        oneSession();
+        await setup.renderOnce();
+        await run("open transcript");
+        await settle(20);
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("nope exited 127");
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+
+    it("pipes the session's rendered turns to the pager", async () => {
+      const original = globalThis.fetch;
+      const asked: string[] = [];
+      globalThis.fetch = (async (url: string | URL) => {
+        const href = String(url);
+        if (href.includes("/transcript")) {
+          asked.push(href);
+          return Response.json({
+            source: "transcript",
+            turns: [
+              { role: "user", text: "fix the bug" },
+              { role: "assistant", text: "fixed it" },
+            ],
+          });
+        }
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      const piped: { argv: string[]; text: string }[] = [];
+      try {
+        await renderApp(120, 20, {
+          groupBy: "none",
+          pager: {
+            env: {},
+            spawn: async (argv: string[], text: string) => {
+              piped.push({ argv, text });
+              return 0;
+            },
+          },
+        });
+        const terminal = stubSuspend();
+        oneSession();
+        await setup.renderOnce();
+        await run("open transcript");
+        await settle(20);
+        expect(asked[0]).toContain("/sessions/s1/transcript");
+        expect(piped).toHaveLength(1);
+        expect(piped[0]!.argv).toEqual(["less", "+G"]);
+        expect(piped[0]!.text).toContain("fix the bug");
+        expect(piped[0]!.text).toContain("fixed it");
+        expect(terminal.suspend).toHaveBeenCalledTimes(1);
+        expect(terminal.resume).toHaveBeenCalledTimes(1);
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  });
+
   it("updates session count in header after SSE init", async () => {
     await renderApp();
-    expect(setup.captureCharFrame()).toContain("(0)");
+    expect(setup.captureCharFrame()).toContain("Sessions (0)");
 
     sseCallbacks!.onInit(
       [
@@ -1062,7 +1372,53 @@ describe("App", () => {
       null,
     );
     await setup.renderOnce();
-    expect(setup.captureCharFrame()).toContain("(2)");
+    expect(setup.captureCharFrame()).toContain("Sessions (2)");
+  });
+
+  it("carries connection, health, invokes and hide-idle on the view strip", async () => {
+    await renderApp(120, 20);
+    const strip = () => setup.captureCharFrame().split("\n")[0]!;
+    sseCallbacks!.onConnectionStateChange!("connected");
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "a", cwd: "/a" }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "b",
+          cwd: "/b",
+          status: "working",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    expect(strip()).toContain("Sessions (2) ");
+    for (const quiet of ["●", "▲", "invoking", "active"])
+      expect(strip()).not.toContain(quiet);
+
+    setup.mockInput.pressKey("f");
+    await setup.renderOnce();
+    expect(strip()).toContain("Sessions (1/2) ");
+    expect(strip()).toContain("active");
+
+    sseCallbacks!.onDaemonHealth!({
+      degraded: true,
+      reason: "ps spawn failed",
+      since: "2024-01-15T12:00:00Z",
+    });
+    sseCallbacks!.onInvocationStarted!({
+      type: "invocation_started",
+      timestamp: "2024-01-15T12:00:00Z",
+      invocationId: "inv_x",
+      agent: "codex",
+      cwd: "/a",
+      startedAt: "2024-01-15T12:00:00Z",
+    });
+    sseCallbacks!.onConnectionStateChange!("reconnecting");
+    await setup.renderOnce();
+    expect(strip()).toContain(
+      "● reconnecting · ▲ degraded · 1 invoking · active",
+    );
   });
 
   it("flashes pane on Enter selection in persistent picker mode", async () => {
@@ -1114,6 +1470,76 @@ describe("App", () => {
     flashPaneDetachedSpy.mockClear();
   }
 
+  it("draws the column header by default in every grouping, and not with never", async () => {
+    const seed = async (props: Record<string, unknown>) => {
+      await renderApp(120, 20, props);
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            tmuxPane: "%5",
+          }),
+        ],
+        null,
+      );
+      // One frame to lay the list out, one more for the header to read the
+      // scrollbox inset it pads by (see the SessionList header test).
+      await setup.renderOnce();
+      await setup.renderOnce();
+      return setup.captureCharFrame().split("\n");
+    };
+
+    const flat = await seed({ groupBy: "none", columnHeader: undefined });
+    expect(flat[FIRST_CONTENT_ROW_Y]).toContain("pane");
+    expect(flat[FIRST_CONTENT_ROW_Y]).toContain("age");
+    expect(flat[FIRST_CONTENT_ROW_Y + 1]).toContain("myapp");
+    setup.renderer.destroy();
+
+    const grouped = await seed({ groupBy: "project", columnHeader: undefined });
+    expect(grouped[FIRST_CONTENT_ROW_Y]).toContain("version");
+    // The group line sits between the labels and the rows they name.
+    expect(grouped[FIRST_CONTENT_ROW_Y + 1]).toContain("myapp (1)");
+    setup.renderer.destroy();
+
+    const off = await seed({ groupBy: "project", columnHeader: "never" });
+    expect(off.join("\n")).not.toContain("version");
+    expect(off[FIRST_CONTENT_ROW_Y]).toContain("myapp");
+  });
+
+  it("keeps the default column header, tool label included, above the needs-attention band", async () => {
+    const seed = async (props: Record<string, unknown>) => {
+      await renderApp(120, 20, { groupBy: "none", ...props });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            status: "waiting",
+            attentionType: "permission",
+            pendingTool: "Bash",
+          }),
+          mockEnrichedSession({ id: "s2", project: "other" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      await setup.renderOnce();
+      return setup.captureCharFrame().split("\n");
+    };
+
+    const auto = await seed({ columnHeader: undefined });
+    const header = auto[FIRST_CONTENT_ROW_Y]!;
+    expect(header).toContain("pane");
+    expect(auto[FIRST_CONTENT_ROW_Y + 1]).toContain("needs attention");
+    // `tool` ends where the waiting row's tool name does.
+    const row = auto.find((line) => line.includes("Bash"))!;
+    expect(header.indexOf("tool") + "tool".length).toBe(
+      row.indexOf("Bash") + "Bash".length,
+    );
+  });
+
   it("flashes pane on click of session row in persistent picker mode", async () => {
     await setupPersistentPickerWithSession({
       groupBy: "none",
@@ -1144,14 +1570,14 @@ describe("App", () => {
       groupBy: "project",
       tmuxPane: "%5",
     });
-    expect(setup.captureCharFrame()).toContain("▼ myapp");
+    expect(setup.captureCharFrame()).toContain("▾ myapp");
 
     await setup.mockMouse.click(5, FIRST_CONTENT_ROW_Y);
     await setup.renderOnce();
 
     const after = setup.captureCharFrame();
-    expect(after).toContain("▶ myapp");
-    expect(after).not.toContain("▼ myapp");
+    expect(after).toContain("▸ myapp");
+    expect(after).not.toContain("▾ myapp");
   });
 
   it("ignores row clicks while help overlay is open", async () => {
@@ -1347,7 +1773,7 @@ describe("App sidebar mode", () => {
       const row = setup
         .captureCharFrame()
         .split("\n")
-        .findIndex((line) => new RegExp(`[▼▶] ${project}`).test(line));
+        .findIndex((line) => new RegExp(`[▾▸] ${project}`).test(line));
       expect(row).toBeGreaterThan(0);
       return row;
     }
@@ -1377,7 +1803,7 @@ describe("App sidebar mode", () => {
       await settle();
       releasePost();
       await settle();
-      expect(setup.captureCharFrame()).toContain("▶ beta");
+      expect(setup.captureCharFrame()).toContain("▸ beta");
       expect(switchToPaneSpy).not.toHaveBeenCalled();
     });
 
@@ -1441,7 +1867,7 @@ describe("App sidebar mode", () => {
       async ({ direction, scrollTop: top }) => {
         // Just past the viewport, so alpha's row is on screen at both ends.
         const { releasePost, postCount } = await clickAlphaWithPendingPost({
-          extraRows: 15,
+          extraRows: 16,
           scrollTop: top,
         });
         const [box] = findScrollBoxes(setup.renderer);
@@ -1538,6 +1964,38 @@ describe("App sidebar mode", () => {
     } finally {
       process.exit = originalExit;
     }
+  });
+
+  it("shows the scope and hidden count when s narrows the sidebar", async () => {
+    await renderApp(40, 20, { sidebar: true, groupBy: "none" });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "a",
+          project: "one",
+          status: "working",
+          tmuxPane: "%1",
+          mainRepoRoot: "/code/alpha",
+        }),
+        mockEnrichedSession({
+          id: "b",
+          project: "two",
+          status: "working",
+          tmuxPane: "%2",
+          mainRepoRoot: "/code/beta",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    setup.mockInput.pressKey("j");
+    setup.mockInput.pressKey("s");
+    await setup.renderOnce();
+    // `j` selects the second session, so its repo is the scope.
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("(1/2) beta");
+    expect(frame).toMatch(/^ 1 /m);
+    expect(frame).not.toMatch(/^ 2 /m);
   });
 
   it("flashes pane on Enter selection in sidebar mode", async () => {
@@ -1849,42 +2307,48 @@ describe("App sidebar mode", () => {
   });
 
   it("debounces flash during rapid navigation", async () => {
-    await renderApp(30, 20, { sidebar: true });
-    sseCallbacks!.onInit(
-      [
-        mockEnrichedSession({
-          id: "s1",
-          project: "alpha",
-          cwd: "/code/alpha",
-          tmuxPane: "%10",
-        }),
-        mockEnrichedSession({
-          id: "s2",
-          project: "alpha",
-          cwd: "/code/alpha",
-          tmuxPane: "%20",
-        }),
-      ],
-      null,
-    );
-    await setup.renderOnce();
-    flashPaneSpy.mockClear();
-    isPaneInCurrentWindowSpy.mockClear();
+    const hydration = mockSidebarStateFetch({});
+    try {
+      await renderApp(30, 20, { sidebar: true });
+      await hydration.getPromise();
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%10",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "alpha",
+            cwd: "/code/alpha",
+            tmuxPane: "%20",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      flashPaneSpy.mockClear();
+      isPaneInCurrentWindowSpy.mockClear();
 
-    const flashed = new Promise<void>((resolve) => {
-      flashPaneSpy.mockImplementationOnce(() => resolve());
-    });
+      const flashed = new Promise<void>((resolve) => {
+        flashPaneSpy.mockImplementationOnce(() => resolve());
+      });
 
-    // Deliver one burst without yielding to hydration or debounce timers
-    // between keys; rendering speed must not decide whether input is rapid.
-    setup.mockInput.pressKey("j");
-    setup.mockInput.pressKey("j");
+      // Deliver one burst without yielding to hydration or debounce timers
+      // between keys; rendering speed must not decide whether input is rapid.
+      setup.mockInput.pressKey("j");
+      setup.mockInput.pressKey("j");
 
-    await flashed;
+      await flashed;
 
-    // Should only flash the final destination pane, not intermediate ones
-    expect(flashPaneSpy).toHaveBeenCalledTimes(1);
-    expect(flashPaneSpy).toHaveBeenCalledWith("%20");
+      // Should only flash the final destination pane, not intermediate ones
+      expect(flashPaneSpy).toHaveBeenCalledTimes(1);
+      expect(flashPaneSpy).toHaveBeenCalledWith("%20");
+    } finally {
+      hydration.restore();
+    }
   });
 
   it("ignores stale sidebar state echo-back via version", async () => {
@@ -2011,7 +2475,7 @@ describe("App waiting-row group movement", () => {
         setup.mockInput.pressKey("x");
         await setup.renderOnce();
         expect(setup.captureCharFrame()).toContain("Kill Session?");
-        expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+        expect(setup.captureCharFrame()).not.toContain("Kill Sessions?");
       },
     );
   }
@@ -2244,18 +2708,52 @@ describe("App kill/restart dispatch routing", () => {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
-      expect(setup.captureCharFrame()).not.toContain("Kill Group?");
+      expect(setup.captureCharFrame()).not.toContain("Kill Sessions?");
       expect(calls.some((c) => c.url.endsWith("/kill"))).toBe(false);
       setup.mockInput.pressKey("m");
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain("Kill group");
       expect(setup.captureCharFrame()).not.toContain("New session");
-      expect(setup.captureCharFrame()).not.toContain("Worktrees");
+      expect(setup.captureCharFrame()).not.toContain("┌");
       for (const key of ["j", "x"]) {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
       expect(setup.captureCharFrame()).toContain("Kill Session?");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => c.url.split("/sessions/")[1]),
+      ).toEqual(["a/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("kills the menu's group on its x, whatever is marked elsewhere", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", tmuxPane: "%1" }),
+          mockEnrichedSession({ id: "b", project: "beta", tmuxPane: "%2" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // alpha header, a, beta header, b: mark b, then open alpha's menu.
+      for (const key of ["g", "g", "j", "j", "j", " ", "g", "g", "m"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).toMatch(/Kill group\s+x/);
+      // The advertised key does what clicking the item does: this group.
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("alpha");
       setup.mockInput.pressKey("y");
       await setup.renderOnce();
       expect(
@@ -2288,16 +2786,16 @@ describe("App kill/restart dispatch routing", () => {
         await setup.renderOnce();
       }
       let frame = setup.captureCharFrame();
-      expect(frame).not.toContain("Kill Group?");
+      expect(frame).not.toContain("Kill Sessions?");
       expect(frame).not.toContain("Kill Session?");
       expect(frame).not.toContain("Kill All");
       setup.mockInput.pressKey("m");
       await setup.renderOnce();
       expect(setup.captureCharFrame()).not.toContain("Kill group");
       expect(setup.captureCharFrame()).not.toContain("New session");
-      expect(setup.captureCharFrame()).not.toContain("Worktrees");
+      expect(setup.captureCharFrame()).not.toContain("┌");
+      // Enter is the header's collapse verb (space marks its rows here).
       setup.mockInput.pressEnter();
-      setup.mockInput.pressKey(" ");
       await setup.renderOnce();
       frame = setup.captureCharFrame();
       expect(frame).toContain("sessions (2)");
@@ -2310,6 +2808,44 @@ describe("App kill/restart dispatch routing", () => {
         ),
       ).toBe(false);
       expect(calls.some((c) => c.url.endsWith("/kill"))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps s on a synthetic header global instead of scoping to its first member's repo", async () => {
+    const { restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "a",
+            status: "waiting",
+            tmuxPane: "%1",
+            mainRepoRoot: "/code/alpha",
+          }),
+          mockEnrichedSession({
+            id: "b",
+            status: "working",
+            tmuxPane: "%2",
+            mainRepoRoot: "/code/beta",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // The band header, then the `sessions` header below its one row.
+      for (const key of ["g", "g", "s", "j", "j", "s"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+        expect(setup.captureCharFrame()).toContain("all repos");
+      }
+      // A real row still scopes to its own repo.
+      setup.mockInput.pressKey("j");
+      setup.mockInput.pressKey("s");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("all repos");
     } finally {
       restore();
     }
@@ -2336,7 +2872,7 @@ describe("App kill/restart dispatch routing", () => {
         setup.mockInput.pressKey(key);
         await setup.renderOnce();
       }
-      expect(setup.captureCharFrame()).toContain("Kill Group?");
+      expect(setup.captureCharFrame()).toContain("Kill Sessions?");
       setup.mockInput.pressKey("y");
       await setup.renderOnce();
       expect(
@@ -2344,6 +2880,29 @@ describe("App kill/restart dispatch routing", () => {
           .filter((c) => c.url.endsWith("/kill"))
           .map((c) => c.url.split("/sessions/")[1]),
       ).toEqual(["b/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
+  it("names a marked kill by the marks, not the selected group header", async () => {
+    const { restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", status: "working" }),
+          mockEnrichedSession({ id: "b", project: "beta", status: "working" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      for (const key of ["j", " ", "j", "j", " ", "g", "g", "x"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("2 sessions · ");
     } finally {
       restore();
     }
@@ -2388,7 +2947,7 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
-  it("kill-all delegates invoke teardown to the daemon (client fires only /sessions/kill-all)", async () => {
+  it("X cancels displayed invokes without sweeping undisplayed workers", async () => {
     const { calls, restore } = captureFetch();
     try {
       await renderApp(120, 20, { groupBy: "none" });
@@ -2405,10 +2964,8 @@ describe("App kill/restart dispatch routing", () => {
       );
       // A subprocess invoke (fabricates a row + counts in flight) and a Claude
       // invoke (counts in flight with NO row until its session_created lands).
-      // The client no longer reaps these per-id: the daemon owns invoke
-      // teardown on kill-all (its in-flight set is authoritative, while the
-      // client's is a lossy mirror). So the client must fire ONLY the single
-      // /sessions/kill-all and never a per-invoke cancel.
+      // X targets displayed rows. The Claude worker has no displayed session
+      // yet, so it must not be swept into the confirmation's target set.
       sseCallbacks!.onInvocationStarted!({
         type: "invocation_started",
         timestamp: "2024-01-15T12:00:00Z",
@@ -2431,16 +2988,21 @@ describe("App kill/restart dispatch routing", () => {
       setup.mockInput.pressKey("y"); // confirm -> confirmDialogAction
       await setup.renderOnce();
       expect(calls.some((c) => c.url.includes("/sessions/kill-all"))).toBe(
-        true,
+        false,
       );
-      // Daemon reaps the invokes; the client never fires a per-invoke cancel.
-      expect(calls.some((c) => c.url.includes("/invoke/"))).toBe(false);
+      expect(calls.some((c) => c.url.includes("/sessions/s1/kill"))).toBe(true);
+      expect(
+        calls.some((c) => c.url.includes("/invoke/inv_codex/cancel")),
+      ).toBe(true);
+      expect(calls.some((c) => c.url.includes("/invoke/inv_claude/"))).toBe(
+        false,
+      );
     } finally {
       restore();
     }
   });
 
-  it("kill-all with no in-flight invokes only hits /sessions/kill-all", async () => {
+  it("X kills only the sessions in its confirmation", async () => {
     const { calls, restore } = captureFetch();
     try {
       await renderApp(120, 20, { groupBy: "none" });
@@ -2461,9 +3023,106 @@ describe("App kill/restart dispatch routing", () => {
       setup.mockInput.pressKey("y"); // confirm -> confirmDialogAction
       await setup.renderOnce();
       expect(calls.some((c) => c.url.includes("/sessions/kill-all"))).toBe(
-        true,
+        false,
       );
+      expect(calls.some((c) => c.url.includes("/sessions/s1/kill"))).toBe(true);
       expect(calls.some((c) => c.url.includes("/invoke/"))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("scoped X freezes the count and targets, excluding other repos and later arrivals", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "none" });
+      const sessions = [
+        mockEnrichedSession({
+          id: "s1",
+          mainRepoRoot: "/code/a",
+          cwd: "/code/a",
+          tmuxPane: "%1",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          mainRepoRoot: "/code/b",
+          cwd: "/code/b",
+          tmuxPane: "%2",
+        }),
+      ];
+      sseCallbacks!.onInit(sessions, null);
+      await setup.renderOnce();
+      setup.mockInput.pressKey("s");
+      await setup.renderOnce();
+      setup.mockInput.pressKey("X");
+      await setup.renderOnce();
+      const confirmation = setup.captureCharFrame();
+      expect(confirmation).toContain("1 session");
+      sseCallbacks!.onInit(
+        [
+          ...sessions,
+          mockEnrichedSession({
+            id: "s3",
+            mainRepoRoot: "/code/a",
+            cwd: "/code/a",
+            tmuxPane: "%3",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("1 session");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => new URL(c.url).pathname),
+      ).toEqual(["/sessions/s1/kill"]);
+      expect(calls.some((c) => c.url.includes("kill-all"))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it("X excludes collapsed session groups, matching Worktrees and Start", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 20, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "a",
+            mainRepoRoot: "/code/a",
+            cwd: "/code/a",
+            tmuxPane: "%1",
+          }),
+          mockEnrichedSession({
+            id: "s2",
+            project: "b",
+            mainRepoRoot: "/code/b",
+            cwd: "/code/b",
+            tmuxPane: "%2",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("g");
+      setup.mockInput.pressKey("g");
+      setup.mockInput.pressEnter();
+      await setup.renderOnce();
+      setup.mockInput.pressKey("X");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("1 session");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => new URL(c.url).pathname),
+      ).toEqual(["/sessions/s2/kill"]);
     } finally {
       restore();
     }
@@ -7030,6 +7689,9 @@ describe("App row menu (m)", () => {
       // The group menu's own items, and none of the row menu's.
       expect(frame).toContain("Pin to top");
       expect(frame).toContain("Kill group");
+      // Hints name the list's keys: `X` there kills everything, Space marks.
+      expect(frame).toMatch(/Kill group\s+x/);
+      expect(frame).toMatch(/Collapse\s+enter/);
       expect(frame).not.toContain("Attach");
     } finally {
       restore();
@@ -8234,6 +8896,47 @@ describe("App hand off to", () => {
     }
   });
 
+  it("keeps a strip click and the Start keys off an open handoff dialog", async () => {
+    // The repro: with the note focused, a click on the strip's Start tab
+    // switched views under the dialog, Start's `n` then opened a new-session
+    // dialog, and Enter there submitted the handoff nobody could see.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      setup.mockInput.pressTab();
+      await settle();
+      await setup.renderOnce();
+      const strip = setup.captureCharFrame().split("\n")[0]!;
+      const start = strip.indexOf("Start");
+      expect(start).toBeGreaterThan(-1);
+      await setup.mockMouse.click(start + 1, 0);
+      await settle();
+      await setup.renderOnce();
+      await press("n");
+      const frame = squish(setup.captureCharFrame());
+      // Still the dialog over Sessions: no Start body under it, and no
+      // new-session dialog stacked on it.
+      expect(frame).toContain("entersend");
+      expect(frame).toContain("Toproj2Claude");
+      expect(frame).not.toContain("Newsession");
+      expect(frame).not.toContain("Filterpullrequests");
+      expect(posted).toEqual([]);
+      // The `n` was the note's, which is where the focus was.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.body).toMatchObject({
+        from: "s1",
+        to: "s2",
+        note: "n",
+      });
+    } finally {
+      restore();
+    }
+  });
+
   it("omits a blank note rather than sending an empty one", async () => {
     const { posted, restore } = withDaemon();
     try {
@@ -8580,6 +9283,217 @@ describe("App worktrees panel (W)", () => {
   // `initialView` reads the return cursor to pick the view. While that
   // branch sent the worktree's PATH, cancelling the dialog came back to the
   // Worktrees view, where the adjacent not-checked-out row came back right.
+  for (const key of ["W", "N"]) {
+    it(`same-view ${key} reloads the advertised scope after widening`, async () => {
+      const original = globalThis.fetch;
+      const reads: URL[] = [];
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        );
+        reads.push(url);
+        const roots = ["/code/myapp", "/code/other"].filter(
+          (root) =>
+            !url.searchParams.get("repo") ||
+            root === url.searchParams.get("repo"),
+        );
+        if (url.pathname === "/worktrees")
+          return Response.json({
+            repos: roots.map((root) => ({
+              repoRoot: root,
+              repoName: root.split("/").pop(),
+              worktrees: [
+                {
+                  ...WORKTREE_ROW,
+                  repoRoot: root,
+                  path: root + "/wt/feature",
+                  name: root === "/code/other" ? "other-checkout" : "feature",
+                },
+              ],
+            })),
+          });
+        if (url.pathname === "/prs")
+          return Response.json({
+            repos: roots.map((root) => ({
+              repoRoot: root,
+              repoName: root.split("/").pop(),
+              prs: [
+                {
+                  number: 7,
+                  title: root === "/code/other" ? "other-source" : "my-source",
+                  url: "https://github.com/o/r/pull/7",
+                  author: "owner",
+                  headRefName: "feat/x",
+                  headRefOid: "sha7",
+                  isDraft: false,
+                  reviewDecision: null,
+                  ciStatus: null,
+                },
+              ],
+            })),
+            errors: [],
+          });
+        if (url.pathname.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [] });
+        return Response.json({ repos: [], errors: [], headerPR: true });
+      }) as typeof fetch;
+      try {
+        await renderApp(120, 24, { groupBy: "none" });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              cwd: "/code/myapp",
+              mainRepoRoot: "/code/myapp",
+              tmuxPane: "%1",
+            }),
+          ],
+          null,
+        );
+        const frame = async () => {
+          await new Promise((done) => setTimeout(done, 0));
+          await setup.renderOnce();
+          return setup.captureCharFrame();
+        };
+        await frame();
+        setup.mockInput.pressKey(key);
+        await frame();
+        setup.mockInput.pressKey("s");
+        const wide = await frame();
+        expect(wide).toContain("all repos");
+        const other = key === "W" ? "other-checkout" : "other-source";
+        expect(wide).toContain(other);
+        const before = reads.length;
+        setup.mockInput.pressKey(key);
+        const narrow = await frame();
+        expect(narrow).not.toContain("all repos");
+        expect(narrow).not.toContain(other);
+        expect(
+          reads
+            .slice(before)
+            .filter((u) => u.pathname === "/worktrees")
+            .map((u) => u.searchParams.get("repo")),
+        ).toEqual(["/code/myapp"]);
+        setup.mockInput.pressKey("R");
+        expect(await frame()).not.toContain(other);
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+  }
+
+  for (const view of ["sessions", "worktrees"]) {
+    it(`${view} does not carry z through help into the next restart`, async () => {
+      const { restore, frame } = await openPanel([
+        {
+          ...WORKTREE_ROW,
+          sessions: [
+            {
+              id: "s1",
+              agentType: "claude",
+              status: "idle",
+              tmuxPane: "%1",
+              tmuxTarget: "w:0.1",
+              pid: 1,
+            },
+          ],
+        },
+      ]);
+      try {
+        if (view === "sessions") setup.mockInput.pressKey("h");
+        await frame();
+        setup.mockInput.pressKey("z");
+        setup.mockInput.pressKey("?");
+        await frame();
+        deliverEscape(setup.renderer);
+        await frame();
+        setup.mockInput.pressKey("r");
+        expect(squish(await frame())).toContain("RestartSession?");
+      } finally {
+        restore();
+      }
+    });
+  }
+
+  it("keeps the strip from switching views during removal confirmation", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      if (String(input).includes("prune-candidates"))
+        return Response.json({
+          candidates: [
+            {
+              ...WORKTREE_ROW,
+              dirty: false,
+              modified: 0,
+              untracked: 0,
+              ignoredFiles: [],
+              ignoredDirs: [],
+              reason: "pr-merged",
+              detail: "PR #7 merged",
+              pr: null,
+              branchDeletion: "force",
+              adminDir: null,
+            },
+          ],
+          skipped: [],
+        });
+      return savedFetch(input, init);
+    }) as typeof fetch;
+    try {
+      setup.mockInput.pressKey("R");
+      await frame();
+      setup.mockInput.pressKey("x");
+      expect(await frame()).toContain("Remove worktrees?");
+      await setup.mockMouse.click(3, 0);
+      expect(await frame()).toContain("Remove worktrees?");
+      setup.mockInput.pressKey("l");
+      expect(await frame()).toContain("Remove worktrees?");
+      deliverEscape(setup.renderer);
+      await frame();
+      await setup.mockMouse.click(3, 0);
+      expect(await frame()).not.toContain("x remove");
+    } finally {
+      globalThis.fetch = savedFetch;
+      restore();
+    }
+  });
+
+  it("cycles persistent views, retains worktree marks and shares scope", async () => {
+    const { restore, frame } = await openPanel([WORKTREE_ROW]);
+    try {
+      setup.mockInput.pressKey(" ");
+      expect(await frame()).toContain(" ✓");
+      setup.mockInput.pressKey("s");
+      expect(await frame()).toContain("all repos");
+      setup.mockInput.pressKey(" ");
+      await frame();
+      setup.mockInput.pressKey("h");
+      expect(await frame()).not.toContain("x remove");
+      expect(await frame()).toContain("all repos");
+      setup.mockInput.pressKey("l");
+      expect(await frame()).toContain(" ✓");
+      setup.mockInput.pressKey("l");
+      // Start: the footer that teaches `/` and goes back with `q`.
+      const start = await frame();
+      expect(start).toContain("/ search");
+      expect(start).toContain("q back");
+      setup.mockInput.pressKey("h");
+      expect(await frame()).toContain(" ✓");
+      setup.mockInput.pressKey("?");
+      expect(await frame()).toContain("Keyboard Shortcuts");
+      setup.mockInput.pressKey("x");
+      expect(await frame()).not.toContain("Delete");
+      deliverEscape(setup.renderer);
+      expect(await frame()).toContain("x remove");
+    } finally {
+      restore();
+    }
+  });
+
   it("returns to the PR view after cancelling out of a checked-out PR", async () => {
     const held = {
       ...WORKTREE_ROW,
@@ -8612,7 +9526,7 @@ describe("App worktrees panel (W)", () => {
       setup.mockInput.pressKey("l");
       const prs = await frame();
       expect(prs).toContain("#7 seven");
-      expect(prs).toContain("checked out in pr-7");
+      expect(prs).toContain("→ pr-7");
 
       setup.mockInput.pressEnter();
       expect(await frame()).toContain("New session in worktree");
@@ -8623,7 +9537,7 @@ describe("App worktrees panel (W)", () => {
 
       // The PR VIEW, on the PR row — not the Worktrees view on the path.
       expect(back).toContain("#7 seven");
-      expect(back).toContain("checked out in pr-7");
+      expect(back).toContain("→ pr-7");
       expect(back).not.toContain("main checkout");
     } finally {
       restore();
@@ -8663,7 +9577,7 @@ describe("App worktrees panel (W)", () => {
     );
     try {
       setup.mockInput.pressKey("l");
-      expect(await frame()).toContain("checked out in main checkout");
+      expect(await frame()).toContain("#7 seven → main checkout");
       setup.mockInput.pressEnter();
 
       expect(await frame()).toContain("New session in worktree");
@@ -8821,7 +9735,7 @@ describe("App worktrees panel (W)", () => {
       expect(switchToPaneSpy.mock.calls[0]?.[0]).toBe("%1");
       // Closed BEFORE acting, so the pane switch is not happening under a
       // full-screen overlay.
-      expect(shown).not.toContain("Worktrees");
+      expect(shown).not.toContain("x remove");
     } finally {
       restoreExit();
       restore();
@@ -8925,7 +9839,7 @@ describe("App worktrees panel (W)", () => {
       },
     ]);
     try {
-      setup.mockInput.pressKey("d");
+      setup.mockInput.pressKey("D", { shift: true });
       // The merge-base resolves first, so the review starts a tick later.
       const duringReview = await frame();
       expect(runHunkReviewSpy).toHaveBeenCalledTimes(1);
@@ -8937,7 +9851,7 @@ describe("App worktrees panel (W)", () => {
         target: "base-sha",
       });
       // Gone while the review is still running, not merely afterwards.
-      expect(duringReview).not.toContain("Worktrees");
+      expect(duringReview).not.toContain("x remove");
 
       resolveReview({ ok: true, notes: reviewNotes });
       const afterReview = squish(await frame());
@@ -9115,9 +10029,12 @@ describe("App worktrees panel (W)", () => {
       // row text in the char frame; the head is the part that stays whole.
       expect(squish(shown)).toContain(squish("review note captured"));
       expect(shown).toContain("Worktrees");
-      const lines = shown.split("\n");
-      expect(lines.find((l) => l.includes("bravo"))).toContain("┃");
-      expect(lines.find((l) => l.includes("feature"))).not.toContain("┃");
+      setup.mockInput.pressKey("y");
+      await frame();
+      expect(liveEffects.copyText).toHaveBeenCalledWith(
+        "/code/myapp/wt/bravo",
+        setup.renderer,
+      );
     } finally {
       restore();
     }
@@ -9149,7 +10066,7 @@ describe("App worktrees panel (W)", () => {
       const confirmUp = await frame();
       expect(squish(confirmUp)).toContain(squish("Send review comments"));
       // Not back yet: reopening here would bury the dialog on screen.
-      expect(confirmUp).not.toContain("Worktrees");
+      expect(confirmUp).not.toContain("x remove");
       // Cancel is a resolution too; the notes are dropped, the panel is not.
       setup.mockInput.pressKey("n");
       const after = await frame();
@@ -9173,7 +10090,7 @@ describe("App worktrees panel (W)", () => {
     };
     const { restore, frame } = await openPanel([WORKTREE_ROW, bravo]);
     try {
-      // bravo sorts first (same bucket, name order), so j lands on feature.
+      // Local list order stays stable as classification arrives; j lands on bravo.
       setup.mockInput.pressKey("j");
       setup.mockInput.pressEnter();
       const dialog = await frame();
@@ -9183,20 +10100,672 @@ describe("App worktrees panel (W)", () => {
       deliverEscape(setup.renderer);
       await new Promise((r) => setTimeout(r, 0));
       const shown = await frame();
-      expect(shown).toContain("Pull Requests");
+      expect(shown).toContain("x remove");
       expect(squish(shown)).not.toContain(squish("New session in worktree"));
-      const lines = shown.split("\n");
-      expect(lines.find((l) => l.includes("feature"))).toContain("┃");
-      expect(lines.find((l) => l.includes("bravo"))).not.toContain("┃");
+      setup.mockInput.pressKey("y");
+      await frame();
+      expect(liveEffects.copyText).toHaveBeenCalledWith(
+        "/code/myapp/wt/bravo",
+        setup.renderer,
+      );
     } finally {
       restore();
     }
   });
 
-  // Tab's rescope is panel-local, so the return must carry it in the action
-  // payload: reading the store reopened a widened panel back on its narrow
-  // opening repo (wrong scope, lost cursor, cache miss, one wrong capture).
-  it("keeps a Tab-widened scope across the dialog round trip", async () => {
+  // The return marker carries ONE scope, the one the panel showed. `s`
+  // narrows to the cursor row's repo, never to the repo the panel was opened
+  // on, so a widened return needs no "opening repo" to narrow back: it needs
+  // the cursor back on the row it left, which is what these pin.
+  describe("n dialog round trip", () => {
+    const OTHER_ROW = {
+      ...WORKTREE_ROW,
+      path: "/code/other/wt/other-checkout",
+      repoRoot: "/code/other",
+      repoName: "other",
+      name: "other-checkout",
+    };
+
+    /** Two repos, and a `/worktrees` read that honors `repo=` the way the
+     *  daemon does, so a narrowed panel visibly drops the other repo. */
+    function mockTwoRepoFetch(reads: URL[]) {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        );
+        reads.push(url);
+        const repo = url.searchParams.get("repo");
+        if (url.pathname.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [], open: [] });
+        if (url.pathname === "/worktrees")
+          return Response.json({
+            repos: [
+              {
+                repoRoot: "/code/myapp",
+                repoName: "myapp",
+                rows: [WORKTREE_ROW],
+              },
+              { repoRoot: "/code/other", repoName: "other", rows: [OTHER_ROW] },
+            ]
+              .filter((r) => !repo || r.repoRoot === repo)
+              .map(({ rows, ...r }) => ({ ...r, worktrees: rows })),
+          });
+        return Response.json({});
+      }) as typeof fetch;
+      return () => {
+        globalThis.fetch = originalFetch;
+      };
+    }
+
+    async function settle() {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await setup.renderOnce();
+      }
+      return setup.captureCharFrame();
+    }
+
+    const listReads = (reads: URL[], from: number) =>
+      reads
+        .slice(from)
+        .filter((u) => u.pathname === "/worktrees")
+        .map((u) => u.searchParams.get("repo"));
+
+    async function mountWithSession() {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+            mainRepoRoot: "/code/myapp",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+    }
+
+    async function cancelNew() {
+      setup.mockInput.pressKey("n");
+      expect(squish(await settle())).toContain(squish("New session"));
+      deliverEscape(setup.renderer);
+      return settle();
+    }
+
+    it("narrows back to the row's repo after a widened round trip", async () => {
+      const reads: URL[] = [];
+      const restore = mockTwoRepoFetch(reads);
+      try {
+        await mountWithSession();
+        setup.mockInput.pressKey("W", { shift: true });
+        expect(await settle()).not.toContain("all repos");
+        setup.mockInput.pressKey("s");
+        expect(await settle()).toContain("other-checkout");
+
+        const before = reads.length;
+        const returned = await cancelNew();
+        // Back widened, cursor on the row `n` left from: the panel stayed up
+        // behind the dialog, so nothing is read again...
+        expect(returned).toContain("all repos");
+        expect(returned).toContain("other-checkout");
+        expect(listReads(reads, before)).toEqual([]);
+        expect(
+          reads.slice(before).some((u) => u.pathname.includes("prune")),
+        ).toBe(false);
+
+        // ...so `s` still has that row's repo to narrow to.
+        const narrowed = reads.length;
+        setup.mockInput.pressKey("s");
+        const frame = await settle();
+        expect(frame).not.toContain("all repos");
+        expect(frame).not.toContain("other-checkout");
+        expect(listReads(reads, narrowed)).toEqual(["/code/myapp"]);
+      } finally {
+        restore();
+      }
+    });
+
+    it("keeps an s-narrowed scope across the round trip", async () => {
+      const reads: URL[] = [];
+      const restore = mockTwoRepoFetch(reads);
+      try {
+        await mountWithSession();
+        // `l` opens the view on the shared, still global, scope.
+        setup.mockInput.pressKey("l");
+        expect(await settle()).toContain("all repos");
+        setup.mockInput.pressKey("s");
+        expect(await settle()).not.toContain("other-checkout");
+
+        const before = reads.length;
+        const returned = await cancelNew();
+        expect(returned).not.toContain("all repos");
+        expect(returned).not.toContain("other-checkout");
+        // The panel never left, so its narrowed list was never re-read.
+        expect(listReads(reads, before)).toEqual([]);
+
+        const widened = reads.length;
+        setup.mockInput.pressKey("s");
+        expect(await settle()).toContain("other-checkout");
+        expect(listReads(reads, widened)).toEqual([null]);
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  describe("New session dialog over the view that opened it", () => {
+    const SECOND_ROW = {
+      ...WORKTREE_ROW,
+      path: "/code/myapp/wt/second",
+      name: "second",
+      branch: "feat/y",
+    };
+    const spans = () => setup.captureSpans().lines;
+    /** The line the panel's cursor highlight sits on (`surface` bg). */
+    const cursorLine = () =>
+      spans()
+        .find((line) =>
+          line.spans.some(
+            (span) =>
+              span.text.trim() !== "" &&
+              span.bg.toInts().join() ===
+                RGBA.fromHex(theme.surface).toInts().join(),
+          ),
+        )
+        ?.spans.map((span) => span.text)
+        .join("");
+    const spanWith = (text: string) =>
+      spans()
+        .flatMap((line) => line.spans)
+        .find((span) => span.text.includes(text));
+    const isActiveTab = (label: string) => {
+      const tab = setup
+        .captureSpans()
+        .lines[0]!.spans.find((span) => span.text.startsWith(label));
+      return (
+        tab?.fg.toInts().join() === RGBA.fromHex(theme.blue).toInts().join() &&
+        (tab!.attributes & TextAttributes.BOLD) !== 0
+      );
+    };
+
+    it("keeps Worktrees behind the dialog, dimmed, and Esc leaves the same row", async () => {
+      const { restore, frame } = await openPanel([WORKTREE_ROW, SECOND_ROW]);
+      try {
+        await frame();
+        for (let i = 0; i < 4 && !cursorLine()?.includes("second"); i++) {
+          setup.mockInput.pressKey("j");
+          await frame();
+        }
+        expect(cursorLine()).toContain("second");
+        const bright = spanWith("feature")!.fg.toInts();
+
+        setup.mockInput.pressKey("n");
+        const open = await frame();
+        expect(squish(open)).toContain(squish("New session"));
+        // Worktrees is still the view: its rows behind the dialog, its tab
+        // the active one, and the footer teaching the dialog's keys.
+        expect(open).toContain("feature");
+        expect(isActiveTab("Worktrees")).toBe(true);
+        expect(open.trimEnd().split("\n").at(-1)).toContain("enter spawn");
+        // Dimmed: the same row draws fainter than it did a moment ago.
+        expect(spanWith("feature")!.fg.toInts()).not.toEqual(bright);
+
+        deliverEscape(setup.renderer);
+        const back = await frame();
+        expect(squish(back)).not.toContain(squish("New session"));
+        expect(cursorLine()).toContain("second");
+        expect(isActiveTab("Worktrees")).toBe(true);
+        expect(spanWith("feature")!.fg.toInts()).toEqual(bright);
+        expect(back).toContain("x remove");
+      } finally {
+        restore();
+      }
+    });
+
+    it("keeps Start behind the dialog its n opens, and Esc returns to it", async () => {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = new URL(
+          input instanceof Request ? input.url : String(input),
+        );
+        if (url.pathname === "/prs")
+          return Response.json({
+            repos: [
+              {
+                repoRoot: "/code/myapp",
+                repoName: "myapp",
+                prs: [
+                  {
+                    number: 7,
+                    title: "seven",
+                    url: "https://github.com/o/r/pull/7",
+                    author: "epilande",
+                    isDraft: false,
+                    reviewDecision: null,
+                    ciStatus: "none",
+                    headRefName: "feat/seven",
+                    headRefOid: "sha7",
+                  },
+                ],
+              },
+            ],
+            errors: [],
+          });
+        if (url.pathname.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [] });
+        return Response.json({ repos: [], errors: [], headerPR: true });
+      }) as typeof fetch;
+      try {
+        await renderApp(120, 24, { groupBy: "none" });
+        sseCallbacks!.onInit(
+          [
+            mockEnrichedSession({
+              id: "s1",
+              project: "myapp",
+              cwd: "/code/myapp",
+              mainRepoRoot: "/code/myapp",
+              tmuxPane: "%1",
+            }),
+          ],
+          null,
+        );
+        const frame = async () => {
+          for (let i = 0; i < 3; i++) {
+            await new Promise((done) => setTimeout(done, 0));
+            await setup.renderOnce();
+          }
+          return setup.captureCharFrame();
+        };
+        await frame();
+        setup.mockInput.pressKey("N", { shift: true });
+        expect(await frame()).toContain("#7 seven");
+        setup.mockInput.pressKey("n");
+        const open = await frame();
+        expect(squish(open)).toContain(squish("New session"));
+        expect(open).toContain("#7 seven");
+        expect(isActiveTab("Start")).toBe(true);
+        expect(open.trimEnd().split("\n").at(-1)).toContain("enter spawn");
+        deliverEscape(setup.renderer);
+        const back = await frame();
+        expect(squish(back)).not.toContain(squish("New session"));
+        expect(back).toContain("#7 seven");
+        expect(isActiveTab("Start")).toBe(true);
+
+        // Enter on the PR opens the PR-mode dialog over Start the same way.
+        setup.mockInput.pressEnter();
+        const pr = await frame();
+        expect(squish(pr)).toContain(squish("New session on PR"));
+        expect(pr).toContain("myapp (1)");
+        expect(isActiveTab("Start")).toBe(true);
+        deliverEscape(setup.renderer);
+        expect(squish(await frame())).not.toContain(squish("New session"));
+        expect(isActiveTab("Start")).toBe(true);
+      } finally {
+        globalThis.fetch = original;
+      }
+    });
+
+    /**
+     * The daemon a spawn talks to. `/spawn` answers with `spawn()`, which a
+     * test holds open with a promise to play a slow daemon.
+     */
+    const mockSpawnDaemon = (
+      spawn: () => Response | Promise<Response> = () =>
+        Response.json({ success: true, paneId: "%9" }),
+    ) => {
+      const original = globalThis.fetch;
+      const spawned: unknown[] = [];
+      globalThis.fetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const href = input instanceof Request ? input.url : String(input);
+        if (href.includes("/server-info"))
+          return Response.json({ socketPath: null });
+        if (href.endsWith("/agents"))
+          return Response.json({
+            agents: [
+              {
+                name: "claude",
+                displayName: "Claude",
+                shortCode: "CC",
+                supportsPrompt: true,
+              },
+            ],
+          });
+        if (href.endsWith("/spawn")) {
+          spawned.push(JSON.parse(String(init?.body ?? "{}")));
+          return spawn();
+        }
+        if (href.includes("prune-candidates"))
+          return Response.json({ candidates: [], skipped: [], open: [] });
+        if (href.includes("/worktrees"))
+          return Response.json({
+            repos: [
+              {
+                repoRoot: "/code/myapp",
+                repoName: "myapp",
+                worktrees: [WORKTREE_ROW],
+              },
+            ],
+          });
+        return Response.json({});
+      }) as unknown as typeof fetch;
+      return {
+        spawned,
+        restore: () => {
+          globalThis.fetch = original;
+        },
+      };
+    };
+    const session = (id: string, project: string, pane: number) =>
+      mockEnrichedSession({
+        id,
+        project,
+        cwd: `/code/${project}`,
+        mainRepoRoot: `/code/${project}`,
+        tmuxPane: `%${pane}`,
+        tmuxTarget: `dev:1.${pane}`,
+      });
+    /** The session `/spawn` started, arriving over SSE on pane `%9`. */
+    const arrive = (project: string) =>
+      sseCallbacks!.onSessionCreated(
+        mockEnrichedSession({
+          id: "fresh",
+          project,
+          cwd: `/code/${project}/wt/feature`,
+          mainRepoRoot: `/code/${project}`,
+          tmuxPane: "%9",
+          tmuxTarget: "dev:2.1",
+        }),
+      );
+    const frame = async () => {
+      for (let i = 0; i < 3; i++) {
+        await new Promise((done) => setTimeout(done, 0));
+        await setup.renderOnce();
+      }
+      return setup.captureCharFrame();
+    };
+    /** `j` until the cursor sits on `target`'s row. */
+    const cursorTo = async (target: string) => {
+      for (let i = 0; i < 6 && !cursorLine()?.includes(target); i++) {
+        setup.mockInput.pressKey("j");
+        await frame();
+      }
+      expect(cursorLine()).toContain(target);
+    };
+    /** Whose project the `x` confirm names, then dismissed. */
+    const killTarget = async () => {
+      setup.mockInput.pressKey("x");
+      const dialog = await frame();
+      expect(dialog).toContain("Kill Session?");
+      deliverEscape(setup.renderer);
+      await frame();
+      return dialog;
+    };
+
+    it("lands on Sessions with the cursor on the new session once it starts", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("W", { shift: true });
+        await frame();
+        setup.mockInput.pressKey("n");
+        expect(squish(await frame())).toContain(squish("New session"));
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        // Sessions now, though the new row has not arrived yet.
+        expect(isActiveTab("Sessions")).toBe(true);
+        arrive("myapp");
+        await frame();
+        expect(cursorLine()).toContain("dev:2.1");
+      } finally {
+        restore();
+      }
+    });
+
+    // Preview focus types into the selected session's pane, so a row that
+    // arrived and took the cursor mid-typing would send the rest of the keys
+    // to a different agent. Focusing the preview is a choice of pane.
+    it("keeps the keys on the focused pane when the new session arrives", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, {
+          groupBy: "none",
+          persistent: true,
+          initialPreview: true,
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        setup.mockInput.pressTab();
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("a");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+        arrive("myapp");
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("b");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+      } finally {
+        restore();
+      }
+    });
+
+    // The cursor opens on the first waiting row without committing to it,
+    // and any session event pins that fallback; the pin is not the user
+    // moving, so it must not cancel the new row's claim on the cursor.
+    it("moves the cursor to the new session from the waiting row's fallback", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        const waiting = mockEnrichedSession({
+          id: "w1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          mainRepoRoot: "/code/myapp",
+          tmuxPane: "%2",
+          tmuxTarget: "dev:1.2",
+          status: "waiting",
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1), waiting], null);
+        await frame();
+        expect(cursorLine()).toContain("dev:1.2");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        arrive("myapp");
+        await frame();
+        expect(cursorLine()).toContain("dev:2.1");
+      } finally {
+        restore();
+      }
+    });
+
+    // A cursor on a row the list does not draw splits the board: the
+    // highlight falls back to the first row while the preview and `x`/`r`
+    // read the hidden session.
+    it("leaves the selection alone when the new session lands outside the scope", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit(
+          [
+            session("s1", "myapp", 1),
+            session("s3", "myapp", 3),
+            session("s2", "other", 2),
+          ],
+          null,
+        );
+        await frame();
+        await cursorTo("dev:1.3");
+        setup.mockInput.pressKey("s");
+        expect((await frame()).split("\n")[0]).toContain("scope: myapp");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        arrive("elsewhere");
+        const after = await frame();
+        expect(after).not.toContain("dev:2.1");
+        // Highlight, `x` and the selection all still name the row picked
+        // before the spawn.
+        expect(cursorLine()).toContain("dev:1.3");
+        const dialog = await killTarget();
+        expect(dialog).not.toContain("elsewhere");
+        expect(dialog).toContain("myapp");
+        expect(cursorLine()).toContain("dev:1.3");
+      } finally {
+        restore();
+      }
+    });
+
+    it("expands a collapsed group to put the cursor on the new session", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, {
+          groupBy: "project",
+          persistent: true,
+          collapsedGroups: ["other"],
+        });
+        sseCallbacks!.onInit(
+          [session("s1", "myapp", 1), session("s2", "other", 2)],
+          null,
+        );
+        const before = await frame();
+        expect(before).not.toContain("dev:1.2");
+        await cursorTo("dev:1.1");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        arrive("other");
+        const after = await frame();
+        // The group opened, so its rows draw, the new one under the cursor.
+        expect(after).toContain("dev:1.2");
+        expect(cursorLine()).toContain("dev:2.1");
+        expect(await killTarget()).toContain("other");
+      } finally {
+        restore();
+      }
+    });
+
+    // Esc, or a replacement draft, is the user moving on; a /spawn that
+    // answers afterwards must not pull them back to Sessions, nor close a
+    // one-shot picker under them.
+    for (const [outcome, persistent] of [
+      ["lands", true],
+      ["fails", true],
+      ["lands", false],
+    ] as const) {
+      it(`a slow spawn that ${outcome} after Esc changes nothing on screen (${persistent ? "persistent" : "one-shot"})`, async () => {
+        let answer!: (response: Response) => void;
+        const { spawned, restore } = mockSpawnDaemon(
+          () => new Promise<Response>((resolve) => (answer = resolve)),
+        );
+        const { exitSpy, restore: restoreExit } = withExitSpy();
+        try {
+          await renderApp(120, 24, { groupBy: "none", persistent });
+          sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+          await frame();
+          setup.mockInput.pressKey("W", { shift: true });
+          await frame();
+          setup.mockInput.pressKey("n");
+          await frame();
+          setup.mockInput.pressEnter();
+          await frame();
+          expect(spawned).toHaveLength(1);
+          deliverEscape(setup.renderer);
+          const moved = await frame();
+          expect(squish(moved)).not.toContain(squish("New session"));
+          expect(isActiveTab("Worktrees")).toBe(true);
+
+          answer(
+            outcome === "lands"
+              ? Response.json({ success: true, paneId: "%9" })
+              : Response.json(
+                  { success: false, error: "no such agent" },
+                  { status: 500 },
+                ),
+          );
+          const late = await frame();
+          expect(isActiveTab("Worktrees")).toBe(true);
+          expect(late).not.toContain("Spawn failed");
+          expect(late).toBe(moved);
+          expect(exitSpy).not.toHaveBeenCalled();
+
+          // Nor does the session, when it turns up, take the cursor.
+          arrive("myapp");
+          await frame();
+          setup.mockInput.pressKey("h");
+          await frame();
+          expect(isActiveTab("Sessions")).toBe(true);
+          expect(cursorLine()).toContain("dev:1.1");
+        } finally {
+          restoreExit();
+          restore();
+        }
+      });
+    }
+
+    it("a slow spawn leaves the dialog that replaced it open", async () => {
+      let answer!: (response: Response) => void;
+      const { spawned, restore } = mockSpawnDaemon(
+        () => new Promise<Response>((resolve) => (answer = resolve)),
+      );
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("W", { shift: true });
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        deliverEscape(setup.renderer);
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressTab();
+        setup.mockInput.pressTab();
+        await setup.mockInput.typeText("keep this prompt");
+        const drafting = await frame();
+        expect(drafting).toContain("keep this prompt");
+
+        answer(Response.json({ success: true, paneId: "%9" }));
+        const late = await frame();
+        expect(squish(late)).toContain(squish("New session"));
+        expect(late).toContain("keep this prompt");
+        expect(isActiveTab("Worktrees")).toBe(true);
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  // The panel stays up behind the dialog, so a widened scope, its rows and
+  // its scan are simply still there on Esc: nothing is re-read or re-scanned.
+  it("keeps a s-widened scope across the dialog round trip", async () => {
     const urls: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = ((input: string | URL | Request) => {
@@ -9244,7 +10813,7 @@ describe("App worktrees panel (W)", () => {
       await setup.renderOnce();
       // The scoped open filtered by repo; Tab widens and refetches without.
       expect(urls.some((u) => u.includes("repo="))).toBe(true);
-      setup.mockInput.pressTab();
+      setup.mockInput.pressKey("s");
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
 
@@ -9258,13 +10827,12 @@ describe("App worktrees panel (W)", () => {
       await new Promise((r) => setTimeout(r, 0));
       await setup.renderOnce();
 
-      expect(setup.captureCharFrame()).toContain("Worktrees");
-      const reopened = urls.slice(before);
-      // The reopened panel reads the widened scope, not the opening repo...
-      expect(reopened.some((u) => u.includes("/worktrees"))).toBe(true);
-      expect(reopened.every((u) => !u.includes("repo="))).toBe(true);
-      // ...and its widened scan is the cached one, so none is re-fired.
-      expect(reopened.every((u) => !u.includes("prune-candidates"))).toBe(true);
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("Worktrees");
+      expect(frame).toContain("all repos");
+      const after = urls.slice(before);
+      expect(after.some((u) => u.includes("/worktrees"))).toBe(false);
+      expect(after.some((u) => u.includes("prune-candidates"))).toBe(false);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -9430,90 +10998,617 @@ describe("App worktrees panel (W)", () => {
   });
 });
 
-/**
- * The counts scope is the one place a list prop must NOT be the filtered
- * list: every change to it aborts an in-flight read and costs a
- * `git worktree list` per repo on the daemon. `SessionList` owns the memo,
- * but only App decides what it is handed, so the guard lives here.
- */
-describe("App worktree counts scope", () => {
-  function mockCountsFetch() {
-    const originalFetch = globalThis.fetch;
-    const requests: URL[] = [];
-    globalThis.fetch = ((input: string | URL | Request) => {
-      const url = new URL(
-        input instanceof Request ? input.url : input.toString(),
-      );
-      if (url.pathname !== "/worktrees/counts")
-        return Promise.resolve(Response.json({}));
-      requests.push(url);
-      return Promise.resolve(
-        Response.json({
-          repos: url.searchParams
-            .getAll("repo")
-            .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
-        }),
-      );
-    }) as unknown as typeof fetch;
-    return {
-      requests,
-      restore: () => {
-        globalThis.fetch = originalFetch;
-      },
-    };
+describe("repo scope across views", () => {
+  let original: typeof fetch;
+  beforeEach(() => {
+    original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.includes("prune-candidates"))
+        return Response.json({ candidates: [], skipped: [] });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+  const sessions = () => [
+    mockEnrichedSession({
+      id: "s1",
+      project: "myapp",
+      cwd: "/code/myapp",
+      mainRepoRoot: "/code/myapp",
+      tmuxPane: "%1",
+      tmuxTarget: "dev:1.1",
+    }),
+    mockEnrichedSession({
+      id: "s2",
+      project: "other",
+      cwd: "/code/other",
+      mainRepoRoot: "/code/other",
+      tmuxPane: "%2",
+      tmuxTarget: "dev:1.2",
+      status: "waiting",
+    }),
+  ];
+  const frame = async () => {
+    await new Promise((done) => setTimeout(done, 0));
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  };
+
+  // `h`/`l` cycle Sessions, Worktrees, Start: the key that leads from the
+  // jumped view back to Sessions.
+  for (const [key, back] of [
+    ["W", "h"],
+    ["N", "l"],
+  ] as const) {
+    it(`${key} narrows only the view it opens; ${back} returns to the whole list`, async () => {
+      await renderApp(120, 24, { groupBy: "none" });
+      sseCallbacks!.onInit(sessions(), null);
+      await frame();
+      // `G`: the myapp row, last in the list (the waiting row leads the band).
+      setup.mockInput.pressKey("G");
+      await frame();
+      setup.mockInput.pressKey(key);
+      const jumped = (await frame()).split("\n")[0]!;
+      expect(jumped).toContain("scope: myapp");
+      // The Sessions tab counts the list `h` returns to, not the jump.
+      expect(jumped).toContain("Sessions (2) ");
+      setup.mockInput.pressKey(back);
+      const list = await frame();
+      // Back on Sessions: the first tab, so no later tab carries the
+      // accent bar.
+      expect(list.split("\n")[0]).toStartWith("Sessions (2) ");
+      expect(list.split("\n")[0]).not.toContain("━━");
+      expect(list.split("\n")[0]).toContain("scope: all repos");
+      expect(list).toContain("dev:1.1");
+      expect(list).toContain("dev:1.2");
+      expect(list).not.toContain("in other repos");
+    });
   }
 
-  it("does not refetch counts while a search or hide-idle narrows the list", async () => {
-    const { requests, restore } = mockCountsFetch();
+  it("shows the hidden total and the waiting sessions an s scope hides", async () => {
+    await renderApp(120, 24, { groupBy: "none" });
+    sseCallbacks!.onInit(sessions(), null);
+    await frame();
+    setup.mockInput.pressKey("G");
+    await frame();
+    setup.mockInput.pressKey("s");
+    const scoped = await frame();
+    expect(scoped.split("\n")[0]).toContain("Sessions (1/2)");
+    expect(scoped.split("\n")[0]).toContain("scope: myapp");
+    expect(scoped).not.toContain("dev:1.2");
+    expect(scoped).toContain("needs attention (0)  +1 waiting in other repos");
+    // An explicit scope sticks across views.
+    setup.mockInput.pressKey("l");
+    setup.mockInput.pressKey("h");
+    expect((await frame()).split("\n")[0]).toContain("scope: myapp");
+  });
+});
+
+describe("previews in every view", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+  const row = {
+    path: "/repo/wt/parking",
+    name: "parking",
+    repoRoot: "/repo",
+    repoName: "repo",
+    branch: "feat/parking",
+    tip: "sha-parking",
+    detached: false,
+    isMain: false,
+    locked: false,
+    dirty: { dirty: true, modified: 1, untracked: 0 },
+    upstream: null,
+    sessions: [],
+  };
+  const pr = {
+    number: 206,
+    title: "park the renderer",
+    url: "https://github.com/o/r/pull/206",
+    author: "epilande",
+    isDraft: false,
+    reviewDecision: null,
+    ciStatus: "none",
+    headRefName: "feat/other",
+    headRefOid: "sha-other",
+    labels: [],
+  };
+  let original: typeof fetch;
+  const asked: string[] = [];
+
+  beforeEach(() => {
+    asked.length = 0;
+    original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      asked.push(url.pathname);
+      if (url.pathname === "/worktrees/detail")
+        return Response.json({
+          ok: true,
+          detail: {
+            path: row.path,
+            changes: [{ code: " M", path: "src/park.ts" }],
+            total: 1,
+            truncated: false,
+            commits: [],
+          },
+        });
+      if (url.pathname === "/worktrees/prune-candidates")
+        return Response.json({ candidates: [], skipped: [] });
+      if (url.pathname === "/worktrees")
+        return Response.json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", worktrees: [row] }],
+        });
+      if (url.pathname === "/prs/detail")
+        return Response.json({
+          ok: true,
+          detail: {
+            number: 206,
+            body: "Parks the renderer while hidden.",
+            truncated: false,
+            baseRefName: "main",
+            additions: 1,
+            deletions: 1,
+            changedFiles: 1,
+            checks: [],
+          },
+        });
+      if (url.pathname === "/prs")
+        return Response.json({
+          repos: [{ repoRoot: "/repo", repoName: "repo", prs: [pr] }],
+          errors: [],
+        });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  const frame = async (ms = 0) => {
+    await settle(ms);
+    await setup.renderOnce();
+    return setup.captureCharFrame();
+  };
+  const footer = (text: string) => text.split("\n").at(-2) ?? "";
+
+  it("previews the worktree under the cursor and scrolls it on Tab", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    let text = await frame(250);
+    expect(text).toContain("Changes (1)");
+    expect(text).toContain("src/park.ts");
+    // The Sessions preview is not left running under the panel.
+    expect(text).not.toContain("Select a session to preview");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+    // Focused, `x` reaches neither the panel nor a pane.
+    setup.mockInput.pressKey("x");
+    text = await frame();
+    expect(text).not.toContain("Remove");
+    expect(footer(text)).toContain("j/k scroll");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("x remove");
+  });
+
+  it("previews the PR under the cursor in Start", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    await frame(50);
+    setup.mockInput.pressKey("l");
+    let text = await frame(400);
+    expect(text).toContain("#206 park the renderer");
+    expect(text).toContain("Parks the renderer while hidden.");
+    expect(asked).toContain("/prs/detail");
+
+    setup.mockInput.pressKey("\t");
+    text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+  });
+
+  it("toggles the preview with P from a panel", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    expect(await frame(250)).toContain("Changes (1)");
+    setup.mockInput.pressKey("P");
+    expect(await frame()).not.toContain("Changes (1)");
+  });
+
+  it("leaves focus behind when a view-strip click changes views", async () => {
+    await renderApp(160, 30, { groupBy: "none", initialPreview: true });
+    setup.mockInput.pressKey("l");
+    await frame(250);
+    setup.mockInput.pressKey("\t");
+    let text = await frame();
+    expect(footer(text)).toContain("j/k scroll");
+    const strip = text.split("\n")[0]!;
+    await setup.mockMouse.click(strip.indexOf("Start") + 1, 0);
+    text = await frame(50);
+    expect(footer(text)).not.toContain("j/k scroll");
+    expect(footer(text)).toContain("q back");
+  });
+});
+
+describe("one footer across views", () => {
+  it("draws the same registry-built line, pinned four included, on every view", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.includes("prune-candidates"))
+        return Response.json({ candidates: [], skipped: [] });
+      return Response.json({ repos: [], errors: [], headerPR: true });
+    }) as typeof fetch;
     try {
-      await renderApp(120, 20, { groupBy: "project" });
-      sseCallbacks!.onConnectionStateChange?.("connected");
+      await renderApp(150, 20, { groupBy: "none" });
       sseCallbacks!.onInit(
-        [
-          mockEnrichedSession({
-            id: "s1",
-            project: "alpha",
-            cwd: "/code/alpha",
-            mainRepoRoot: "/code/alpha",
-            status: "idle",
-          }),
-          mockEnrichedSession({
-            id: "s2",
-            project: "beta",
-            cwd: "/code/beta",
-            mainRepoRoot: "/code/beta",
-            status: "waiting",
-          }),
-        ],
+        [mockEnrichedSession({ id: "s1", tmuxPane: "%1" })],
         null,
       );
-      await setup.renderOnce();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await setup.renderOnce();
-      expect(requests).toHaveLength(1);
-      expect(requests[0]!.searchParams.getAll("repo")).toEqual([
-        "/code/alpha",
-        "/code/beta",
-      ]);
-
-      // hide-idle drops the alpha row, leaving one of the two repos with
-      // nothing visible.
-      setup.mockInput.pressKey("f");
-      await setup.renderOnce();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await setup.renderOnce();
-      expect(requests).toHaveLength(1);
-
-      // A query that matches only beta narrows it again.
-      setup.mockInput.pressKey("/");
-      await setup.renderOnce();
-      await setup.mockInput.typeText("beta");
-      await setup.renderOnce();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await setup.renderOnce();
-      expect(requests).toHaveLength(1);
+      const footer = async () => {
+        await new Promise((done) => setTimeout(done, 0));
+        await setup.renderOnce();
+        const lines = setup.captureCharFrame().split("\n");
+        // The bar's rule, then its line.
+        expect(lines.at(-3)?.trim()).toMatch(/^─+$/);
+        return lines.at(-2)!;
+      };
+      const sessions = await footer();
+      for (const text of ["j/k nav", "h/l views", "s scope", "? help"])
+        expect(sessions).toContain(text);
+      expect(sessions).toContain("q quit");
+      for (const text of [": more", "r restart", "x kill"])
+        expect(sessions).toContain(text);
+      setup.mockInput.pressKey("l");
+      const worktrees = await footer();
+      for (const text of ["j/k nav", "h/l views", "s scope", "? help"])
+        expect(worktrees).toContain(text);
+      expect(worktrees).toContain("x remove");
+      expect(worktrees).toContain("q back");
+      setup.mockInput.pressKey("l");
+      const start = await footer();
+      for (const text of ["h/l views", "s scope", "? help", "q back"])
+        expect(start).toContain(text);
+      // Same order: every hint the views share sits in the same sequence.
+      const shared = ["j/k nav", "h/l views", "enter go", "s scope"];
+      for (const line of [sessions, worktrees, start]) {
+        const at = shared.map((text) => line.indexOf(text));
+        expect(at).toEqual([...at].sort((a, b) => a - b));
+      }
     } finally {
-      restore();
+      globalThis.fetch = original;
+    }
+  });
+});
+
+describe("App group rename and merge (#42)", () => {
+  const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+  const press = async (key: string, modifiers?: { ctrl?: boolean }) => {
+    setup.mockInput.pressKey(key, modifiers);
+    await settle();
+    await setup.renderOnce();
+  };
+  const type = async (text: string) => {
+    for (const ch of text) setup.mockInput.pressKey(ch);
+    await settle();
+    await setup.renderOnce();
+  };
+  const enter = async () => {
+    setup.mockInput.pressEnter();
+    await settle();
+    await setup.renderOnce();
+  };
+  /** Clear the prompt's prefilled name (Ctrl+U deletes to line start). */
+  const clear = () => press("u", { ctrl: true });
+
+  /** Two project groups, alpha and beta, with the cursor on beta's header. */
+  async function twoGroups(props: Record<string, unknown> = {}) {
+    await renderApp(120, 24, {
+      groupBy: "project",
+      persistent: true,
+      ...props,
+    });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({
+          id: "s1",
+          project: "alpha",
+          cwd: "/code/alpha",
+          tmuxPane: "%1",
+        }),
+        mockEnrichedSession({
+          id: "s2",
+          project: "beta",
+          cwd: "/code/beta",
+          tmuxPane: "%2",
+        }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    // Rows: alpha header, s1, beta header, s2. The cursor starts on the
+    // alpha header; two rows down is beta's.
+    await press("j");
+    await press("j");
+  }
+
+  const aliasWrites = () =>
+    uiStateWrites.filter(
+      (w): w is { groupAliases: unknown } =>
+        typeof w === "object" && w !== null && "groupAliases" in w,
+    );
+
+  it("opens the prompt on e, prefilled with the group's name", async () => {
+    await twoGroups();
+    await press("e");
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("Rename beta");
+    expect(frame).toMatch(/›\s*beta/);
+    expect(frame).toContain("enter rename · empty or esc cancels");
+  });
+
+  it("renames a group with e, a name and Enter", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("Backend");
+    await enter();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Rename beta");
+    expect(frame).toContain("Backend");
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "Backend" } },
+    });
+  });
+
+  it("merges two groups when one is renamed to the other's name", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("alpha");
+    await enter();
+    const frame = setup.captureCharFrame();
+    // One header holding both sessions, and no beta group left.
+    expect(frame).toMatch(/[▾▸] alpha \(2\)/);
+    expect(frame).not.toMatch(/[▾▸] beta/);
+    expect(frame).toContain("Merged into alpha");
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "alpha" } },
+    });
+  });
+
+  it("marks a renamed or merged header on the row itself", async () => {
+    await twoGroups();
+    const headerLine = (name: string) =>
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => new RegExp(`[▾▸] ${name} \\(`).test(l)) ?? "";
+    // Under its own name, a header carries no marker.
+    expect(headerLine("beta")).not.toMatch(/from|sources/);
+    await press("e");
+    await clear();
+    await type("Backend");
+    await enter();
+    expect(headerLine("Backend")).toMatch(/Backend \(1\)\s+from beta/);
+    await press("e");
+    await clear();
+    await type("alpha");
+    await enter();
+    expect(headerLine("alpha")).toMatch(/alpha \(2\)\s+2 sources/);
+  });
+
+  it("keeps a renamed header's marker in a narrow sidebar as a glyph", async () => {
+    await renderApp(40, 24, { groupBy: "project", sidebar: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" }),
+        mockEnrichedSession({ id: "s2", project: "beta", tmuxPane: "%2" }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await press("j");
+    await press("j");
+    await press("e");
+    await clear();
+    await type("a-much-longer-backend-name");
+    await enter();
+    // The toast card sits over the top rows; read the header once it goes.
+    await settle(1_600);
+    await setup.renderOnce();
+    const line =
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .find((l) => /[▾▸] a-much-longer/.test(l)) ?? "";
+    expect(line).toMatch(/a-much-longer-backend-name \(1\)\s+\*/);
+  });
+
+  it("cancels on Esc without renaming anything", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("Backend");
+    deliverEscape(setup.renderer);
+    await settle(30);
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Rename beta");
+    expect(frame).not.toContain("Backend");
+    expect(aliasWrites()).toEqual([]);
+  });
+
+  it("cancels on an empty name", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await enter();
+    expect(setup.captureCharFrame()).not.toContain("Rename beta");
+    expect(aliasWrites()).toEqual([]);
+  });
+
+  it("keeps j and k as text in the prompt", async () => {
+    await twoGroups();
+    await press("e");
+    await clear();
+    await type("jk");
+    await enter();
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "jk" } },
+    });
+  });
+
+  it("renames the group of the selected session row", async () => {
+    await twoGroups();
+    await press("j"); // s2, in beta
+    await press("e");
+    expect(setup.captureCharFrame()).toContain("Rename beta");
+  });
+
+  it("renames from the sidebar, where the : palette is not offered", async () => {
+    await renderApp(34, 24, { groupBy: "project", sidebar: true });
+    sseCallbacks!.onInit(
+      [
+        mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" }),
+        mockEnrichedSession({ id: "s2", project: "beta", tmuxPane: "%2" }),
+      ],
+      null,
+    );
+    await setup.renderOnce();
+    await press("j");
+    await press("j");
+    await press("e");
+    expect(setup.captureCharFrame()).toContain("Rename beta");
+    await clear();
+    await type("Backend");
+    await enter();
+    expect(setup.captureCharFrame()).toContain("Backend");
+    expect(aliasWrites().at(-1)).toMatchObject({
+      groupAliases: { project: { beta: "Backend" } },
+    });
+  });
+
+  it("toasts instead of opening when there are no groups", async () => {
+    await renderApp(120, 24, { groupBy: "none", persistent: true });
+    sseCallbacks!.onInit(
+      [mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" })],
+      null,
+    );
+    await setup.renderOnce();
+    await press("e");
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain("Rename");
+    expect(frame).toContain("Grouping is off");
+  });
+
+  describe("from the : palette", () => {
+    it("opens the rename prompt from Rename group…", async () => {
+      await twoGroups();
+      await press(":");
+      await type("rename group");
+      await enter();
+      // The row replays `e`, on the next microtask.
+      await settle();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Type a command");
+      expect(frame).toContain("Rename beta");
+      await clear();
+      await type("Backend");
+      await enter();
+      expect(aliasWrites().at(-1)).toMatchObject({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+    });
+
+    it("closes the prompt on Esc without running a command", async () => {
+      await twoGroups();
+      await press(":");
+      await type("rename group");
+      await enter();
+      await settle();
+      await setup.renderOnce();
+      deliverEscape(setup.renderer);
+      await settle(30);
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Rename beta");
+      expect(frame).not.toContain("Type a command");
+      expect(aliasWrites()).toEqual([]);
+    });
+
+    it("resets a group's name from Reset group name", async () => {
+      await twoGroups();
+      await press("e");
+      await clear();
+      await type("alpha");
+      await enter();
+      // The cursor followed beta onto the merged alpha header.
+      expect(setup.captureCharFrame()).not.toMatch(/[▾▸] beta/);
+      await press(":");
+      await type("reset group name");
+      await enter();
+      const frame = setup.captureCharFrame();
+      expect(frame).toMatch(/[▾▸] alpha \(1\)/);
+      expect(frame).toMatch(/[▾▸] beta \(1\)/);
+      expect(aliasWrites().at(-1)).toMatchObject({ groupAliases: {} });
+    });
+  });
+
+  describe("from the group menu", () => {
+    it("offers Rename group, and Reset name only on a renamed group", async () => {
+      await twoGroups();
+      await press("m");
+      let frame = setup.captureCharFrame();
+      expect(frame).toContain("Rename group");
+      expect(frame).not.toContain("Reset name");
+      await press("m");
+
+      await press("e");
+      await clear();
+      await type("Backend");
+      await enter();
+      await press("m");
+      frame = setup.captureCharFrame();
+      expect(frame).toContain("Rename group");
+      expect(frame).toContain("Reset name");
+    });
+
+    it("opens the prompt from Rename group", async () => {
+      await twoGroups();
+      await press("m");
+      // Collapse, New session, then Rename group.
+      await press("j");
+      await press("j");
+      await enter();
+      expect(setup.captureCharFrame()).toContain("Rename beta");
+    });
+  });
+
+  it("follows another instance's rename through state.json in a picker", async () => {
+    const stateFile = join(appTestDir, "state.json");
+    try {
+      await twoGroups();
+      writeFileSync(
+        stateFile,
+        JSON.stringify({ groupAliases: { project: { beta: "Backend" } } }),
+      );
+      // The watcher debounces 200ms after chokidar sees the write.
+      for (let i = 0; i < 40; i++) {
+        await settle(50);
+        await setup.renderOnce();
+        if (setup.captureCharFrame().includes("Backend")) break;
+      }
+      expect(setup.captureCharFrame()).toContain("Backend");
+    } finally {
+      rmSync(stateFile, { force: true });
     }
   });
 });

@@ -14,6 +14,7 @@ import { slugForFork, slugFromPrompt } from "../../daemon/worktree-create";
 import {
   displayWidth,
   shortenCwd,
+  truncatePath,
   truncateMiddle,
   truncateText,
   wrapText,
@@ -750,8 +751,10 @@ export const NewSessionDialog: Component<NewSessionDialogProps> = (props) => {
     );
   };
 
+  // From the middle, by folders: the start and the final folder (the one
+  // that tells checkouts apart) stay visible at every width.
   const cwdLabel = () =>
-    truncateText(shortenCwd(props.draft.cwd), derivedWidth());
+    truncatePath(shortenCwd(props.draft.cwd), derivedWidth());
 
   /**
    * The locked destination row's text. Only where the session is going: the

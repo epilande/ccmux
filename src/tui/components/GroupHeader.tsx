@@ -12,19 +12,52 @@ import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { theme } from "../theme";
 import { Text } from "./Text";
 
+/** Something a header shows after its count and never drops (see
+ *  `GroupHeaderProps.notice`). */
+export interface HeaderNotice {
+  text: string;
+  /** The form a narrow line falls back to. */
+  short: string;
+  color: string;
+  /** The color on the selected row's raised background, where `color`
+   *  may not read; `color` when absent. */
+  selectedColor?: string;
+}
+
 interface GroupHeaderProps {
   label: string;
   count: number;
+  /** Budget for the label and its segments; the rule is sized by layout. */
   width?: number;
   facts?: string;
+  /**
+   * Something the header must not drop, unlike `facts`: drawn right after
+   * the count, and the label truncates before it does. `short` is the form
+   * a narrow line falls back to.
+   */
+  notice?: HeaderNotice;
+  sharedBranch?: string;
+  prBadge?: string;
+  prBadgeColor?: string;
+  hideStatusSummary?: boolean;
   collapsed: boolean;
   selected: boolean;
   members: FilteredSession[];
   iconStyle?: IconStyle;
   dimmed?: boolean;
+  /**
+   * Run the rule to the box's last column instead of leaving the one-cell
+   * right margin. For lists whose rows have no right padding of their own
+   * (the Worktrees panel, the source picker), so the rule ends where the
+   * rows do.
+   */
+  flushRight?: boolean;
   onActivate?: () => void;
   onContextMenu?: (event: MouseEvent) => void;
 }
+
+/** Longer than any terminal is wide; the rule's box clips it to fit. */
+const RULE_LENGTH = 1000;
 
 function staticDots(
   summary: StatusSummary,
@@ -60,7 +93,8 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
   const c = (color: string) => (props.dimmed ? theme.border : color);
   const bgColor = () =>
     props.selected && !props.dimmed ? theme.surface : undefined;
-  const indicator = () => (props.collapsed ? "▶" : "▼");
+  const indicator = () => (props.collapsed ? "▸" : "▾");
+  const paddingRight = () => (props.flushRight ? 0 : 1);
 
   // Derived here (not in the flat-item memo) so a subagent-driven status
   // change re-renders only this header, not the whole row list.
@@ -75,42 +109,74 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
   const dots = () => staticDots(summary(), props.iconStyle, props.dimmed);
 
   const parts = createMemo(() => {
-    let left = Math.max(0, (props.width ?? dims().width) - 2);
-    const activity = props.collapsed
-      ? [
-          ...(summary().working
-            ? [
-                {
-                  text: ` ${workingIcon()} ${summary().working}`,
-                  color: theme.peach,
-                },
-              ]
-            : []),
-          ...dots().map((dot) => ({
-            text: ` ${dot.icon} ${dot.count}`,
-            color: dot.color,
-          })),
-        ]
-      : [];
+    let left = Math.max(0, (props.width ?? dims().width) - 1 - paddingRight());
+    const activity =
+      props.collapsed && !props.hideStatusSummary
+        ? [
+            ...(summary().working
+              ? [
+                  {
+                    text: ` ${workingIcon()} ${summary().working}`,
+                    color: theme.peach,
+                  },
+                ]
+              : []),
+            ...dots().map((dot) => ({
+              text: ` ${dot.icon} ${dot.count}`,
+              color: dot.color,
+            })),
+          ]
+        : [];
     const count = ` (${props.count})`;
-    // Keep the count and collapsed activity visible before spending space on
-    // a long group name or optional repository facts.
-    const labelWidth = Math.max(
-      1,
-      left -
-        2 -
-        displayWidth(count) -
-        activity.reduce((width, part) => width + displayWidth(part.text), 0),
-    );
+    // Keep the count, the notice and collapsed activity visible before
+    // spending space on a long group name or optional repository facts. The
+    // notice takes its full form only when the label still fits beside it.
+    const fixed =
+      2 +
+      displayWidth(count) +
+      activity.reduce((width, part) => width + displayWidth(part.text), 0);
+    const notice = props.notice
+      ? `  ${
+          left - fixed - displayWidth(`  ${props.notice.text}`) >=
+          displayWidth(props.label)
+            ? props.notice.text
+            : props.notice.short
+        }`
+      : "";
+    const labelWidth = Math.max(1, left - fixed - displayWidth(notice));
+    // The collapse triangle and the count are read, not decoration, so they
+    // take subtext like the strip's counts (overlay is 2.3:1 in latte).
     const segments: Array<{ text: string; color: string; label?: boolean }> = [
-      { text: `${indicator()} `, color: theme.overlay },
+      { text: `${indicator()} `, color: theme.subtext },
       {
         text: truncateText(props.label, labelWidth),
         color: theme.text,
         label: true,
       },
-      { text: count, color: theme.overlay },
+      { text: count, color: theme.subtext },
+      ...(notice
+        ? [
+            {
+              text: notice,
+              color:
+                props.selected && !props.dimmed
+                  ? (props.notice!.selectedColor ?? props.notice!.color)
+                  : props.notice!.color,
+            },
+          ]
+        : []),
       ...activity,
+      ...(props.sharedBranch && props.sharedBranch !== "main"
+        ? [{ text: `   ${props.sharedBranch}`, color: theme.blue }]
+        : []),
+      ...(props.prBadge
+        ? [
+            {
+              text: `   ${props.prBadge}`,
+              color: props.prBadgeColor ?? theme.mauve,
+            },
+          ]
+        : []),
       ...(props.facts
         ? [{ text: `   ${props.facts}`, color: theme.subtext }]
         : []),
@@ -136,8 +202,9 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
     <box
       width="100%"
       height={1}
+      flexDirection="row"
       paddingLeft={1}
-      paddingRight={1}
+      paddingRight={paddingRight()}
       backgroundColor={bgColor()}
       onMouseDown={(event) => {
         if (event.button === MouseButton.LEFT) {
@@ -151,7 +218,7 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
         }
       }}
     >
-      <Text>
+      <Text wrapMode="none" flexShrink={0}>
         <For each={parts()}>
           {(part) => (
             <span style={{ fg: part.color }}>
@@ -162,6 +229,17 @@ export const GroupHeader: Component<GroupHeaderProps> = (props) => {
           )}
         </For>
       </Text>
+      {/* The header IS the divider: a rule fills what the label leaves, so a
+          group boundary costs one line, not a rule line plus a label line.
+          Layout sizes it, not `width`, so it ends where the rows do however
+          the caller's budget drifts from the real box, and a label that
+          measures wider than `displayWidth` thought eats the rule instead of
+          wrapping the line. */}
+      <box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+        <Text fg={c(theme.border)} wrapMode="none">
+          {` ${"─".repeat(RULE_LENGTH)}`}
+        </Text>
+      </box>
     </box>
   );
 };

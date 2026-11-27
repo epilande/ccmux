@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { RepoAnswerCache } from "./repo-answer-cache";
 import type { SourceResult } from "./gh-spawn-source";
 
@@ -165,12 +165,26 @@ describe("RepoAnswerCache", () => {
     const subject = cache();
     const source = counting(bad("gh: not logged in"), ok("recovered"));
 
-    await subject.answer("/repo", false, source.fetch);
-    age(subject, "/repo", FAILURE_TTL - 1);
-    const again = await subject.answer("/repo", false, source.fetch);
+    // Keep the one-millisecond boundary independent of real clock ticks.
+    const clock = spyOn(Date, "now").mockReturnValue(
+      Date.parse("2024-01-15T12:00:00Z"),
+    );
+    try {
+      await subject.answer("/repo", false, source.fetch);
+      age(subject, "/repo", FAILURE_TTL - 1);
+      const again = await subject.answer("/repo", false, source.fetch);
 
-    expect(again).toEqual(bad("gh: not logged in"));
-    expect(source.calls()).toBe(1);
+      expect(again).toEqual(bad("gh: not logged in"));
+      expect(source.calls()).toBe(1);
+
+      age(subject, "/repo", 1);
+      expect(await subject.answer("/repo", false, source.fetch)).toEqual(
+        ok("recovered"),
+      );
+      expect(source.calls()).toBe(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("drops the entry when a fetch throws, so the repo cannot wedge in flight", async () => {
@@ -218,5 +232,85 @@ describe("RepoAnswerCache", () => {
 
     expect(second).toEqual(ok("second"));
     expect(subject.entries.get("/repo")?.done?.result).toEqual(ok("second"));
+  });
+});
+
+describe("RepoAnswerCache maxEntries", () => {
+  const bounded = (maxEntries: number) =>
+    new RepoAnswerCache<string>({
+      ttlMs: TTL,
+      failureTtlMs: FAILURE_TTL,
+      maxEntries,
+    });
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("evicts the oldest settled entries past the cap", async () => {
+    const subject = bounded(2);
+    for (const key of ["a", "b", "c"]) {
+      await subject.answer(key, false, () => Promise.resolve(ok(key)));
+      await settle();
+    }
+    expect([...subject.entries.keys()]).toEqual(["b", "c"]);
+  });
+
+  it("counts a re-asked key as the newest", async () => {
+    const subject = bounded(2);
+    await subject.answer("a", false, () => Promise.resolve(ok("a")));
+    await subject.answer("b", false, () => Promise.resolve(ok("b")));
+    await settle();
+    // Refresh `a`: it is re-fetched, so it is now the newest.
+    await subject.answer("a", true, () => Promise.resolve(ok("a2")));
+    await settle();
+    await subject.answer("c", false, () => Promise.resolve(ok("c")));
+    await settle();
+    expect([...subject.entries.keys()]).toEqual(["a", "c"]);
+  });
+
+  it("never evicts a call still in flight, which is the lock", async () => {
+    const subject = bounded(1);
+    let finish: (result: SourceResult<string>) => void = () => {};
+    const slow = new Promise<SourceResult<string>>((resolve) => {
+      finish = resolve;
+    });
+    const first = subject.answer("a", false, () => slow);
+    await subject.answer("b", false, () => Promise.resolve(ok("b")));
+    await settle();
+    // Over the cap, but `a` is still running: `b` went instead, trimmed the
+    // moment it settled rather than at some later miss.
+    expect([...subject.entries.keys()]).toEqual(["a"]);
+    // A second caller for `a` joins rather than spawning another call.
+    let calls = 0;
+    const joined = subject.answer("a", false, () => {
+      calls += 1;
+      return Promise.resolve(ok("dup"));
+    });
+    finish(ok("a"));
+    expect(await first).toEqual(ok("a"));
+    expect(await joined).toEqual(ok("a"));
+    expect(calls).toBe(0);
+    await settle();
+    expect(subject.entries.size).toBe(1);
+  });
+
+  it("trims back to the cap as a burst of concurrent misses settles", async () => {
+    const subject = bounded(2);
+    const finishers: ((result: SourceResult<string>) => void)[] = [];
+    const answers = ["a", "b", "c", "d"].map((key) =>
+      subject.answer(
+        key,
+        false,
+        () =>
+          new Promise<SourceResult<string>>((resolve) => {
+            finishers.push(resolve);
+          }),
+      ),
+    );
+    // All four are locks, so none can go yet.
+    expect(subject.entries.size).toBe(4);
+    for (const [i, finish] of finishers.entries()) finish(ok(String(i)));
+    await Promise.all(answers);
+    await settle();
+    // The oldest settled ones went; the newest two are kept.
+    expect([...subject.entries.keys()]).toEqual(["c", "d"]);
   });
 });

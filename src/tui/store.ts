@@ -27,9 +27,10 @@ import type {
   ColumnsConfig,
   BreakpointConfig,
   PromptDisplay,
+  ColumnHeaderMode,
 } from "../lib/preferences";
 import { DEFAULT_PROMPT_DISPLAY } from "../lib/preferences";
-import { setUIState, type UIState } from "../lib/state";
+import { setUIState, type MergeRecord, type UIState } from "../lib/state";
 import { getDaemonUrl } from "../lib/config";
 import {
   DESTINATION_OPTIONS,
@@ -49,17 +50,30 @@ import { capturePane } from "./utils/tmux";
 import { isSameServerCached } from "./utils/server-guard";
 import { stripAnsi } from "../lib/strip-ansi";
 import {
+  mergedToast,
+  renamedToast,
+  resetToast,
+  TOAST_TEXT_WIDTH,
+} from "./utils/group-copy";
+import {
   buildFlatItems,
   flatItemIdentity,
   isSyntheticGroupKey,
-  getGroupKey,
+  NEEDS_YOU_GROUP_KEY,
+  aliasedRawKey,
+  groupKeyOf,
   groupSessions,
+  normalizeGroupAliases,
+  normalizeGroupLayouts,
+  resolveGroupName,
   sortGroups,
   VALID_GROUP_BY,
   DEFAULT_GROUP_BY,
   type FlatItem,
   type GroupBy,
   type FilteredSession,
+  type GroupAliases,
+  type GroupLayouts,
   type MatchSource,
 } from "./utils/grouping";
 
@@ -214,8 +228,7 @@ export interface NewSessionIssue {
  * it, a dialog's cancel marker carries it, and Esc reads it back.
  */
 export interface SourcePickerOrigin {
-  panelRepo: string | null;
-  /** The panel's LIVE scope, null when Tab had widened it. */
+  /** The panel's scope when it opened the picker, null for all repos. */
   panelScope: string | null;
   panelCursor: string;
 }
@@ -452,12 +465,12 @@ export interface NewSessionDraft {
    * row keys off it, and submit ignores it entirely, since a spawn hands the
    * board to the new session. `cursor` is the panel row the dialog was
    * opened over, so the reopened panel lands where the user left; `scope`
-   * is the panel's LIVE filter at that moment (null when Tab had widened
-   * it), which the reopen re-establishes, since the rescope is panel-local
-   * state nothing else remembers.
+   * is the scope the panel showed at that moment (null for all repos),
+   * which the reopen re-establishes. One field, not an opening repo plus a
+   * live filter: `s` narrows to the cursor row's repo, never back to the
+   * repo the panel was opened on, so there is no second repo to remember.
    */
   returnToWorktrees: {
-    repo: string | null;
     scope: string | null;
     cursor: string;
   } | null;
@@ -485,6 +498,9 @@ interface TUIState {
   confirmAction: ConfirmAction | null;
   /** Snapshot of session IDs captured when the confirm dialog opens */
   confirmSessionIds: string[];
+  /** Names those IDs, captured with them: the Sessions list's selection may
+   *  be hidden, or unrelated to a marked set. */
+  confirmLabel: string | null;
   connectionState: ConnectionState;
   /** Daemon scan-health; drives the degraded warning in the header. */
   daemonHealth: DaemonHealth;
@@ -501,9 +517,39 @@ interface TUIState {
   previewFocused: boolean;
   showHelp: boolean;
   /**
-   * The Worktrees panel, or null when closed. `repo` scopes it to one main
-   * checkout (opened from a group header) and is null for the global
-   * keybinding; the panel's own Tab widens from there without reopening.
+   * The open `:` palette, or null. `highlight` is a command id rather than a
+   * row number for the reason the row menu's is: the list is re-filtered
+   * under it on every keystroke, and by position the highlight would ride
+   * onto whatever command slid into its row.
+   */
+  palette: {
+    query: string;
+    highlight: string | null;
+    /** Set while the palette is the rename prompt for one group: `query` is
+     *  then the name being typed, prefilled with `label`, and there is no
+     *  command list. One modal slot for both, so the prompt is a modal
+     *  everywhere the palette already is. */
+    rename?: {
+      groupKey: string;
+      label: string;
+      groupBy: GroupBy;
+      /** The raw keys the alias table put in the group when the prompt
+       *  opened (`aliasMembers`), to tell on Enter whether another instance
+       *  renamed, reset or merged it meanwhile. */
+      members: string[];
+    };
+  } | null;
+  /**
+   * The repo the CURRENT view is narrowed to, or null for all repos. It is
+   * the view's own: `W`/`N` narrow only the view they open (see
+   * `baseScope`), and `s` changes it for every view.
+   */
+  scope: string | null;
+  markedSessions: Set<string>;
+  /**
+   * The Worktrees panel, or null when closed. `repo` is the scope it was
+   * opened on (one main checkout, or null for all repos); the panel follows
+   * the shared `scope` from there, which its own `s` changes in place.
    * Everything else the panel needs — the rows, the selection, the run log —
    * is local to the component: it is fetched on open and discarded on close,
    * so it would only be stale state for the rest of the picker's life.
@@ -513,16 +559,13 @@ interface TUIState {
    * not in the fetched list. `isReturn` marks exactly those reopens, and is
    * what lets the panel reuse its last completed prune scan instead of
    * re-firing it; a plain open (`W`, the group menu) always scans fresh.
-   * `startWidened` re-establishes a Tab-widened scope on a return: the
-   * rescope is panel-local state this store never sees, so the action
-   * payloads carry the live filter out and a return carries it back in,
-   * while `repo` keeps naming the opening repo Tab can narrow back to.
+   * A return reopens on the scope its action payload carried out, so the
+   * panel comes back narrowed or widened exactly as the user left it.
    */
   worktrees: {
     repo: string | null;
     initialCursor: string | null;
     isReturn: boolean;
-    startWidened: boolean;
   } | null;
   /**
    * The source picker, or null when closed (issue #151).
@@ -651,12 +694,25 @@ interface TUIState {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   groupBy: GroupBy;
   hideIdle: boolean;
 }
 
+/**
+ * The narrowest terminal the preview opens on by default: a popup at 80% of
+ * a terminal about 175 columns wide. Below it the list needs the columns
+ * more. Only a default: `--preview`, a saved `P` toggle and the
+ * `showPreview` preference all win, and it is decided once, at launch.
+ */
+const PREVIEW_AUTO_MIN_WIDTH = 140;
+
 interface TUIStoreOptions {
+  /** Undefined means nobody chose: the preview opens when `initialWidth` is
+   *  at least {@link PREVIEW_AUTO_MIN_WIDTH}. */
   initialPreview?: boolean;
+  /** The terminal's width at launch, for the preview's default. */
+  initialWidth?: number;
   promptDisplay?: PromptDisplay;
   iconStyle?: IconStyle;
   previewWidth?: number;
@@ -664,6 +720,7 @@ interface TUIStoreOptions {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   /** Pin waiting sessions in the `needs attention` band (default true). */
   attentionBand?: boolean;
   searchPaneContent?: boolean;
@@ -675,6 +732,10 @@ interface TUIStoreOptions {
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
+  /** Group names, per groupBy mode (UIState `groupAliases`). */
+  groupAliases?: GroupAliases;
+  /** Merged-away groups' own layouts (UIState `groupLayouts`). */
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   /** Last agent spawned from the new-session dialog, restored from UIState. */
   lastSpawnAgent?: string;
@@ -696,11 +757,13 @@ function computePinnedFromOrder(
   desiredOrder: string[],
   filtered: FilteredSession[],
   groupBy: GroupBy,
+  aliases: GroupAliases,
 ): string[] {
   // Compute the natural order (no pins)
-  const naturalOrder = sortGroups(groupSessions(filtered, groupBy), []).map(
-    (g) => g.key,
-  );
+  const naturalOrder = sortGroups(
+    groupSessions(filtered, groupBy, aliases),
+    [],
+  ).map((g) => g.key);
 
   // Only keep keys that exist as current groups (prune stale entries)
   const activeKeys = new Set(naturalOrder);
@@ -722,6 +785,150 @@ function computePinnedFromOrder(
 
   // Pin everything from the start up to and including desiredIdx
   return cleaned.slice(0, desiredIdx + 1);
+}
+
+/** The cursor before a change of names, as {@link followGroupSelection}
+ *  needs it: the selected header, or whether the selected row was drawn. */
+interface SelectionSnapshot {
+  header: { key: string; rawKeys: string[] } | null;
+  rowDrawn: boolean;
+}
+
+/** `aliases` with mode `mode`'s map replaced by `entries` (dropped when
+ *  empty). A new object every time: aliases are written whole. Built with
+ *  `Object.fromEntries`, so a raw key spelled `__proto__` stays data. */
+function withModeAliases(
+  aliases: GroupAliases,
+  mode: GroupBy,
+  entries: Iterable<readonly [string, string]>,
+): GroupAliases {
+  const map = Object.fromEntries(entries);
+  const next: GroupAliases = { ...aliases };
+  if (Object.keys(map).length) next[mode] = map;
+  else delete next[mode];
+  return next;
+}
+
+/**
+ * `layouts` with mode `mode`'s record replaced by `record`, its `merged`
+ * keeping only keys `aliases` still renames in that mode (a key that is no
+ * longer merged away has no layout to get back). Dropped with the mode's
+ * last merge, so the next merge records the pins as they are then. A new
+ * object every time; `merged` is built with `Object.fromEntries`, so a raw
+ * key spelled `__proto__` stays data.
+ */
+function withModeLayouts(
+  layouts: GroupLayouts,
+  mode: GroupBy,
+  record: MergeRecord | undefined,
+  aliases: GroupAliases,
+): GroupLayouts {
+  const map = aliases[mode] ?? {};
+  const merged = Object.fromEntries(
+    Object.entries(record?.merged ?? {}).filter(([raw]) =>
+      Object.hasOwn(map, raw),
+    ),
+  );
+  const next: GroupLayouts = { ...layouts };
+  if (record && Object.keys(merged).length)
+    next[mode] = { pins: record.pins, merged };
+  else delete next[mode];
+  return next;
+}
+
+/**
+ * The raw keys the alias table folds into group `key`, sorted: every key
+ * renamed to it, plus `key` itself unless it is renamed away. Depends only
+ * on the aliases, never on which sessions exist, so it changes exactly when
+ * a rename, reset or merge changes what the group is.
+ */
+function aliasMembers(
+  key: string,
+  map: Readonly<Record<string, string>> | undefined,
+): string[] {
+  const aliased = map ?? {};
+  const members = Object.keys(aliased).filter((raw) => aliased[raw] === key);
+  if (!Object.hasOwn(aliased, key)) members.push(key);
+  return members.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * The raw keys that stand for pin `pin` in a `MergeRecord.pins`: the keys
+ * renamed to it without merging, or its own key where nothing was (and it
+ * is not itself renamed away). A key merged in from elsewhere has its own
+ * place in the record, and a name is not a raw key: a group renamed to
+ * `Beta` is `beta` here, so a different group named `Beta` later never
+ * takes its place. From the aliases and the merge record alone, never from
+ * which sessions are live, so a group is the same pin while its own key
+ * has no session.
+ */
+function ownKeys(
+  pin: string,
+  map: Readonly<Record<string, string>> | undefined,
+  merged: Readonly<Record<string, unknown>>,
+): string[] {
+  const aliased = map ?? {};
+  const renamed = Object.keys(aliased).filter(
+    (raw) => aliased[raw] === pin && !Object.hasOwn(merged, raw),
+  );
+  if (renamed.length) return renamed.sort((a, b) => a.localeCompare(b));
+  return Object.hasOwn(aliased, pin) ? [] : [pin];
+}
+
+/**
+ * `pinned`, each pin spelled by `spell`, with the raw keys `keys` laid in
+ * among them in one pass over `pins` (a `MergeRecord.pins`): each key right
+ * after the pin holding (`holds`) the nearest key before it in `pins`, or
+ * ahead of every pin where none does, in `pins` order. A key `pins` does
+ * not have is left out, and so is one a pin already holds (a pin it has now
+ * is newer than the record). The pins themselves keep their order, so one
+ * moved or added since `pins` was recorded stays where it is now.
+ */
+function layIn(
+  pinned: readonly string[],
+  holds: (pin: string) => readonly string[],
+  pins: readonly string[],
+  keys: Iterable<string>,
+  spell: (pin: string) => readonly string[],
+): string[] {
+  const holder = new Map<string, number>();
+  pinned.forEach((pin, i) => {
+    for (const raw of holds(pin)) holder.set(raw, i + 1);
+  });
+  // gaps[0] is ahead of every pin, gaps[i + 1] right after pinned[i].
+  const gaps: string[][] = pinned.map(() => []).concat([[]]);
+  const left = new Set(keys);
+  let gap = 0;
+  for (const raw of pins) {
+    const at = holder.get(raw);
+    if (at !== undefined) gap = at;
+    else if (left.delete(raw)) gaps[gap]!.push(raw);
+  }
+  return [
+    ...gaps[0]!,
+    ...pinned.flatMap((pin, i) => [...spell(pin), ...gaps[i + 1]!]),
+  ];
+}
+
+/** `keys` with `key` replaced in place by `replacement`, each key kept once
+ *  (its first place wins). */
+function spliceKey(
+  keys: readonly string[],
+  key: string,
+  replacement: readonly string[],
+): string[] {
+  const out: string[] = [];
+  for (const k of keys)
+    for (const next of k === key ? replacement : [k])
+      if (!out.includes(next)) out.push(next);
+  return out;
+}
+
+/** Whether two key lists hold the same keys, in any order. */
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every((key) => set.has(key));
 }
 
 /**
@@ -859,6 +1066,40 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
   const [pinnedGroups, setPinnedGroups] = createSignal<string[]>(
     options.pinnedGroups ?? [],
   );
+  /** Group names, per groupBy mode. Every group key the store derives goes
+   *  through these (`groupKeyOf`), and they are written whole, never one
+   *  mode's map: `setUIState` merges only one level deep. */
+  const [groupAliases, setGroupAliases] = createSignal<GroupAliases>(
+    normalizeGroupAliases(options.groupAliases),
+  );
+  /**
+   * The layout each merged-away raw key had of its own (pin index, collapse),
+   * recorded by a merge and spent by the reset that splits it back out, so a
+   * reset restores each source rather than handing it the target's layout.
+   * Per mode, written whole with the aliases, and pruned to keys that are
+   * still aliased.
+   */
+  const [groupLayouts, setGroupLayouts] = createSignal<GroupLayouts>(
+    normalizeGroupLayouts(options.groupLayouts),
+  );
+  /** The current grouping's key for `session`, renames applied. */
+  const sessionGroupKey = (session: EnrichedSession): string =>
+    groupKeyOf(session, state.groupBy, groupAliases());
+  /**
+   * The scope to return to, set while the current view was opened by a
+   * `W`/`N` jump (or a return to one) narrowed to a repo other than the
+   * user's own scope. Null means no jump is in effect, which is always the
+   * case on Sessions: leaving the narrowed view restores this.
+   */
+  const [jumpBase, setJumpBase] = createSignal<{ scope: string | null } | null>(
+    null,
+  );
+  /** The scope the user chose with `s`: what every view uses unless a jump
+   *  narrowed the current one. Sessions always shows this one. */
+  const baseScope = (): string | null => {
+    const jump = jumpBase();
+    return jump ? jump.scope : state.scope;
+  };
 
   // Debounced persistence for UI state (avoids disk writes on every keypress)
   const persistStateFn = options.onPersistState ?? setUIState;
@@ -897,6 +1138,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return Promise.resolve(persistStateFn(merged));
   }
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
+  /** How the current toast fits itself to the toast's columns, when it
+   *  shortens in a chosen order (`group-copy.ts`) rather than wrapping. */
+  const [toastFit, setToastFit] = createSignal<
+    ((width: number) => string) | null
+  >(null);
 
   /** Invocation ids currently in flight (every invoke, Claude included).
    *  Driven by invocation_started/finished SSE events; mirrors the daemon's
@@ -1047,14 +1293,21 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     confirmSessionId: null,
     confirmAction: null,
     confirmSessionIds: [],
+    confirmLabel: null,
     connectionState: "disconnected",
     daemonHealth: { degraded: false },
     tmuxSocketError: null,
     error: null,
-    showPreview: options.sidebar ? false : (options.initialPreview ?? false),
+    showPreview: options.sidebar
+      ? false
+      : (options.initialPreview ??
+        (options.initialWidth ?? 0) >= PREVIEW_AUTO_MIN_WIDTH),
     promptDisplay: options.promptDisplay ?? DEFAULT_PROMPT_DISPLAY,
     previewFocused: false,
     showHelp: false,
+    palette: null,
+    scope: null,
+    markedSessions: new Set<string>(),
     worktrees: null,
     sourcePicker: null,
     notice: null,
@@ -1074,6 +1327,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     promptLines: options.promptLines,
     breakpoints: options.breakpoints,
     ageFadeAfter: options.ageFadeAfter,
+    columnHeader: options.columnHeader,
     groupBy: options.groupBy ?? DEFAULT_GROUP_BY,
     hideIdle: options.hideIdle ?? false,
   });
@@ -1223,28 +1477,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     },
   );
 
-  /**
-   * Every session, wrapped as a `FilteredSession` but never filtered.
-   *
-   * The worktree-counts scope in `SessionList` needs a membership that no
-   * user-facing filter can move: each change costs an aborted fetch, a
-   * `git worktree list` per repo on the daemon, and a restarted refresh
-   * interval, so deriving it from `filteredSessions()` made every keystroke
-   * of a search that changed the matching project set pay for a refetch.
-   * Built on `sortedSessions`, whose identity-preserving equality means this
-   * array is rebuilt only when membership or ordering actually changes.
-   */
-  const unfilteredSessions = trackedMemo("unfilteredSessions", () =>
-    sortedSessions().map((session) => ({
-      session,
-      highlights: null,
-      paneMatch: false,
-    })),
-  );
-
   // Derived: status-filtered sessions (hide idle toggle, keeps unread/read visible)
   const statusFilteredSessions = trackedMemo("statusFilteredSessions", () => {
-    const sorted = sortedSessions();
+    const all = sortedSessions();
+    // The BASE scope, not the current view's: a `W`/`N` jump narrows the
+    // view it opened, and the session list it will return to (and the
+    // strip's count of it) must not narrow with it.
+    const scope = baseScope();
+    const sorted = scope
+      ? all.filter((s) => (s.mainRepoRoot ?? s.worktreeRoot) === scope)
+      : all;
     if (!state.hideIdle) return sorted;
     const filtered = sorted.filter(
       (s) => s.status !== "idle" || s.attentionState !== null,
@@ -1296,6 +1538,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     // other field covers; under project/cwd it mostly mirrors those fields,
     // and under "none" it is "" and can never match.
     const groupBy = state.groupBy;
+    const aliases = groupAliases();
     const results = fuzzysort.go(query, sorted, {
       keys: [
         "project",
@@ -1303,7 +1546,11 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         "gitBranch",
         "lastPrompt",
         (s: EnrichedSession) =>
-          groupBy === "none" ? "" : getGroupKey(s, groupBy),
+          groupBy === "none" ? "" : groupKeyOf(s, groupBy, aliases),
+        // A renamed group is still found by the key it was renamed from (the
+        // group preview shows it): a tmux session renamed `Office` is still
+        // the `work` session to tmux, and to the user.
+        (s: EnrichedSession) => aliasedRawKey(s, groupBy, aliases) ?? "",
       ],
       threshold: 0.3,
     });
@@ -1420,6 +1667,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
               fzResult[0]?.score ?? 0,
               fzResult[2]?.score ?? 0,
               fzResult[4]?.score ?? 0,
+              fzResult[5]?.score ?? 0,
             )
           : 0;
         const cwdFz = fzResult?.[1]?.score ?? 0;
@@ -1485,6 +1733,19 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return rows;
   });
 
+  /**
+   * Waiting sessions the scope hides. The band says how many, so narrowing
+   * to one repo can never quietly hide a session that needs the user.
+   */
+  const outOfScopeWaiting = trackedMemo("outOfScopeWaiting", () => {
+    const scope = baseScope();
+    if (!scope) return 0;
+    return sortedSessions().filter(
+      (s) =>
+        s.status === "waiting" && (s.mainRepoRoot ?? s.worktreeRoot) !== scope,
+    ).length;
+  });
+
   let previousSessionItems = new Map<
     string,
     Extract<FlatItem, { type: "session" }>
@@ -1499,6 +1760,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       isSearching,
       pinnedGroups(),
       attentionBand,
+      outOfScopeWaiting(),
+      groupAliases(),
     );
     const nextSessionItems = new Map<
       string,
@@ -1554,7 +1817,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (idx !== -1) return idx;
     }
 
-    // Fall back to first item
+    // Fall back to the first item, except past a needs-attention band with
+    // someone in it: Enter does nothing on that header, and the point of
+    // opening the picker is to reach whoever is waiting.
+    const [first, second] = items;
+    if (
+      first?.type === "header" &&
+      first.groupKey === NEEDS_YOU_GROUP_KEY &&
+      second?.type === "session"
+    )
+      return 1;
     return items.length > 0 ? 0 : -1;
   });
 
@@ -1653,21 +1925,150 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     return attentionBand && session.status === "waiting";
   }
 
-  function activeGroupKeys(): Set<string> {
+  /** Every group a session maps to under `aliases` (the live ones by
+   *  default), waiting-only groups included. */
+  function activeGroupKeys(aliases = groupAliases()): Set<string> {
     return new Set(
       state.groupBy === "none"
         ? []
-        : state.sessions.map((session) => getGroupKey(session, state.groupBy)),
+        : state.sessions.map((session) =>
+            groupKeyOf(session, state.groupBy, aliases),
+          ),
     );
   }
 
   /** Include waiting-only home groups even while their headers are absent. */
   function orderedGroupKeys(): string[] {
     return sortGroups(
-      groupSessions(filteredSessions(), state.groupBy),
+      groupSessions(filteredSessions(), state.groupBy, groupAliases()),
       pinnedGroups(),
       state.searchQuery.trim().length > 0,
     ).map((group) => group.key);
+  }
+
+  /** Every session on the board grouped under `aliases`, filters aside. */
+  function boardGroups(aliases: GroupAliases) {
+    return groupSessions(
+      state.sessions.map((session) => ({ session, highlights: null })),
+      state.groupBy,
+      aliases,
+    );
+  }
+
+  /**
+   * The header the cursor is on and the raw keys behind it, so a change of
+   * names can put the cursor back on whichever group they fold into now.
+   * Read through `selectedFlatItem`, not `selectedHeaderKey`: with nothing
+   * chosen yet the cursor sits on the first row by fallback, and a rename
+   * that re-sorts that header must still take the cursor with it. Also
+   * whether the selected row is on the list, so one the new names hide can
+   * be told from one that was never drawn.
+   */
+  function selectionSnapshot(): SelectionSnapshot {
+    const item = selectedFlatItem();
+    const id = state.selectedSessionId;
+    return {
+      header:
+        item?.type === "header" && item.rawKeys
+          ? { key: item.groupKey, rawKeys: item.rawKeys }
+          : null,
+      rowDrawn:
+        !!id &&
+        flatItems().some(
+          (i) => i.type === "session" && i.filteredSession.session.id === id,
+        ),
+    };
+  }
+
+  /**
+   * After the group names changed, keep the cursor on what it was on: the
+   * selected header moves to the group its raw keys now fold into (the first
+   * in display order, for a reset that split it), and a selected row the
+   * new names hide is deselected, giving way to its group's header when a
+   * merge tucked it into a collapsed one.
+   */
+  function followGroupSelection({
+    header: before,
+    rowDrawn,
+  }: SelectionSnapshot) {
+    const items = flatItems();
+    const headers = items.filter(
+      (item): item is Extract<FlatItem, { type: "header" }> =>
+        item.type === "header",
+    );
+    if (before) {
+      const holds = (header: (typeof headers)[number]) =>
+        header.rawKeys?.some((raw) => before.rawKeys.includes(raw)) ?? false;
+      // Still there under the same name: leave the selection as it was (an
+      // implicit first-row cursor stays implicit).
+      if (!headers.some((h) => h.groupKey === before.key && holds(h)))
+        setSelectedHeaderKey(headers.find(holds)?.groupKey ?? null);
+    }
+    const id = state.selectedSessionId;
+    if (!id) return;
+    if (
+      items.some(
+        (item) =>
+          item.type === "session" && item.filteredSession.session.id === id,
+      )
+    )
+      return;
+    // Its group's header takes the cursor only when that header is drawn (a
+    // merge into a collapsed group); a search the new names no longer match
+    // leaves none.
+    const session = state.sessions.find((s) => s.id === id);
+    const key = session && sessionGroupKey(session);
+    const drawn = !!key && headers.some((h) => h.groupKey === key);
+    // A row the names just hid stops being the action target whether or not
+    // anything takes its place: the preview, a search Enter and preview focus
+    // would otherwise keep acting on a session nobody can see. One that was
+    // never drawn is left alone: the sidebar selects its pane's session by
+    // id before the session itself has arrived.
+    if (!drawn && !rowDrawn) return;
+    batch(() => {
+      setState("selectedSessionId", null);
+      setState("previewFocused", false);
+      setSelectedHeaderKey(drawn ? key : null);
+    });
+  }
+
+  /**
+   * Apply a rename or a reset: the names and the layout they carry, at once.
+   * Written immediately and in ONE write, whole: `setUIState` merges only one
+   * level deep (so a partial `groupAliases` would erase the other modes), and
+   * a second instance must never read the new names with the old pins.
+   */
+  function commitGroupNames(
+    aliases: GroupAliases,
+    layouts: GroupLayouts,
+    pinned: string[],
+    collapsed: Set<string>,
+  ) {
+    const follow = selectionSnapshot();
+    batch(() => {
+      setGroupAliases(aliases);
+      setGroupLayouts(layouts);
+      setPinnedGroups(pinned);
+      setCollapsedGroups(collapsed);
+    });
+    followGroupSelection(follow);
+    const active = activeGroupKeys(aliases);
+    flushUIState({
+      groupAliases: aliases,
+      groupLayouts: layouts,
+      pinnedGroups: pinned,
+      collapsedGroups: [...collapsed].filter((key) => active.has(key)),
+    }).catch(() => {
+      actions.showToast("Could not save group names", 3_000);
+    });
+  }
+
+  /** What group `key`'s header says, or the key where no header draws it. */
+  function headerLabel(key: string): string {
+    const header = flatItems().find(
+      (item) => item.type === "header" && item.groupKey === key,
+    );
+    return header?.type === "header" ? header.label : key;
   }
 
   /** A waiting-only group is still active even while its header is absent. */
@@ -1696,12 +2097,30 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       return;
     }
     if (!attentionBand) return;
-    const key = getGroupKey(selected, state.groupBy);
+    const key = sessionGroupKey(selected);
     if (state.groupBy === "none" || !collapsedGroups().has(key)) return;
     const expanded = new Set(collapsedGroups());
     expanded.delete(key);
     setCollapsedGroups(expanded);
     persistCollapsedGroups(expanded);
+  }
+
+  /**
+   * Turn the cursor's band fallback into a real selection before the list
+   * changes under it. `selectedIndex` opens on the first waiting session
+   * without committing it, so once that session stops waiting the band
+   * empties and the fallback drops to whatever header is now first, away
+   * from the row the user was looking at. Pinned, the cursor follows the
+   * session out of the band, as it would had the user moved there. Only the
+   * band case pins: every other fallback is the top row, which tracks the
+   * list's order on purpose. Local only, so it is not broadcast.
+   */
+  function pinBandFallback() {
+    if (state.selectedSessionId || selectedHeaderKey()) return;
+    const item = selectedFlatItem();
+    if (item?.type !== "session") return;
+    const session = item.filteredSession.session;
+    if (inBand(session)) setState("selectedSessionId", session.id);
   }
 
   /**
@@ -1733,6 +2152,60 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     invokeRemovalTimers.set(invocationId, timer);
   }
 
+  function forgetSessionMark(id: string) {
+    if (!state.markedSessions.has(id)) return;
+    setState("markedSessions", (prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  /**
+   * Open a view on `repo`. A repo other than the base scope is a jump: it
+   * narrows this view only, and the base is remembered for the way back.
+   * Opening on the base itself ends any jump (`h`/`l` open the next view
+   * this way, which is how leaving a narrowed view restores the base).
+   */
+  function openScoped(repo: string | null) {
+    const base = baseScope();
+    setJumpBase(repo === base ? null : { scope: base });
+    changeScope(repo);
+  }
+
+  /** Back on Sessions (no other view open): a jump ends with its view. */
+  function restoreBaseOnSessions() {
+    if (state.worktrees || state.sourcePicker) return;
+    const jump = jumpBase();
+    if (!jump) return;
+    setJumpBase(null);
+    changeScope(jump.scope);
+  }
+
+  function changeScope(repo: string | null) {
+    if (repo === state.scope) return;
+    batch(() => {
+      setState("scope", repo);
+      if (
+        state.selectedSessionId &&
+        !filteredSessions().some(
+          (s) => s.session.id === state.selectedSessionId,
+        )
+      ) {
+        setState("selectedSessionId", null);
+      }
+      const header = selectedHeaderKey();
+      if (
+        header &&
+        !flatItems().some(
+          (item) => item.type === "header" && item.groupKey === header,
+        )
+      ) {
+        setSelectedHeaderKey(null);
+      }
+    });
+  }
+
   /**
    * Immediately drop a synthetic invoke row (no outcome to show), clearing
    * any armed linger timer and the selection if it pointed at the row.
@@ -1745,6 +2218,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       clearTimeout(existing);
       invokeRemovalTimers.delete(invocationId);
     }
+    forgetSessionMark(invocationId);
     setState("sessions", (s) =>
       s.filter((session) => session.id !== invocationId),
     );
@@ -1844,6 +2318,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     }
   }
 
+  /**
+   * While the rename prompt is up: the label of the existing group the typed
+   * name would merge into, or null when it would not merge. Resolved the way
+   * Enter resolves it (`resolveGroupName`, before the width cap), so the
+   * prompt can say a long full path merges rather than that it gets cut.
+   */
+  const renameMergeTarget = createMemo((): string | null => {
+    const open = state.palette;
+    if (!open?.rename || open.rename.groupBy !== state.groupBy) return null;
+    const groups = boardGroups(groupAliases());
+    const target = resolveGroupName(open.query, groups, state.groupBy);
+    if (!target || target === open.rename.groupKey) return null;
+    return groups.some((group) => group.key === target)
+      ? headerLabel(target)
+      : null;
+  });
+
   const actions = {
     setSessions(sessions: EnrichedSession[]) {
       // Preserve client-synthesized subprocess invoke rows. They live only
@@ -1858,9 +2349,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       const merged =
         synthetic.length > 0 ? [...sessions, ...synthetic] : sessions;
+      pinBandFallback();
       const wasWaiting = selectedSession()?.status === "waiting";
       batch(() => {
         setState("sessions", merged);
+        const survivingIds = new Set(merged.map((session) => session.id));
+        for (const id of state.markedSessions) {
+          if (!survivingIds.has(id)) forgetSessionMark(id);
+        }
         if (
           state.selectedSessionId &&
           !merged.some((s) => s.id === state.selectedSessionId)
@@ -1885,6 +2381,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         this.updateSession(session);
         return;
       }
+      pinBandFallback();
       setState("sessions", (s) => [...s, session]);
     },
 
@@ -1902,6 +2399,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
+        pinBandFallback();
         const wasWaiting =
           state.selectedSessionId === session.id &&
           state.sessions[idx]?.status === "waiting";
@@ -1930,6 +2428,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
           ? flatItems().slice(0, killedIndex).map(flatItemIdentity)
           : [];
       batch(() => {
+        forgetSessionMark(sessionId);
         setState("sessions", (s) =>
           s.filter((session) => session.id !== sessionId),
         );
@@ -2149,6 +2648,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         null,
         "kill-group",
         header.members.map((fs) => fs.session.id),
+        header.label,
       );
     },
 
@@ -2156,11 +2656,13 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       sessionId: string | null,
       action: ConfirmAction = "kill",
       sessionIds: string[] = [],
+      label: string | null = null,
     ) {
       setState("confirmMode", true);
       setState("confirmSessionId", sessionId);
       setState("confirmAction", action);
       setState("confirmSessionIds", sessionIds);
+      setState("confirmLabel", label);
     },
 
     hideConfirmDialog() {
@@ -2168,6 +2670,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("confirmSessionId", null);
       setState("confirmAction", null);
       setState("confirmSessionIds", []);
+      setState("confirmLabel", null);
     },
 
     /** `highlight` is the item the keyboard starts on; null for a
@@ -2411,7 +2914,6 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       /** Origin marker for a dialog the Worktrees panel opened: cancel
        *  returns there. See {@link NewSessionDraft.returnToWorktrees}. */
       returnToWorktrees?: {
-        repo: string | null;
         scope: string | null;
         cursor: string;
       };
@@ -2662,7 +3164,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     cycleGroupBy() {
       const currentIdx = VALID_GROUP_BY.indexOf(state.groupBy);
       const nextIdx = (currentIdx + 1) % VALID_GROUP_BY.length;
-      const next = VALID_GROUP_BY[nextIdx];
+      this.setGroupBy(VALID_GROUP_BY[nextIdx]!);
+    },
+
+    /** Group by `next` directly (the palette's "Group by …" rows), with
+     *  exactly what a `b` press to it does: selection, collapse and pins are
+     *  keyed by the old grouping's names and are cleared with it. Choosing
+     *  the grouping already on screen is a no-op rather than a reset. */
+    setGroupBy(next: GroupBy) {
+      if (next === state.groupBy) return;
       batch(() => {
         setState("groupBy", next);
         setState("selectedSessionId", null);
@@ -2685,28 +3195,76 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("showHelp", (show) => !show);
     },
 
+    openPalette() {
+      if (options.sidebar) return;
+      setState("palette", { query: "", highlight: null });
+    },
+
+    closePalette() {
+      setState("palette", null);
+    },
+
+    setPaletteQuery(query: string) {
+      if (!state.palette) return;
+      // A new query re-ranks the list, so the highlight goes back to its top.
+      batch(() => {
+        setState("palette", "query", query);
+        setState("palette", "highlight", null);
+      });
+    },
+
+    setPaletteHighlight(id: string | null) {
+      if (!state.palette) return;
+      setState("palette", "highlight", id);
+    },
+
     hideHelp() {
       setState("showHelp", false);
     },
 
+    /** An explicit scope change (`s`): it becomes the scope for every view,
+     *  so it also ends any jump that had narrowed the current one. */
+    setScope(repo: string | null) {
+      setJumpBase(null);
+      changeScope(repo);
+      if (state.sourcePicker) setState("sourcePicker", "repo", repo);
+    },
+    markSessions(ids: string[], clear = false) {
+      setState("markedSessions", (prev) => {
+        const next = new Set(prev);
+        const remove = clear || ids.every((id) => next.has(id));
+        for (const id of ids) {
+          if (remove) next.delete(id);
+          else next.add(id);
+        }
+        return next;
+      });
+    },
+    markAllSessions(clear = false) {
+      const visible = flatItems().flatMap((item) =>
+        item.type === "session" ? [item.filteredSession.session.id] : [],
+      );
+      setState("markedSessions", new Set(clear ? [] : visible));
+    },
     showWorktrees(
       repo: string | null,
       opts: {
         initialCursor?: string;
         isReturn?: boolean;
-        startWidened?: boolean;
       } = {},
     ) {
+      openScoped(repo);
+      setState("sourcePicker", null);
       setState("worktrees", {
         repo,
         initialCursor: opts.initialCursor ?? null,
         isReturn: opts.isReturn === true,
-        startWidened: opts.startWidened === true,
       });
     },
 
     hideWorktrees() {
       setState("worktrees", null);
+      restoreBaseOnSessions();
     },
 
     showSourcePicker(
@@ -2717,6 +3275,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         origin?: SourcePickerOrigin | null;
       } = {},
     ) {
+      openScoped(repo);
+      setState("worktrees", null);
       setState("sourcePicker", {
         repo,
         initialCursor: opts.initialCursor ?? null,
@@ -2727,6 +3287,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
     hideSourcePicker() {
       setState("sourcePicker", null);
+      restoreBaseOnSessions();
     },
 
     resizePreview(delta: number) {
@@ -2809,24 +3370,71 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       setState("notice", null);
     },
 
-    showToast(message: string, durationMs = 1500) {
+    /**
+     * Show `message` for `durationMs`. With `fit`, the toast draws
+     * `fit(columns)` for the columns its card has instead, and `message` is
+     * its full-width form.
+     */
+    showToast(
+      message: string,
+      durationMs = 1500,
+      fit?: (width: number) => string,
+    ) {
       setState("toastMessage", message);
+      setToastFit(() => fit ?? null);
       if (toastTimer) clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         setState("toastMessage", null);
+        setToastFit(null);
         toastTimer = null;
       }, durationMs);
     },
 
+    /** A toast fitted by `fit`, shown at its full toast width. */
+    showFittedToast(fit: (width: number) => string, durationMs = 1500) {
+      actions.showToast(fit(TOAST_TEXT_WIDTH), durationMs, fit);
+    },
+
+    /**
+     * Take another instance's writes from `state.json`. Every key this
+     * instance still has queued in the 300ms debounce is skipped: the file
+     * is older than that keypress, and applying it would undo a `b`, `f`,
+     * `p`, pin or collapse until the queued write lands. An unchanged value
+     * is skipped too, so the daemon's own writes to the file do not rebuild
+     * the list.
+     *
+     * Writes flushed at once (group names with their layout, the last
+     * spawned agent) are never queued, so that guard never applies to them.
+     * What keeps them is the watcher: this instance's own write is a change
+     * to the file, which re-arms its 200ms debounce, so the reload that
+     * follows reads the file with the write in it.
+     */
     reloadUIState(freshState: UIState) {
+      const queued = (key: keyof UIState) => Object.hasOwn(pendingUpdates, key);
+      const follow = selectionSnapshot();
       batch(() => {
-        if (freshState.collapsedGroups !== undefined) {
-          setCollapsedGroups(new Set(freshState.collapsedGroups));
+        const collapsed = freshState.collapsedGroups;
+        if (
+          collapsed !== undefined &&
+          !queued("collapsedGroups") &&
+          !sameKeys(collapsed, [...collapsedGroups()])
+        ) {
+          setCollapsedGroups(new Set(collapsed));
         }
-        if (freshState.groupBy !== undefined) {
+        if (freshState.groupAliases !== undefined && !queued("groupAliases")) {
+          const aliases = normalizeGroupAliases(freshState.groupAliases);
+          if (JSON.stringify(aliases) !== JSON.stringify(groupAliases()))
+            setGroupAliases(aliases);
+        }
+        if (freshState.groupLayouts !== undefined && !queued("groupLayouts")) {
+          const layouts = normalizeGroupLayouts(freshState.groupLayouts);
+          if (JSON.stringify(layouts) !== JSON.stringify(groupLayouts()))
+            setGroupLayouts(layouts);
+        }
+        if (freshState.groupBy !== undefined && !queued("groupBy")) {
           setState("groupBy", freshState.groupBy);
         }
-        if (freshState.hideIdle !== undefined) {
+        if (freshState.hideIdle !== undefined && !queued("hideIdle")) {
           setState("hideIdle", freshState.hideIdle);
         }
         // Only an explicit `promptDisplay` (written by the `p` key) syncs across
@@ -2834,27 +3442,260 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         // default are resolved once at launch (picker.ts / sidebar.ts); re-running
         // the migration on reload without the config default would let a stale
         // `showPrompt: false` clobber a newer config `promptDisplay`.
-        if (freshState.promptDisplay !== undefined) {
+        if (
+          freshState.promptDisplay !== undefined &&
+          !queued("promptDisplay")
+        ) {
           setState("promptDisplay", freshState.promptDisplay);
         }
-        if (freshState.pinnedGroups !== undefined) {
-          setPinnedGroups(freshState.pinnedGroups);
+        const pinned = freshState.pinnedGroups;
+        if (
+          pinned !== undefined &&
+          !queued("pinnedGroups") &&
+          (pinned.length !== pinnedGroups().length ||
+            pinned.some((key, i) => key !== pinnedGroups()[i]))
+        ) {
+          setPinnedGroups(pinned);
         }
-        if (freshState.lastSpawnAgent !== undefined) {
+        if (
+          freshState.lastSpawnAgent !== undefined &&
+          !queued("lastSpawnAgent")
+        ) {
           setState("lastSpawnAgent", freshState.lastSpawnAgent);
         }
       });
+      followGroupSelection(follow);
     },
 
-    toggleGroupCollapse(groupKey: string) {
-      if (isSyntheticGroupKey(groupKey)) return;
+    /**
+     * Rename group `key` (a final name, as headers carry it) to `name`. Every
+     * raw key folding into it is re-aliased (one hop, never alias-to-alias);
+     * a raw key equal to the new name loses its alias instead. A name another
+     * group already has merges into it, and that group's pin and collapse
+     * win; a fresh name inherits this group's. An empty name, a synthetic
+     * header and `none` grouping change nothing.
+     */
+    renameGroup(key: string, rawName: string) {
+      const mode = state.groupBy;
+      if (mode === "none" || !key || isSyntheticGroupKey(key)) return;
+      const aliases = groupAliases();
+      const groups = boardGroups(aliases);
+      // A name an existing header shows (its key, or its label where those
+      // differ, as cwd's home-shortened paths do) means that group.
+      const name = resolveGroupName(rawName, groups, mode);
+      if (!name || name === key) return;
+      // The rows move (a merge folds two groups, and a new name re-sorts
+      // this one), so a recorded scroll offset no longer lands where it
+      // did, the same reason the collapse actions drop it.
+      localScrollTop = undefined;
+      const map = aliases[mode] ?? {};
+      const members = new Set(
+        Object.keys(map).filter((raw) => map[raw] === key),
+      );
+      for (const raw of groups.find((g) => g.key === key)?.rawKeys ?? [])
+        members.add(raw);
+      if (members.size === 0) members.add(key);
+      const entries = Object.entries(map).filter(([raw]) => !members.has(raw));
+      for (const raw of members) if (raw !== name) entries.push([raw, name]);
+      const merging = activeGroupKeys(aliases).has(name);
+      const collapsed = new Set(collapsedGroups());
+      const wasCollapsed = collapsed.delete(key);
+      if (!merging) {
+        if (wasCollapsed) collapsed.add(name);
+        else collapsed.delete(name);
+      }
+      // A merge takes this group's layout away (the target's wins), so the
+      // record keeps what a reset gives back. The pins are recorded again,
+      // before this one goes: each by its own raw keys in the order they
+      // have now, with every key merged away earlier kept after the pin it
+      // followed. Each raw key this group holds records its collapse; a key
+      // that already has one keeps it, since it was merged in from
+      // elsewhere and its own layout is older than this group's.
+      const recorded = groupLayouts()[mode];
+      const merged = recorded?.merged ?? {};
+      let record = recorded;
+      if (merging) {
+        const added = [...members]
+          .filter((raw) => raw !== name && !Object.hasOwn(merged, raw))
+          .sort((a, b) => a.localeCompare(b));
+        const holds = (pin: string) => ownKeys(pin, map, merged);
+        // This group is spelled by every key it hands over, so each one it
+        // held (its own key beside the keys renamed to it, say) comes back
+        // pinned if it was.
+        const spell = (pin: string) =>
+          pin === key ? [...new Set([...holds(pin), ...added])] : holds(pin);
+        record = {
+          pins: layIn(
+            pinnedGroups(),
+            holds,
+            recorded?.pins ?? [],
+            Object.keys(merged),
+            spell,
+          ),
+          // Built with `Object.fromEntries`, never by assignment: a raw key
+          // spelled `__proto__` would otherwise set the map's prototype
+          // instead of recording a layout, and the record would vanish.
+          merged: Object.fromEntries([
+            ...Object.entries(merged),
+            ...added.map((raw) => [raw, { collapsed: wasCollapsed }] as const),
+          ]),
+        };
+      }
+      const nextAliases = withModeAliases(aliases, mode, entries);
+      commitGroupNames(
+        nextAliases,
+        withModeLayouts(groupLayouts(), mode, record, nextAliases),
+        merging
+          ? pinnedGroups().filter((k) => k !== key)
+          : spliceKey(pinnedGroups(), key, [name]),
+        collapsed,
+      );
+      // Named the way its header now reads (a merged cwd group's label, not
+      // its raw path). A merge says how to undo it, and stays up longer to
+      // be read.
+      const shown = headerLabel(name);
+      if (merging)
+        actions.showFittedToast((width) => mergedToast(shown, width), 4_000);
+      else actions.showFittedToast((width) => renamedToast(shown, width));
+    },
+
+    /**
+     * Undo every rename pointing at group `key` in the current grouping,
+     * splitting a merged group back into its raw groups. Each one inherits
+     * the group's pin (in its place) and collapse.
+     */
+    resetGroupName(key: string) {
+      const mode = state.groupBy;
+      if (mode === "none" || !key || isSyntheticGroupKey(key)) return;
+      const aliases = groupAliases();
+      const map = aliases[mode] ?? {};
+      const members = Object.keys(map)
+        .filter((raw) => map[raw] === key)
+        .sort((a, b) => a.localeCompare(b));
+      if (members.length === 0) {
+        actions.showToast("No custom name to reset");
+        return;
+      }
+      // Splitting a merged group back out moves rows, as a rename does.
+      localScrollTop = undefined;
+      const next = withModeAliases(
+        aliases,
+        mode,
+        Object.entries(map).filter(([, name]) => name !== key),
+      );
+      const active = activeGroupKeys(next);
+      const record = groupLayouts()[mode];
+      const merged = record?.merged ?? {};
+      // A key with a record was merged in and gets its own layout back. One
+      // without carried this group's layout here (a plain rename, or a merge
+      // saved before records existed) and takes it with it, beside the
+      // group itself if that is still a group.
+      const restored = members.filter(
+        (k) => active.has(k) && Object.hasOwn(merged, k),
+      );
+      const carriers = [key, ...members].filter(
+        (k) => active.has(k) && !Object.hasOwn(merged, k),
+      );
+      const collapsed = new Set(collapsedGroups());
+      if (collapsed.delete(key)) for (const k of carriers) collapsed.add(k);
+      // A collapse the key has now is newer than its record and stands.
+      for (const k of restored) if (merged[k]!.collapsed) collapsed.add(k);
+      const layouts = withModeLayouts(groupLayouts(), mode, record, next);
+      // Every pin that came back goes in at once, after the pin it followed
+      // in the record, so the order holds whichever groups were merged away
+      // or reset first; the pins there now keep their order.
+      const stillMerged = layouts[mode]?.merged ?? {};
+      const pinned = layIn(
+        spliceKey(pinnedGroups(), key, carriers),
+        (pin) => ownKeys(pin, next[mode], stillMerged),
+        record?.pins ?? [],
+        restored,
+        (pin) => [pin],
+      );
+      commitGroupNames(next, layouts, pinned, collapsed);
+      // The groups that came back, by what their headers now say.
+      const split = [key, ...members].filter((k) => active.has(k));
+      const back = (split.length ? split : members).map(headerLabel);
+      actions.showFittedToast((width) => resetToast(back, width), 3_000);
+    },
+
+    /**
+     * Open the rename prompt for group `key`, prefilled with its label. It
+     * is the palette in its rename mode, and unlike the command list it
+     * opens in the sidebar too. A synthetic header or `none` grouping has
+     * nothing to rename and says so.
+     */
+    openRenamePrompt(key: string) {
+      if (state.groupBy === "none") {
+        actions.showToast("Grouping is off (b to group)");
+        return;
+      }
+      if (!key || isSyntheticGroupKey(key)) {
+        actions.showToast("Only a group can be renamed");
+        return;
+      }
+      const header = flatItems().find(
+        (item) => item.type === "header" && item.groupKey === key,
+      );
+      const label = header?.type === "header" ? header.label : key;
+      setState("palette", {
+        query: label,
+        highlight: null,
+        rename: {
+          groupKey: key,
+          label,
+          groupBy: state.groupBy,
+          members: aliasMembers(key, groupAliases()[state.groupBy]),
+        },
+      });
+    },
+
+    /** Enter in the rename prompt: close it and rename, unless the name is
+     *  empty or untouched (both cancel). */
+    commitRenamePrompt() {
+      const open = state.palette;
+      if (!open?.rename) return;
+      const { groupKey: key, label, groupBy } = open.rename;
+      const query = open.query;
+      setState("palette", null);
+      // Untouched is no rename. Compared on the raw text: a label wider than
+      // a name may be (a deep cwd key) would come back from the name rules
+      // truncated, look edited, and alias the key to a cut copy of itself.
+      if (query === label) return;
+      // Another instance changed the grouping while the prompt was up (the
+      // state watcher applied it). The key belongs to the old mode's
+      // namespace, so writing it now would name an unrelated group.
+      if (groupBy !== state.groupBy) {
+        actions.showToast("Grouping changed; rename cancelled", 3_000);
+        return;
+      }
+      // Another instance renamed, reset or merged this group while the
+      // prompt was up: the key no longer names what the user was looking
+      // at, and renaming it would write a phantom alias or rename some
+      // other set of groups while still reporting success. Sessions coming
+      // and going do not count; only the alias table does.
+      const now = aliasMembers(key, groupAliases()[groupBy]);
+      if (
+        now.length !== open.rename.members.length ||
+        now.some((raw, i) => raw !== open.rename!.members[i])
+      ) {
+        actions.showToast("Group changed; rename cancelled", 3_000);
+        return;
+      }
+      // Uncapped: renameGroup matches it against existing keys and labels
+      // (a full path past the cap still merges) before the name rules.
+      actions.renameGroup(key, query);
+    },
+
+    toggleGroupCollapse(key: string) {
+      if (isSyntheticGroupKey(key)) return;
       localScrollTop = undefined;
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
-        if (next.has(groupKey)) {
-          next.delete(groupKey);
+        if (next.has(key)) {
+          next.delete(key);
         } else {
-          next.add(groupKey);
+          next.add(key);
           // If collapsing and selected session belongs to this group, select the header
           if (state.selectedSessionId) {
             const session = state.sessions.find(
@@ -2863,10 +3704,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
             if (
               session &&
               !inBand(session) &&
-              getGroupKey(session, state.groupBy) === groupKey
+              sessionGroupKey(session) === key
             ) {
               setState("selectedSessionId", null);
-              setSelectedHeaderKey(groupKey);
+              setSelectedHeaderKey(key);
             }
           }
         }
@@ -2907,14 +3748,14 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       if (!session) return;
       if (inBand(session)) return;
-      const groupKey = getGroupKey(session, state.groupBy);
-      if (state.groupBy === "none" || !groupKey) return;
+      const key = sessionGroupKey(session);
+      if (state.groupBy === "none" || !key) return;
       localScrollTop = undefined;
       setState("selectedSessionId", null);
-      setSelectedHeaderKey(groupKey);
+      setSelectedHeaderKey(key);
       setCollapsedGroups((prev) => {
         const next = new Set(prev);
-        next.add(groupKey);
+        next.add(key);
         persistCollapsedGroups(next);
         return next;
       });
@@ -2931,11 +3772,49 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       });
     },
 
+    /**
+     * Pin the cursor's band fallback now rather than on the next session
+     * event (see `pinBandFallback`), for a caller about to snapshot the
+     * selection: the later pin would otherwise read as the user moving.
+     */
+    commitBandFallback() {
+      pinBandFallback();
+    },
+
+    /**
+     * Put the cursor on session `id`, but only onto a row the list draws. A
+     * session the scope, `f` or a search hides is left alone, and so is the
+     * selection: a cursor on a row nobody can see splits the highlight (which
+     * falls back to the first row) from the preview and the `x`/`r` targets
+     * (which read the selected id directly). One hidden only by a collapsed
+     * group has that group expanded first. Returns whether the cursor moved.
+     */
+    revealSession(id: string): boolean {
+      const drawn = () =>
+        flatItems().some(
+          (item) =>
+            item.type === "session" && item.filteredSession.session.id === id,
+        );
+      if (!drawn()) {
+        const session = state.sessions.find((s) => s.id === id);
+        if (!session || !filteredSessions().some((fs) => fs.session.id === id))
+          return false;
+        this.expandGroup(sessionGroupKey(session));
+        if (!drawn()) return false;
+      }
+      batch(() => {
+        setState("selectedSessionId", id);
+        setSelectedHeaderKey(null);
+      });
+      return true;
+    },
+
     applyGroupOrder(newOrder: string[], groupKey: string, sessionId?: string) {
       const next = computePinnedFromOrder(
         newOrder,
         filteredSessions(),
         state.groupBy,
+        groupAliases(),
       );
       setPinnedGroups(next);
       persistUIState({ pinnedGroups: next });
@@ -3002,8 +3881,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
 
   return {
     state,
+    baseScope,
     sortedSessions,
-    unfilteredSessions,
     filteredSessions,
     flatItems,
     invocationInFlightCount,
@@ -3015,6 +3894,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     selectedGroupSessions,
     collapsedGroups,
     pinnedGroups,
+    groupAliases,
+    groupLayouts,
+    toastFit,
+    renameMergeTarget,
+    /** Whether group `key` carries a name the user gave it (so Reset Name
+     *  has something to undo). */
+    groupHasAlias: (key: string) =>
+      state.groupBy !== "none" &&
+      Object.values(groupAliases()[state.groupBy] ?? {}).includes(key),
     actions,
     tick,
     bumpTick: () => setTick((t) => t + 1),

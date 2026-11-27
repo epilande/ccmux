@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach, spyOn } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { createMockMouse, MouseButtons } from "@opentui/core/testing";
 import { batch, createSignal } from "solid-js";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { SessionList, isActivePaneRow } from "./SessionList";
 import { TickContext } from "../store";
 import {
@@ -13,7 +15,8 @@ import {
   scrollbarThumb,
   wheelTraps,
 } from "./test-helpers";
-import { buildFlatItems, type FlatItem, type GroupBy } from "../utils/grouping";
+import { buildFlatItems, type FlatItem } from "../utils/grouping";
+import { getAgentShortCode } from "../../lib/agents";
 import { displayWidth } from "../utils/format";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -52,33 +55,7 @@ function makeSessionItem(
   };
 }
 
-describe("SessionList worktree counts", () => {
-  function mockCountsFetch(
-    answer: (url: URL, init?: RequestInit) => Response | Promise<Response>,
-  ): URL[] {
-    const requests: URL[] = [];
-    fetchSpy = spyOn(globalThis, "fetch").mockImplementation(((
-      input: string | URL | Request,
-      init?: RequestInit,
-    ) => {
-      const url = new URL(
-        input instanceof Request ? input.url : input.toString(),
-      );
-      // Store tests can leave debounced sidebar-state broadcasts pending.
-      if (url.pathname !== "/worktrees/counts")
-        return Promise.resolve(Response.json({}));
-      requests.push(url);
-      return Promise.resolve(answer(url, init));
-    }) as unknown as typeof fetch);
-    return requests;
-  }
-
-  async function renderSettled() {
-    // Drain fetch/json continuations before capturing the rendered facts.
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await setup.renderOnce();
-  }
-
+describe("SessionList shared repository facts", () => {
   const rows = (roots: string[]) =>
     roots.map((root, index) => ({
       session: mockEnrichedSession({
@@ -90,386 +67,181 @@ describe("SessionList worktree counts", () => {
       }),
       highlights: null,
     }));
-
-  it("keeps counts and request scope stable as solo-project sessions enter and leave waiting", async () => {
-    const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
-    const [connection, setConnection] = createSignal("connected");
-    const requests = mockCountsFetch((url) => {
-      return Response.json({
-        repos: url.searchParams
-          .getAll("repo")
-          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
-      });
-    });
-    setup = await testRender(
-      () => (
-        <TickContext.Provider value={{ tick: () => 0 }}>
-          <SessionList
-            items={buildFlatItems(sessions(), "project", new Set(), false)}
-            sessions={sessions()}
-            groupBy="project"
-            selectedIndex={0}
-            previewWidth={30}
-            connectionState={connection()}
-          />
-        </TickContext.Provider>
-      ),
-      { width: 120, height: 20 },
-    );
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    expect(requests[0].pathname).toBe("/worktrees/counts");
-    expect(requests[0].searchParams.getAll("repo")).toEqual([
-      "/code/a",
-      "/code/b",
-    ]);
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-
-    setSessions(rows(["/code/a", "/code/b"]));
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    setSessions(
-      rows(["/code/a", "/code/b"]).map((row, index) => ({
-        ...row,
-        session: { ...row.session, status: index === 0 ? "waiting" : "idle" },
-      })),
-    );
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-    setSessions(
-      rows(["/code/a", "/code/b"]).map((row) => ({
-        ...row,
-        session: { ...row.session, status: "waiting" },
-      })),
-    );
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    setSessions(rows(["/code/a", "/code/b"]));
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-    setSessions(rows(["/code/a"]));
-    await renderSettled();
-    expect(requests).toHaveLength(2);
-    expect(requests[1].searchParams.getAll("repo")).toEqual(["/code/a"]);
-    setConnection("disconnected");
-    await renderSettled();
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-    setConnection("connected");
-    await renderSettled();
-    expect(requests).toHaveLength(3);
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-  });
-
-  it("holds the counts scope while a search filter narrows the visible rows", async () => {
-    const all = rows(["/code/a", "/code/b"]);
-    const [visible, setVisible] = createSignal(all);
-    const requests = mockCountsFetch((url) =>
-      Response.json({
-        repos: url.searchParams
-          .getAll("repo")
-          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
-      }),
-    );
-    setup = await testRender(
-      () => (
-        <TickContext.Provider value={{ tick: () => 0 }}>
-          <SessionList
-            items={buildFlatItems(visible(), "project", new Set(), false)}
-            // The full membership, exactly as App hands it over: a query
-            // shapes `items` and must leave the counts scope alone.
-            sessions={all}
-            groupBy="project"
-            selectedIndex={0}
-            previewWidth={30}
-            connectionState="connected"
-            searchActive={false}
-          />
-        </TickContext.Provider>
-      ),
-      { width: 120, height: 20 },
-    );
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    expect(requests[0].searchParams.getAll("repo")).toEqual([
-      "/code/a",
-      "/code/b",
-    ]);
-
-    setVisible(all.slice(0, 1));
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-  });
-
-  it("holds the counts scope while a status filter hides rows", async () => {
-    const all = rows(["/code/a", "/code/b"]).map((row, index) => ({
-      ...row,
-      session: {
-        ...row.session,
-        status: index === 0 ? ("idle" as const) : ("waiting" as const),
-      },
-    }));
-    const [visible, setVisible] = createSignal(all);
-    const requests = mockCountsFetch((url) =>
-      Response.json({
-        repos: url.searchParams
-          .getAll("repo")
-          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
-      }),
-    );
-    setup = await testRender(
-      () => (
-        <TickContext.Provider value={{ tick: () => 0 }}>
-          <SessionList
-            items={buildFlatItems(visible(), "project", new Set(), false)}
-            sessions={all}
-            groupBy="project"
-            selectedIndex={0}
-            previewWidth={30}
-            connectionState="connected"
-          />
-        </TickContext.Provider>
-      ),
-      { width: 120, height: 20 },
-    );
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-
-    // hide-idle drops the idle row; the repo it belongs to is still a repo
-    // this picker is showing sessions for.
-    setVisible(all.filter((row) => row.session.status !== "idle"));
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-    expect(requests[0].searchParams.getAll("repo")).toEqual([
-      "/code/a",
-      "/code/b",
-    ]);
-  });
-
-  it("refetches when a session from a new repo appears", async () => {
-    const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
-    const requests = mockCountsFetch((url) =>
-      Response.json({
-        repos: url.searchParams
-          .getAll("repo")
-          .map((repoRoot) => ({ repoRoot, hasMain: true, linked: 2 })),
-      }),
-    );
-    setup = await testRender(
-      () => (
-        <TickContext.Provider value={{ tick: () => 0 }}>
-          <SessionList
-            items={buildFlatItems(sessions(), "project", new Set(), false)}
-            sessions={sessions()}
-            groupBy="project"
-            selectedIndex={0}
-            previewWidth={30}
-            connectionState="connected"
-          />
-        </TickContext.Provider>
-      ),
-      { width: 120, height: 20 },
-    );
-    await renderSettled();
-    expect(requests).toHaveLength(1);
-
-    setSessions(rows(["/code/a", "/code/b", "/code/c"]));
-    await renderSettled();
-    expect(requests).toHaveLength(2);
-    expect(requests[1].searchParams.getAll("repo")).toEqual([
-      "/code/a",
-      "/code/b",
-      "/code/c",
-    ]);
-  });
-
-  it("does not request facts for cwd, tmux, flat, or mixed-repo groups", async () => {
-    const [sessions, setSessions] = createSignal(rows(["/code/a"]));
-    const [groupBy, setGroupBy] = createSignal<GroupBy>("none");
-    const requests = mockCountsFetch(() => Response.json({ repos: [] }));
-    setup = await testRender(
-      () => (
-        <TickContext.Provider value={{ tick: () => 0 }}>
-          <SessionList
-            items={buildFlatItems(sessions(), groupBy(), new Set(), false)}
-            sessions={sessions()}
-            groupBy={groupBy()}
-            selectedIndex={0}
-            previewWidth={30}
-            connectionState="connected"
-          />
-        </TickContext.Provider>
-      ),
-      { width: 120, height: 20 },
-    );
-    for (const mode of ["cwd", "session", "window", "none"] as const) {
-      setGroupBy(mode);
-      await renderSettled();
-    }
-    setSessions(
-      rows(["/code/a", "/code/b"]).map((row) => ({
-        ...row,
-        session: { ...row.session, project: "same-name" },
-      })),
-    );
-    setGroupBy("project");
-    await renderSettled();
-    expect(requests).toHaveLength(0);
-  });
-
-  it("drops cached facts when full project membership becomes ambiguous", async () => {
-    const [sessions, setSessions] = createSignal(rows(["/code/a"]));
-    const requests = mockCountsFetch(() =>
-      Response.json({
-        repos: [{ repoRoot: "/code/a", hasMain: true, linked: 2 }],
-      }),
-    );
-    setup = await testRender(
-      () => (
-        <TickContext.Provider value={{ tick: () => 0 }}>
-          <SessionList
-            items={buildFlatItems(sessions(), "project", new Set(), false)}
-            sessions={sessions()}
-            groupBy="project"
-            selectedIndex={0}
-            previewWidth={30}
-            connectionState="connected"
-          />
-        </TickContext.Provider>
-      ),
-      { width: 120, height: 20 },
-    );
-    await renderSettled();
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-    setSessions(
-      rows(["/code/a", "/code/b"]).map((row, index) => ({
-        ...row,
-        session: {
-          ...row.session,
-          project: "project-0",
-          status: index === 0 ? "idle" : "waiting",
+  const facts: import("../../daemon/repo-facts").RepoFactsResponse = {
+    headerPR: true,
+    repos: [
+      {
+        repoRoot: "/code/a",
+        repoName: "a",
+        worktrees: {
+          updatedAt: 1,
+          stale: false,
+          value: {
+            repoRoot: "/code/a",
+            repoName: "a",
+            worktrees: [
+              { path: "/code/a", branch: "main", isMain: true },
+              { path: "/code/a-one", branch: "one", isMain: false },
+              { path: "/code/a-two", branch: "two", isMain: false },
+            ],
+          },
         },
-      })),
+      },
+    ],
+  };
+
+  it("renders updated shared counts without starting a second worktree request", async () => {
+    const [data, setData] = createSignal<typeof facts>({
+      repos: [],
+      headerPR: true,
+    });
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
     );
-    await renderSettled();
-    // The remaining ordinary header still names /code/a, but the full
-    // project spans two roots and is no longer eligible for scoped facts.
-    expect(setup.captureCharFrame()).toContain("project-0");
-    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
-    expect(requests).toHaveLength(1);
-  });
-
-  it("refreshes unchanged scope after worktree changes without blanking the previous counts", async () => {
-    const sessions = rows(["/code/a"]);
-    const pending: Array<ReturnType<typeof Promise.withResolvers<Response>>> =
-      [];
-    mockCountsFetch(() => {
-      const response = Promise.withResolvers<Response>();
-      pending.push(response);
-      return response.promise;
-    });
-    let refresh: (() => void) | undefined;
-    let timer: ReturnType<typeof setInterval> | undefined;
-    const nativeSetInterval = globalThis.setInterval;
-    const intervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
-      ...args: Parameters<typeof setInterval>
-    ) => {
-      const handle = nativeSetInterval(...args);
-      if (args[1] === 30_000) {
-        timer = handle;
-        refresh = () => args[0](...args.slice(2));
-      }
-      return handle;
-    }) as typeof setInterval);
-    const clearSpy = spyOn(globalThis, "clearInterval");
-    const answer = (linked: number) =>
-      Response.json({
-        repos: [{ repoRoot: "/code/a", hasMain: true, linked }],
-      });
-    try {
-      setup = await testRender(
-        () => (
-          <TickContext.Provider value={{ tick: () => 0 }}>
-            <SessionList
-              items={buildFlatItems(sessions, "project", new Set(), false)}
-              sessions={sessions}
-              groupBy="project"
-              selectedIndex={0}
-              previewWidth={30}
-              connectionState="connected"
-            />
-          </TickContext.Provider>
-        ),
-        { width: 120, height: 20 },
-      );
-      pending[0].resolve(answer(2));
-      await renderSettled();
-      expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-      expect(refresh).toBeDefined();
-      refresh!();
-      await renderSettled();
-      expect(pending).toHaveLength(2);
-      expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-      pending[1].resolve(answer(1));
-      await renderSettled();
-      expect(setup.captureCharFrame()).toContain("main + 1 worktree");
-      expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
-      setup.renderer.destroy();
-      expect(clearSpy).toHaveBeenCalledWith(timer);
-    } finally {
-      intervalSpy.mockRestore();
-      clearSpy.mockRestore();
-    }
-  });
-
-  it("aborts obsolete reads and prevents stale counts from replacing a new answer", async () => {
-    const [sessions, setSessions] = createSignal(rows(["/code/a", "/code/b"]));
-    const pending: Array<{
-      response: ReturnType<typeof Promise.withResolvers<Response>>;
-      signal?: AbortSignal | null;
-    }> = [];
-    mockCountsFetch((_url, init) => {
-      const response = Promise.withResolvers<Response>();
-      pending.push({ response, signal: init?.signal });
-      return response.promise;
-    });
     setup = await testRender(
       () => (
         <TickContext.Provider value={{ tick: () => 0 }}>
           <SessionList
-            items={buildFlatItems(sessions(), "project", new Set(), false)}
-            sessions={sessions()}
-            groupBy="project"
+            items={buildFlatItems(
+              rows(["/code/a"]),
+              "project",
+              new Set(),
+              false,
+            )}
+            repoFacts={data()}
             selectedIndex={0}
             previewWidth={30}
-            connectionState="connected"
           />
         </TickContext.Provider>
       ),
       { width: 120, height: 20 },
     );
-    await renderSettled();
-    setSessions(rows(["/code/a"]));
-    await renderSettled();
-    expect(pending).toHaveLength(2);
-    expect(pending[0].signal?.aborted).toBe(true);
-    pending[1].response.resolve(
-      Response.json({
-        repos: [{ repoRoot: "/code/a", hasMain: true, linked: 2 }],
-      }),
-    );
-    await renderSettled();
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    setData(facts);
+    await setup.renderOnce();
     expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-    pending[0].response.resolve(
-      Response.json({
-        repos: [{ repoRoot: "/code/a", hasMain: true, linked: 99 }],
-      }),
+    setData({ repos: [], headerPR: true });
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps a row's PR badge, labeled, when branch facts found no association", async () => {
+    // A branch pushed without `-u` that then gained a local commit: the
+    // daemon's per-session lookup found PR #7 by name, while the repo-facts
+    // cache could prove nothing and stored an empty answer for the branch.
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
     );
-    await renderSettled();
-    expect(setup.captureCharFrame()).toContain("main + 2 worktrees");
-    expect(setup.captureCharFrame()).not.toContain("99 worktrees");
+    const session = mockEnrichedSession({
+      id: "s1",
+      project: "a",
+      cwd: "/code/a",
+      mainRepoRoot: "/code/a",
+      gitBranch: "feature",
+      tmuxTarget: "dev:1.0",
+      branchPRs: [
+        {
+          id: "7",
+          href: "https://github.com/o/a/pull/7",
+          ciStatus: "passing",
+          reviewDecision: null,
+        },
+      ],
+    });
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={buildFlatItems(
+              [{ session, highlights: null }],
+              "none",
+              new Set(),
+              false,
+            )}
+            repoFacts={{
+              headerPR: true,
+              repos: [
+                {
+                  repoRoot: "/code/a",
+                  repoName: "a",
+                  branchPRs: {
+                    feature: { value: [], updatedAt: 1, stale: false },
+                  },
+                },
+              ],
+            }}
+            columnHeader
+            selectedIndex={0}
+            previewWidth={30}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 8 },
+    );
+    await setup.renderOnce();
+    await setup.renderOnce();
+    const lines = setup.captureCharFrame().split("\n");
+    const row = lines.find((l) => l.includes("dev:1.0"))!;
+    const header = lines.find((l) => l.includes("version"))!;
+    expect(row).toContain("#7");
+    // The badge is a column now: its label ends where the badge does.
+    expect(header.indexOf(" pr ") + " pr".length).toBe(
+      row.indexOf("#7") + "#7".length,
+    );
+  });
+
+  it("omits shared facts for cwd, tmux, mixed-repo, or attention-only headers", async () => {
+    const [items, setItems] = createSignal<FlatItem[]>([]);
+    fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ repos: [] }),
+    );
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick: () => 0 }}>
+          <SessionList
+            items={items()}
+            repoFacts={facts}
+            selectedIndex={0}
+            previewWidth={30}
+          />
+        </TickContext.Provider>
+      ),
+      { width: 120, height: 20 },
+    );
+    for (const groupBy of ["cwd", "session", "window", "none"] as const) {
+      setItems(buildFlatItems(rows(["/code/a"]), groupBy, new Set(), false));
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    }
+    setItems(
+      buildFlatItems(
+        rows(["/code/a"]).map((row) => ({
+          ...row,
+          session: { ...row.session, status: "waiting" },
+        })),
+        "project",
+        new Set(),
+        false,
+      ),
+    );
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    setItems(
+      buildFlatItems(
+        rows(["/code/a", "/code/b"]).map((row) => ({
+          ...row,
+          session: { ...row.session, project: "same-name" },
+        })),
+        "project",
+        new Set(),
+        false,
+      ),
+    );
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).not.toContain("main + 2 worktrees");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -1030,7 +802,7 @@ describe("SessionList", () => {
     ]);
   });
 
-  it("renders separator between groups but not before first", async () => {
+  it("draws every group header as a one-line rule, with no divider row", async () => {
     const items: FlatItem[] = [
       makeHeader("group1", 1),
       makeSessionItem("s1", "group1"),
@@ -1038,21 +810,27 @@ describe("SessionList", () => {
       makeSessionItem("s2", "group2"),
     ];
     const frame = await renderList(items);
-    // Both groups render
-    expect(frame).toContain("group1");
-    expect(frame).toContain("group2");
-    // Separator exists between groups (the ─ character)
-    expect(frame).toContain("─");
-    // Verify separator is between groups by checking line order
     const lines = frame.split("\n");
     const group1Line = lines.findIndex((l) => l.includes("group1"));
-    const separatorLine = lines.findIndex(
-      (l, i) => i > group1Line && l.includes("─"),
-    );
     const group2Line = lines.findIndex((l) => l.includes("group2"));
     expect(group1Line).toBeGreaterThanOrEqual(0);
-    expect(separatorLine).toBeGreaterThan(group1Line);
-    expect(group2Line).toBeGreaterThan(separatorLine);
+    expect(group2Line).toBeGreaterThan(group1Line);
+    // The header line carries the rule itself...
+    expect(lines[group1Line]).toMatch(/group1 \(1\) ─+/);
+    expect(lines[group2Line]).toMatch(/group2 \(1\) ─+/);
+    // ...so no line between the groups is a bare rule.
+    for (let i = group1Line + 1; i < group2Line; i++) {
+      expect(lines[i].trim()).not.toMatch(/^─+$/);
+    }
+    // The rule ends on the column the rows' last cell does: the header is
+    // sized from the scrollbox viewport, not a guess at the scrollbar. The
+    // viewport inset lands the frame after the first layout, as in the app.
+    await setup.renderOnce();
+    const settled = setup.captureCharFrame().split("\n");
+    const header = settled[group1Line].replace(/█\s*$/, "").trimEnd();
+    const row = settled[group1Line + 1].replace(/█\s*$/, "").trimEnd();
+    expect(header).toMatch(/─$/);
+    expect(header.length).toBe(row.length);
   });
 
   it("recalculates scroll target when row layout grows so selected row stays in view", async () => {
@@ -1373,6 +1151,129 @@ describe("isActivePaneRow", () => {
     expect(isActivePaneRow({ tmuxPane: "%1" }, "%1")).toBe(true);
     expect(isActivePaneRow({ tmuxPane: "%1" }, "%2")).toBe(false);
     expect(isActivePaneRow({ tmuxPane: "%1" }, null)).toBe(false);
+  });
+});
+
+describe("SessionList column header", () => {
+  async function renderHeaderCase(opts: {
+    columnHeader: boolean;
+    width?: number;
+    sidebar?: boolean;
+    promptLines?: number;
+    summary?: string | null;
+    showPreview?: boolean;
+  }) {
+    const [tick] = createSignal(0);
+    const items = [
+      makeSessionItem("s1", "g", {
+        tmuxTarget: "main:1.1",
+        tmuxPane: "%1",
+        agentType: "claude",
+        summary: opts.summary,
+        lastPrompt: "wrap this prompt under the row",
+      }),
+    ];
+    setup = await testRender(
+      () => (
+        <TickContext.Provider value={{ tick }}>
+          <SessionList
+            items={items}
+            selectedIndex={0}
+            previewWidth={30}
+            columnHeader={opts.columnHeader}
+            sidebar={opts.sidebar}
+            promptLines={opts.promptLines}
+            showPreview={opts.showPreview}
+          />
+        </TickContext.Provider>
+      ),
+      { width: opts.width ?? 100, height: 8 },
+    );
+    await setup.renderOnce();
+    // The header pads its right edge by the scrollbox's measured inset, which
+    // the scrollbox reports from its first layout; the frame that reads it
+    // is the next one, exactly as in the live picker.
+    await setup.renderOnce();
+    return setup.captureCharFrame().split("\n");
+  }
+
+  it("draws the labels above the rows when asked, at md and up", async () => {
+    const lines = await renderHeaderCase({ columnHeader: true });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"));
+    expect(header).toBeDefined();
+    expect(header).toContain("status");
+    expect(header).toContain("project");
+    expect(header).toContain("agent");
+    expect(header).toContain("version");
+  });
+
+  it("ends each right-side label on the column its cell ends on", async () => {
+    const lines = await renderHeaderCase({ columnHeader: true });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    // `age` is the last cell on both lines, right-aligned to the same edge.
+    expect(header.trimEnd().length).toBe(row.trimEnd().length);
+    // The pane target is right-aligned in its 12-column cell, so its last
+    // character sits under the last character of `pane`.
+    const paneEnd = header.indexOf("pane") + "pane".length;
+    const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
+    expect(paneEnd).toBe(targetEnd);
+    // The status glyph and the label share a start column.
+    expect(header.indexOf("status")).toBe(row.search(/[●○◐◯◌]/));
+  });
+
+  it("follows the block layout, which drops the prompt cell", async () => {
+    const lines = await renderHeaderCase({
+      columnHeader: true,
+      promptLines: 2,
+      summary: "wrote a summary",
+    });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    expect(header).not.toContain("prompt");
+    const paneEnd = header.indexOf("pane") + "pane".length;
+    const targetEnd = row.indexOf("main:1.1") + "main:1.1".length;
+    expect(paneEnd).toBe(targetEnd);
+  });
+
+  it("draws the labels in subtext", async () => {
+    await renderHeaderCase({ columnHeader: true });
+    const label = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((span) => span.text.includes("version"));
+    expect(label?.fg.toInts()).toEqual(RGBA.fromHex(theme.subtext).toInts());
+  });
+
+  it("keeps the labels that fit when the preview narrows the list", async () => {
+    // 100 columns with a 30% preview: the list lays out at 70, below `md`,
+    // but the terminal is not, so the smaller layout's labels still draw.
+    const lines = await renderHeaderCase({
+      columnHeader: true,
+      width: 100,
+      showPreview: true,
+    });
+    const header = lines.find((l) => l.includes("pane") && l.includes("age"))!;
+    expect(header).toBeDefined();
+    expect(header).toContain("status");
+    // The two-column short agent code keeps its label: `agent` starts on
+    // the column the code does, borrowing the pane cell's unused width.
+    const row = lines.find((l) => l.includes("main:1.1"))!;
+    const code = getAgentShortCode("claude");
+    expect(header.indexOf("agent")).toBe(row.indexOf(` ${code} `) + 1);
+    // `pane` still ends where its column does.
+    expect(header.indexOf("pane") + "pane".length).toBe(
+      row.indexOf("main:1.1") + "main:1.1".length,
+    );
+  });
+
+  it("stays off when not asked, in the sidebar, and below md", async () => {
+    const off = await renderHeaderCase({ columnHeader: false });
+    expect(off.some((l) => l.includes("version"))).toBe(false);
+    const sidebar = await renderHeaderCase({ columnHeader: true, sidebar: true });
+    expect(sidebar.some((l) => l.includes("version"))).toBe(false);
+    const narrow = await renderHeaderCase({ columnHeader: true, width: 79 });
+    expect(narrow.some((l) => l.includes("version"))).toBe(false);
   });
 });
 

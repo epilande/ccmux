@@ -40,6 +40,25 @@ describe("Toast", () => {
     expect(hasLeftCorner(frame)).toBe(true);
   });
 
+  it("fits a message to the columns it has, when given a fit", async () => {
+    const fitted = async (width: number) => {
+      const setup = await testRender(
+        () => <Toast message="unused" fit={(columns) => `fit to ${columns}`} />,
+        { width, height: 8 },
+      );
+      destroy = () => setup.renderer.destroy();
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      setup.renderer.destroy();
+      destroy = null;
+      return frame;
+    };
+    // 40 columns of card, less its border and padding.
+    expect(await fitted(100)).toContain("fit to 36");
+    // A 40-column sidebar leaves a 1-column gap either side of the card.
+    expect(await fitted(40)).toContain("fit to 34");
+  });
+
   it("shrinks to fit a short message", async () => {
     const frame = await renderAt(60, "Hi");
     expect(frame).toContain("Hi");

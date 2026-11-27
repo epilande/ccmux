@@ -1,3 +1,14 @@
+import { ViewStrip } from "./components/ViewStrip";
+import {
+  nextView,
+  actionForKey,
+  filterPalette,
+  keySequence,
+  paletteCommands,
+  type View,
+  type ViewMemory,
+} from "./actions";
+import { branchPR, createRepoFacts } from "./utils/repo-facts";
 import { watch } from "chokidar";
 import {
   batch,
@@ -11,6 +22,7 @@ import {
   untrack,
 } from "solid-js";
 import { useKeyboard, useRenderer } from "@opentui/solid";
+import { parseKeypress } from "@opentui/core";
 import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import type { EnrichedSession } from "../types/session";
 import type { TmuxSocketError } from "../types";
@@ -38,7 +50,7 @@ import {
   type HunkReviewNote,
 } from "./utils/review";
 import { copyToClipboard } from "./utils/clipboard";
-import { SSEClient } from "./utils/sse";
+import { connectionErrorText, SSEClient } from "./utils/sse";
 import {
   switchToPane,
   sendKeys,
@@ -86,7 +98,7 @@ import {
 import { agentColorFor } from "./components/SessionItem";
 import { getAgentDisplayName } from "../lib/agents";
 import { applyTurnsKey } from "./turns-selection";
-import { renderTurns } from "../daemon/transcript-read";
+import { MAX_TURNS, renderTurns } from "../daemon/transcript-read";
 import { slugFromPrompt, slugify } from "../daemon/worktree-create";
 import {
   failureNeedsAcknowledgement,
@@ -97,7 +109,10 @@ import {
   type MoveReport,
 } from "../lib/move-report";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
-import { HANDOFF_BADGE } from "./components/session-columns";
+import {
+  HANDOFF_BADGE,
+  showColumnHeader,
+} from "./components/session-columns";
 import {
   WorktreesPanel,
   liveEffects,
@@ -106,6 +121,13 @@ import {
 import { SourcePicker } from "./components/SourcePicker";
 import type { WorktreeSession } from "../daemon/worktree-prune";
 import { HelpOverlay } from "./components/HelpOverlay";
+import {
+  CommandPalette,
+  paletteActiveIndex,
+} from "./components/CommandPalette";
+import { RenamePrompt } from "./components/RenamePrompt";
+import { openInPager, type PagerDeps } from "./utils/pager";
+import { truncateMiddle } from "./utils/format";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
 import { theme } from "./theme";
 import type { IconStyle } from "../lib/icons";
@@ -114,12 +136,16 @@ import type {
   BreakpointConfig,
   PromptDisplay,
   Preferences,
+  ColumnHeaderMode,
 } from "../lib/preferences";
+import type { PaletteOnlyId } from "./actions";
 import {
-  getGroupKey,
+  groupKeyOf,
   isSyntheticGroupKey,
   type FlatItem,
+  type GroupAliases,
   type GroupBy,
+  type GroupLayouts,
 } from "./utils/grouping";
 import {
   createSidebarWidthPersister,
@@ -147,6 +173,7 @@ interface AppProps {
   promptLines?: number;
   breakpoints?: BreakpointConfig;
   ageFadeAfter?: number;
+  columnHeader?: ColumnHeaderMode;
   attentionBand?: boolean;
   searchPaneContent?: boolean;
   searchPaneLines?: number;
@@ -154,6 +181,10 @@ interface AppProps {
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
+  /** Group names, per groupBy mode, from state.json. */
+  groupAliases?: GroupAliases;
+  /** Merged-away groups' own layouts, from state.json. */
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
@@ -165,6 +196,9 @@ interface AppProps {
    * Fork action, which is otherwise hidden rather than offered-then-refused.
    */
   forkableAgents?: string[];
+  /** How "Open transcript" runs the pager. Explicit so tests never start a
+   *  real one; the default is `$PAGER`, then `less`. */
+  pager?: PagerDeps;
 }
 
 /** Message text for a rejected fetch/parse, for a toast. */
@@ -312,12 +346,15 @@ export function App(props: AppProps) {
   const reviewEnabled = !props.sidebar && hunkAtLaunch;
   const store = createTUIStore({
     initialPreview: props.initialPreview,
+    // Read once: the preview's width-based default is a launch decision.
+    initialWidth: appDims().width,
     iconStyle: props.iconStyle,
     previewWidth: props.previewWidth,
     columns: props.columns,
     promptLines: props.promptLines,
     breakpoints: props.breakpoints,
     ageFadeAfter: props.ageFadeAfter,
+    columnHeader: props.columnHeader,
     attentionBand: props.attentionBand,
     searchPaneContent: props.searchPaneContent,
     searchPaneLines: props.searchPaneLines,
@@ -325,6 +362,8 @@ export function App(props: AppProps) {
     groupBy: props.groupBy,
     collapsedGroups: props.collapsedGroups,
     pinnedGroups: props.pinnedGroups,
+    groupAliases: props.groupAliases,
+    groupLayouts: props.groupLayouts,
     hideIdle: props.hideIdle,
     promptDisplay: props.promptDisplay,
     sidebar: props.sidebar,
@@ -656,8 +695,9 @@ export function App(props: AppProps) {
   function reviewWorktree(target: {
     path: string;
     sessionId: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
+    branch?: boolean;
+    returnToSources?: SourcesReturn;
   }) {
     if (reviewInFlight) return;
     // Re-probe live (not the launch-time `hunkAtLaunch`) so a hunk installed
@@ -675,23 +715,28 @@ export function App(props: AppProps) {
     // captured notes with no way to answer for them. Nothing below needs the
     // panel: the row was already read into `target` and `session`.
     //
-    // The scope travels IN THE PAYLOAD, not from the store: Tab's rescope is
-    // panel-local state the store never sees, so reading the store here
-    // reopened a widened panel back on its narrow opening repo. Every exit
+    // The scope travels IN THE PAYLOAD: it is the scope the panel showed when
+    // the review left it, and the reopen re-establishes exactly that, so a
+    // panel `s` had widened or narrowed comes back the same way. Every exit
     // below reopens the panel with the cursor on the reviewed row, and the
     // hand-back paths do it through `onDone` so the reopen provably follows
     // the confirm's own resolution instead of racing it back over the dialog.
     const reopen = () =>
-      store.actions.showWorktrees(target.panelRepo, {
-        initialCursor: target.path,
-        isReturn: true,
-        startWidened: target.panelRepo !== null && target.panelScope === null,
-      });
+      target.returnToSources
+        ? store.actions.showSourcePicker(
+            target.returnToSources.repo,
+            sourcesReopenOptions(target.returnToSources),
+          )
+        : store.actions.showWorktrees(target.panelScope, {
+            initialCursor: target.path,
+            isReturn: true,
+          });
     store.actions.hideWorktrees();
+    store.actions.hideSourcePicker();
     reviewInFlight = true;
     // Resolved before the guard is honored so a slow git can't be raced, and
     // before `runHunkReview` because that is what suspends the renderer.
-    resolveMergeBase(target.path)
+    (target.branch ? resolveMergeBase(target.path) : Promise.resolve(null))
       .then((base) =>
         runHunkReview(renderer, target.path, { target: base ?? undefined }),
       )
@@ -764,7 +809,6 @@ export function App(props: AppProps) {
   function spawnInWorktree(target: {
     cwd: string;
     existingWorktree: string | null;
-    panelRepo: string | null;
     panelScope: string | null;
     sameRepoRegisteredRoots: readonly string[];
     /**
@@ -785,7 +829,6 @@ export function App(props: AppProps) {
      */
     cursor?: string;
   }) {
-    store.actions.hideWorktrees();
     const worktree = target.existingWorktree;
     if (worktree) {
       const live = store.state.sessions.find((session) =>
@@ -796,58 +839,21 @@ export function App(props: AppProps) {
         ),
       );
       if (live) {
+        store.actions.hideWorktrees();
         activateSession(live);
         return;
       }
     }
+    // The panel stays up behind the dialog, dimmed: it is still the view the
+    // user is in until a session actually starts.
     openNewSession({
       cwd: target.cwd,
       existingWorktree: worktree ?? undefined,
-      // The payload's own scope, not the store's: Tab's rescope is
-      // panel-local, and a cancel must land on the view the user left.
+      // The scope the panel showed when Enter left it: a cancel must land on
+      // the view the user left.
       returnToWorktrees: {
-        repo: target.panelRepo,
         scope: target.panelScope,
         cursor: target.cursor ?? worktree ?? target.cwd,
-      },
-    });
-  }
-
-  /**
-   * The Worktrees panel's Enter on an open PR that is NOT checked out here
-   * (issue #151): open the dialog that cuts a worktree from its head.
-   *
-   * No revalidation of its own, unlike `spawnInWorktree`: the fact that could
-   * have changed is whether the PR is still open, and only GitHub knows.
-   * `POST /spawn` re-runs `lookupPR` and refuses a non-OPEN one, so a stale
-   * row fails safe with the daemon's own message instead of this client's
-   * guess about a state it cannot see.
-   *
-   * `cwd` is the repo root: `gh` resolves the PR from the directory the
-   * request names, and the worktree is cut under that repo.
-   */
-  function spawnFromPR(target: {
-    number: number;
-    title: string;
-    repoRoot: string;
-    cursor: string;
-    panelRepo: string | null;
-    panelScope: string | null;
-  }) {
-    store.actions.hideWorktrees();
-    openNewSession({
-      cwd: target.repoRoot,
-      pr: {
-        number: target.number,
-        title: target.title,
-        repoRoot: target.repoRoot,
-      },
-      // The PR row's own synthetic key, so a cancel lands the cursor back on
-      // the row it was opened from rather than on the top of the list.
-      returnToWorktrees: {
-        repo: target.panelRepo,
-        scope: target.panelScope,
-        cursor: target.cursor,
       },
     });
   }
@@ -878,7 +884,7 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn(target);
-    store.actions.hideSourcePicker();
+    // Start stays up behind the dialog, dimmed, until a session starts.
     openNewSession({
       cwd: target.repoRoot,
       pr: {
@@ -908,7 +914,7 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn(target);
-    store.actions.hideSourcePicker();
+    // Start stays up behind the dialog, dimmed, until a session starts.
     openNewSession({
       cwd: target.repoRoot,
       issue: {
@@ -935,7 +941,6 @@ export function App(props: AppProps) {
     filter: string;
   }) {
     const marker = sourcesReturn({ repoRoot: target.path, ...target });
-    store.actions.hideSourcePicker();
     const live = store.state.sessions.find((session) =>
       worktreeHoldsPath(
         target.path,
@@ -944,6 +949,7 @@ export function App(props: AppProps) {
       ),
     );
     if (live) {
+      store.actions.hideSourcePicker();
       activateSession(live);
       return;
     }
@@ -951,29 +957,6 @@ export function App(props: AppProps) {
       cwd: target.path,
       existingWorktree: target.path,
       returnToSources: marker,
-    });
-  }
-
-  /**
-   * The Worktrees panel's `n`: open the picker over the panel's LIVE scope,
-   * remembering where to come back to.
-   *
-   * `panelScope` and not `props.repo`: Tab's rescope is panel-local state
-   * this store never sees, so a picker opened from a widened panel has to be
-   * widened too, and the Esc back into the panel has to re-widen it.
-   */
-  function startFromSource(target: {
-    panelRepo: string | null;
-    panelScope: string | null;
-    cursor: string;
-  }) {
-    store.actions.hideWorktrees();
-    store.actions.showSourcePicker(target.panelScope, {
-      origin: {
-        panelRepo: target.panelRepo,
-        panelScope: target.panelScope,
-        panelCursor: target.cursor,
-      },
     });
   }
 
@@ -989,10 +972,9 @@ export function App(props: AppProps) {
     const origin = store.state.sourcePicker?.origin ?? null;
     store.actions.hideSourcePicker();
     if (!origin) return;
-    store.actions.showWorktrees(origin.panelRepo, {
+    store.actions.showWorktrees(origin.panelScope, {
       initialCursor: origin.panelCursor,
       isReturn: true,
-      startWidened: origin.panelRepo !== null && origin.panelScope === null,
     });
   }
 
@@ -1086,6 +1068,9 @@ export function App(props: AppProps) {
    * connection and never answers latches `forkInFlight` for the rest of the
    * picker's life, and `F` silently stops working. */
   const FORK_TIMEOUT_MS = 15_000;
+
+  /** How long a landed spawn waits for its session row to take the cursor. */
+  const SPAWN_SELECT_MS = 15_000;
 
   /**
    * Open the new-session dialog in fork mode over `session`: continue this
@@ -1182,15 +1167,33 @@ export function App(props: AppProps) {
    */
   function modalOverlayOpen(): boolean {
     return (
+      dialogOwnsInput() ||
+      store.state.previewFocused ||
+      store.state.worktrees !== null ||
+      store.state.sourcePicker !== null
+    );
+  }
+
+  /**
+   * Whether a dialog over the views owns input: help, a confirmation, the
+   * notice, the palette, or the new-session, Copy or handoff dialog. Each one
+   * is answered ahead of the views in the keyboard handler, so nothing under
+   * it may act either: not a row click (`modalOverlayOpen`), not a Worktrees
+   * or Start body (`panelOwnsKeys`), and not a view switch from the strip
+   * (`switchMainView`). One predicate, because three hand-kept lists drifted:
+   * the handoff dialog was missing from two, so a strip click swapped Start
+   * in under it, and Start's `n` opened a new-session dialog whose Enter the
+   * handoff, answered first, took as its own.
+   */
+  function dialogOwnsInput(): boolean {
+    return (
       store.state.showHelp ||
       store.state.confirmMode ||
-      store.state.previewFocused ||
       store.state.newSession !== null ||
-      store.state.worktrees !== null ||
-      store.state.sourcePicker !== null ||
       store.state.notice !== null ||
       store.state.copyDialog !== null ||
-      store.state.handoffDialog !== null
+      store.state.handoffDialog !== null ||
+      store.state.palette !== null
     );
   }
 
@@ -1475,6 +1478,20 @@ export function App(props: AppProps) {
     store.actions.moveGroupToEdge(cm.groupKey, edge);
   }
 
+  function groupContextMenuRename() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    store.actions.hideGroupContextMenu();
+    store.actions.openRenamePrompt(cm.groupKey);
+  }
+
+  function groupContextMenuResetName() {
+    const cm = store.state.groupContextMenu;
+    if (!cm) return;
+    store.actions.hideGroupContextMenu();
+    store.actions.resetGroupName(cm.groupKey);
+  }
+
   function groupContextMenuKill() {
     const cm = store.state.groupContextMenu;
     if (!cm) return;
@@ -1490,7 +1507,321 @@ export function App(props: AppProps) {
    * checkout, which is exactly what the panel keys off. Null lists every
    * known repo.
    */
+  const [worktreeModal, setWorktreeModal] = createSignal(false);
+  let worktreeMemory: ViewMemory | undefined;
+  let sourceMemory: ViewMemory | undefined;
+  const view = (): View =>
+    store.state.worktrees
+      ? "worktrees"
+      : store.state.sourcePicker
+        ? "start"
+        : "sessions";
+  /** Whether a Worktrees or Start body owns the keyboard: not while a dialog
+   *  owns input (`dialogOwnsInput`), a handoff is aiming or the session
+   *  search is typing, and not while its preview is focused (App scrolls
+   *  that). A disabled body also yields its footer to App's, which shows the
+   *  keys of whatever does own them. */
+  const panelOwnsKeys = () =>
+    !dialogOwnsInput() &&
+    store.state.handoffPick === null &&
+    !store.state.searchMode &&
+    !store.state.previewFocused;
+  const repoFacts = createRepoFacts({
+    connected: () => store.state.connectionState === "connected",
+    sources: () => view() === "start",
+    cwd: () => pickerCwd(),
+    visible: () => isVisible(),
+  });
+  /**
+   * Whether entering another view is refused now: under anything that owns
+   * input, since the entry would leave that owner answering keys over a view
+   * it is no longer drawn on, and the panel it opened disabled under it
+   * (`panelOwnsKeys`). A handoff being aimed and the search input live on the
+   * session list (Esc leaves either), and a removal prompt on the Worktrees
+   * panel.
+   *
+   * Every way INTO a view asks this, not only the strip: the group menu's
+   * Worktrees once opened the panel directly under a search, where the
+   * panel's early return kept Esc from the search and the strip refused the
+   * way back, so nothing recovered. The view keys need no check of their
+   * own, because each owner here takes the keyboard ahead of them.
+   */
+  function viewEntryRefused(): boolean {
+    return (
+      dialogOwnsInput() ||
+      store.state.handoffPick !== null ||
+      store.state.searchMode ||
+      worktreeModal()
+    );
+  }
+  function switchMainView(next: View) {
+    if (next === view() || viewEntryRefused()) return;
+    // A focused preview belongs to the view it is in; the next view's
+    // preview starts unfocused (and a strip click is how one gets here).
+    store.actions.exitPreviewFocus();
+    // So does a row menu: it is the session list's, and the panels answer
+    // keys ahead of the branch that would dismiss it.
+    store.actions.hideContextMenu();
+    store.actions.hideGroupContextMenu();
+    // The base scope: a `W`/`N` jump narrowed only the view it opened, and
+    // leaving it for another view ends the jump.
+    const scope = store.baseScope();
+    if (next === "worktrees") store.actions.showWorktrees(scope);
+    else if (next === "start") store.actions.showSourcePicker(scope);
+    else {
+      store.actions.hideWorktrees();
+      store.actions.hideSourcePicker();
+    }
+  }
+  function refreshAll() {
+    void repoFacts.refresh(true);
+    sseClient?.disconnect();
+    sseClient?.connect();
+  }
+  /**
+   * The preview keys, for the Worktrees and Start views (Sessions has its
+   * own cases in the main switch): `P` toggles, `Alt+H/L` resizes, `Ctrl+D/U`
+   * pages and `Tab` focuses, the same keys meaning the same things in every
+   * view. The panels hand them here through `onNavigate` before their own
+   * handling.
+   */
+  function previewKey(event: KeyEvent): boolean {
+    if (props.sidebar) return false;
+    const key = event.name;
+    if (event.ctrl && (key === "d" || key === "u")) {
+      if (!previewBox()) return false;
+      pagePreview(key === "d" ? 1 : -1);
+      return true;
+    }
+    if (event.meta && (key === "h" || key === "l")) {
+      if (!store.state.showPreview) return false;
+      store.actions.resizePreview(key === "h" ? 5 : -5);
+      return true;
+    }
+    if (event.ctrl || event.meta) return false;
+    if (key === "P" || (key === "p" && event.shift)) {
+      store.actions.togglePreview();
+      return true;
+    }
+    // Only with something to scroll: a repo header in Worktrees draws a
+    // summary with no body.
+    if (key === "tab" && previewBox()) {
+      store.actions.enterPreviewFocus();
+      return true;
+    }
+    return false;
+  }
+  /**
+   * A focused Worktrees or Start preview: it has nothing to type into, so
+   * focus is a scroll mode. Every key stops here, since the panel under it
+   * is disabled while focused (`panelOwnsKeys`).
+   */
+  function handleFocusedPanelPreviewKey(event: KeyEvent): void {
+    const key = event.name;
+    const box = previewBox();
+    if (key === "tab" || key === "escape") store.actions.exitPreviewFocus();
+    else if (event.ctrl && (key === "d" || key === "u"))
+      pagePreview(key === "d" ? 1 : -1);
+    else if (event.meta && (key === "h" || key === "l"))
+      store.actions.resizePreview(key === "h" ? 5 : -5);
+    else if (event.ctrl || event.meta) return;
+    else if (key === "j" || key === "down") box?.scrollBy(1);
+    else if (key === "k" || key === "up") box?.scrollBy(-1);
+    else if (key === "G" || (key === "g" && event.shift))
+      box?.scrollTo(box.scrollHeight);
+    else if (key === "g") box?.scrollTo(0);
+    else if (key === "P" || (key === "p" && event.shift))
+      store.actions.togglePreview();
+  }
+  function navigateView(event: KeyEvent, repo: string | null): boolean {
+    if (previewKey(event)) {
+      event.preventDefault();
+      return true;
+    }
+    const key = event.name;
+    const action = actionForKey(event);
+    if (
+      action?.id === "views" &&
+      !event.meta &&
+      !event.ctrl &&
+      (key === "h" || key === "l")
+    ) {
+      if (props.sidebar) {
+        if (key === "h") {
+          store.actions.hideWorktrees();
+          store.actions.hideSourcePicker();
+        } else if (view() === "worktrees")
+          store.actions.showSourcePicker(store.baseScope());
+        else store.actions.showWorktrees(store.baseScope());
+      } else switchMainView(nextView(view(), key === "h" ? -1 : 1));
+    } else if (action?.id === "worktrees") store.actions.showWorktrees(repo);
+    else if (action?.id === "start") store.actions.showSourcePicker(repo);
+    else if (action?.id === "help") store.actions.toggleHelp();
+    else if (action?.id === "palette" && !props.sidebar)
+      store.actions.openPalette();
+    else return false;
+    event.preventDefault();
+    return true;
+  }
+
+  /** A session by id, for the Worktrees preview's session lines. */
+  const sessionsById = createMemo(
+    () => new Map(store.state.sessions.map((s) => [s.id, s])),
+  );
+  const sessionById = (id: string) => sessionsById().get(id);
+
+  /** What the open palette lists: the current view's commands, filtered. */
+  const paletteMatches = createMemo(() => {
+    const open = store.state.palette;
+    if (!open) return [];
+    return filterPalette(
+      paletteCommands(view(), {
+        sidebar: props.sidebar,
+        reviewable: reviewEnabled,
+      }),
+      open.query,
+    );
+  });
+
+  function movePaletteHighlight(delta: number) {
+    const matches = paletteMatches();
+    if (!matches.length) return;
+    const at = paletteActiveIndex(
+      matches,
+      store.state.palette?.highlight ?? null,
+    );
+    const next = (at + delta + matches.length) % matches.length;
+    store.actions.setPaletteHighlight(matches[next]!.command.id);
+  }
+
+  function runActivePaletteCommand() {
+    const open = store.state.palette;
+    const matches = paletteMatches();
+    // Nothing matches: Enter does nothing, so the query can be corrected.
+    if (!open || !matches.length) return;
+    runPaletteCommand(
+      matches[paletteActiveIndex(matches, open.highlight)]!.command.id,
+    );
+  }
+
+  /**
+   * Run a palette row. A keyed command presses its key: the palette closes
+   * first, so the replay meets the same routing a typed key does (a panel's
+   * own handler included), and it runs on the next microtask, after the
+   * Enter that chose it has finished its own dispatch. A palette row can
+   * therefore never do anything its key does not. Palette-only commands
+   * have no key and run here.
+   */
+  function runPaletteCommand(id: string) {
+    const command = paletteMatches().find((m) => m.command.id === id)?.command;
+    store.actions.closePalette();
+    if (!command) return;
+    const keys = command.keys;
+    if (keys) queueMicrotask(() => replayKeys(keys));
+    else if (command.id in paletteOnly)
+      paletteOnly[command.id as PaletteOnlyId]();
+  }
+
+  function replayKeys(keys: string) {
+    for (const raw of keySequence(keys)) {
+      const parsed = parseKeypress(raw);
+      if (parsed) renderer.keyInput.processParsedKey(parsed);
+    }
+  }
+
+  /** The palette-only commands. A `Record` over every id, so a command added
+   *  to `PALETTE_ONLY` without a runner here does not compile. */
+  const paletteOnly: Record<PaletteOnlyId, () => void> = {
+    "groupBy:project": () => store.actions.setGroupBy("project"),
+    "groupBy:cwd": () => store.actions.setGroupBy("cwd"),
+    "groupBy:session": () => store.actions.setGroupBy("session"),
+    "groupBy:window": () => store.actions.setGroupBy("window"),
+    "groupBy:none": () => store.actions.setGroupBy("none"),
+    resetGroupName: () => {
+      const ctx = getGroupMoveContext(store.selectedFlatItem());
+      if (ctx) store.actions.resetGroupName(ctx.groupKey);
+      else store.actions.showToast("No group on this row");
+    },
+    copySessionId: () => void copySessionId(),
+    openTranscript: () => void openTranscript(),
+  };
+
+  /** The agent's own session id (what `claude --resume` takes), or ccmux's
+   *  where the agent has none. */
+  async function copySessionId() {
+    const session = store.selectedSession();
+    if (!session) {
+      store.actions.showToast("No session on this row");
+      return;
+    }
+    const id = session.nativeSessionId ?? session.id;
+    const result = await copyToClipboard(id, {
+      osc52: (payload) => renderer.copyToClipboardOSC52(payload),
+    });
+    // The toast caps at 40 columns and a UUID alone is 36.
+    store.actions.showToast(
+      result.ok
+        ? `Copied ${truncateMiddle(id, 32)}`
+        : "Copy failed: no clipboard available",
+      result.ok ? 2_500 : 4_000,
+    );
+  }
+
+  /**
+   * The selected session's last turns in a pager, read through the daemon's
+   * transcript endpoint (every built-in agent has a reader) and rendered the
+   * way `ccmux last` prints them. A pane capture is not a transcript, so an
+   * agent without a readable one gets a toast rather than a screen grab.
+   */
+  async function openTranscript() {
+    const session = store.selectedSession();
+    if (!session) {
+      store.actions.showToast("No session on this row");
+      return;
+    }
+    try {
+      const url = new URL(
+        `${getDaemonUrl()}/sessions/${session.id}/transcript`,
+      );
+      url.searchParams.set("turns", String(MAX_TURNS));
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const data = (await response.json()) as {
+        source?: string;
+        turns?: { role?: string; text?: string }[];
+        error?: string;
+      };
+      if (!response.ok) {
+        store.actions.showToast(
+          `No transcript: ${data.error ?? `HTTP ${response.status}`}`,
+          4_000,
+        );
+        return;
+      }
+      const turns = (data.turns ?? []).map((turn) => ({
+        role: turn.role === "user" ? ("user" as const) : ("assistant" as const),
+        text: turn.text ?? "",
+      }));
+      if (data.source !== "transcript" || !turns.some((t) => t.text.trim())) {
+        store.actions.showToast("No transcript to open yet", 3_000);
+        return;
+      }
+      const result = await openInPager(
+        renderer,
+        `${renderTurns(turns)}\n`,
+        props.pager,
+      );
+      if (!result.ok) store.actions.showToast(result.error, 4_000);
+    } catch {
+      store.actions.showToast("Transcript failed: daemon unreachable", 4_000);
+    }
+  }
+
   function selectedRepoRoot(): string | null {
+    // A synthetic header (the `needs attention` band, the flat list's `sessions`
+    // header) spans repositories, so its first member's repo would be an
+    // arbitrary pick: `s`, `W` and `N` from one stay global.
     const header = store.selectedGroupHeader();
     if (header && isSyntheticGroupKey(header.groupKey)) return null;
     return (
@@ -1513,6 +1844,13 @@ export function App(props: AppProps) {
       isSyntheticGroupKey(header.groupKey)
     )
       return;
+    // The strip's refusal, said aloud: a menu item that silently did nothing
+    // would read as broken, where the strip's tab simply stays put.
+    if (viewEntryRefused()) {
+      if (store.state.searchMode)
+        store.actions.showToast("Esc ends the search first");
+      return;
+    }
     const repo =
       header.members
         .map((member) => member.session)
@@ -2274,7 +2612,7 @@ export function App(props: AppProps) {
         // the group collapsed underneath.
         id: "collapse",
         label: isCollapsed ? "Expand" : "Collapse",
-        hint: "space",
+        hint: "enter",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
       },
@@ -2285,6 +2623,25 @@ export function App(props: AppProps) {
         color: theme.text,
         action: groupContextMenuNewSession,
       },
+      {
+        id: "rename",
+        label: "Rename group",
+        hint: "e",
+        color: theme.text,
+        action: groupContextMenuRename,
+      },
+      // Only where there is a name to undo; it splits a merged group back.
+      ...(cm && store.groupHasAlias(cm.groupKey)
+        ? [
+            {
+              id: "reset-name",
+              label: "Reset name",
+              hint: "",
+              color: theme.text,
+              action: groupContextMenuResetName,
+            },
+          ]
+        : []),
       {
         id: "pin-top",
         label: "Pin to top",
@@ -2309,7 +2666,11 @@ export function App(props: AppProps) {
       {
         id: "kill-group",
         label: "Kill group",
-        hint: "X",
+        // Menu-local (`key`): on the list `x` kills the marked sessions when
+        // any are marked, which may sit in another group, so the fall-through
+        // could disagree with clicking this item. (`X` kills all in view.)
+        hint: "x",
+        key: "x",
         color: theme.red,
         action: groupContextMenuKill,
       },
@@ -2519,11 +2880,10 @@ export function App(props: AppProps) {
     /** Origin marker set ONLY by the source picker's Enter: a cancel of this
      *  dialog returns to the picker with its filter and cursor intact. */
     returnToSources?: SourcesReturn;
-    /** Origin marker set ONLY by the Worktrees panel's Enter: a cancel of
-     *  this dialog returns to the panel, cursor on `cursor`, scoped to the
-     *  live filter the panel had (`scope`, null when Tab had widened it). */
+    /** Origin marker set ONLY by the Worktrees panel (Enter, `n`): a cancel
+     *  of this dialog returns to the panel, cursor on `cursor`, on the
+     *  scope the panel showed (`scope`, null for all repos). */
     returnToWorktrees?: {
-      repo: string | null;
       scope: string | null;
       cursor: string;
     };
@@ -2577,6 +2937,11 @@ export function App(props: AppProps) {
     const sources = store.state.newSession?.returnToSources ?? null;
     const marker = store.state.newSession?.returnToWorktrees ?? null;
     store.actions.closeNewSessionDialog();
+    // The view that opened the dialog stayed up behind it, so its row, scope
+    // and filter are all still there: closing the dialog IS the return. The
+    // markers below are the fallback for an origin that is no longer open.
+    if (sources && store.state.sourcePicker) return;
+    if (marker && store.state.worktrees) return;
     if (sources) {
       store.actions.showSourcePicker(
         sources.repo,
@@ -2585,10 +2950,9 @@ export function App(props: AppProps) {
       return;
     }
     if (marker) {
-      store.actions.showWorktrees(marker.repo, {
+      store.actions.showWorktrees(marker.scope, {
         initialCursor: marker.cursor,
         isReturn: true,
-        startWidened: marker.repo !== null && marker.scope === null,
       });
     }
   }
@@ -2869,6 +3233,58 @@ export function App(props: AppProps) {
     }
   }
 
+  /**
+   * A spawn's pane, until its session row arrives over SSE and takes the
+   * cursor. The row comes from the daemon's next scan, not the spawn reply,
+   * so the selection waits for it, but not forever (`SPAWN_SELECT_MS`), and
+   * never over the user: a cursor moved in the meantime, or a preview
+   * focused, wins.
+   */
+  const [pendingSpawn, setPendingSpawn] = createSignal<{
+    paneId: string;
+    sessionId: string | null;
+    headerKey: string | null;
+  } | null>(null);
+  function selectWhenArrives(paneId: string) {
+    // Any session event pins a cursor resting on the band's fallback (the
+    // spawned row's own arrival among them), and the check below would take
+    // that pin for the user moving. Pin it first, so the snapshot holds it.
+    store.actions.commitBandFallback();
+    const pending = {
+      paneId,
+      sessionId: store.state.selectedSessionId,
+      headerKey: store.selectedHeaderKey(),
+    };
+    setPendingSpawn(pending);
+    setTimeout(
+      () => setPendingSpawn((p) => (p === pending ? null : p)),
+      SPAWN_SELECT_MS,
+    );
+  }
+  createEffect(() => {
+    const pending = pendingSpawn();
+    if (!pending) return;
+    // Preview focus is a choice of pane too: it types into the selected
+    // session's, so a row that took the cursor now would send the rest of
+    // the user's keys to an agent they did not pick.
+    if (
+      store.state.previewFocused ||
+      store.state.selectedSessionId !== pending.sessionId ||
+      store.selectedHeaderKey() !== pending.headerKey
+    ) {
+      setPendingSpawn(null);
+      return;
+    }
+    const session = store.state.sessions.find(
+      (s) => s.tmuxPane === pending.paneId,
+    );
+    if (!session) return;
+    setPendingSpawn(null);
+    // Only onto a row the list shows (expanding its group if collapsed); a
+    // session the scope, `f` or a search hides leaves the selection alone.
+    store.actions.revealSession(session.id);
+  });
+
   async function submitNewSession(): Promise<void> {
     const draft = store.state.newSession;
     if (!draft) return;
@@ -2942,6 +3358,13 @@ export function App(props: AppProps) {
     // The sidebar spawns without stealing focus; the picker's whole purpose
     // is to put you in the new pane, so it jumps and gets out of the way.
     const detach = props.sidebar === true;
+    // A slow spawn can outlive its dialog: Esc, or a replacement draft, means
+    // the user has moved on, and the completion must not close, switch or
+    // select over what they are doing now. Same rule as `submitFork`.
+    const dialogSequence = newSessionDialogSequence;
+    const ownsDialog = () =>
+      newSessionDialogSequence === dialogSequence &&
+      store.state.newSession !== null;
     spawnInFlight = true;
     let spawned: SpawnBody | null = null;
     try {
@@ -3025,18 +3448,22 @@ export function App(props: AppProps) {
         // never arrived.
         const error = body?.error ?? response.statusText;
         const what = draft.moveChanges ? "Move failed" : "Spawn failed";
+        // A notice that says where the user's work went is the one thing a
+        // stale completion still shows: it is about their files, not the
+        // view, and nothing else would tell them.
         if (body && failureNeedsAcknowledgement(body)) {
           store.actions.showNotice(what, [
             error,
             ...stashRecoveryLines(body),
             ...(body.move ? moveReportLines(body.move, draft.cwd) : []),
           ]);
-        } else {
+        } else if (ownsDialog()) {
           store.actions.showToast(`${what}: ${error}`, 4000);
         }
       }
     } catch (err: unknown) {
-      store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
+      if (ownsDialog())
+        store.actions.showToast(`Spawn failed: ${errText(err)}`, 4000);
     } finally {
       // Released only on the paths that leave the dialog open. A landed spawn
       // holds the guard until the draft is gone: the state write below is a
@@ -3053,12 +3480,30 @@ export function App(props: AppProps) {
     // failure. Remembering the agent is best-effort for exactly that reason:
     // an unwritable ~/.config would otherwise surface as "Spawn failed", and
     // the user — reasonably — would press Enter again and get a second pane.
+    // Decided once the agent is remembered, the last await before acting:
+    // an Esc during that write counts as moving on too.
+    let owns = false;
     try {
       await store.actions.setLastSpawnAgent(agent.name).catch(() => {});
     } finally {
-      store.actions.closeNewSessionDialog();
+      owns = ownsDialog();
+      if (owns) store.actions.closeNewSessionDialog();
       spawnInFlight = false;
     }
+    if (!owns) {
+      // Moved on: nothing visible, bar the one notice about the user's own
+      // files (a move that left a stash or a split to rebuild).
+      const notice = landedMoveNotice(draft, landed);
+      if (notice) store.actions.showNotice(notice.title, notice.lines);
+      return;
+    }
+
+    // A session started: the board is the session list now (ending any
+    // Worktrees/Start view the dialog was opened over, and with it any jump
+    // scope), with the cursor going to the new row as soon as it arrives.
+    store.actions.hideWorktrees();
+    store.actions.hideSourcePicker();
+    if (landed.paneId) selectWhenArrives(landed.paneId);
 
     /** Hand the board over to the new pane, which is what the picker is for. */
     const enterPane = () => {
@@ -3255,11 +3700,7 @@ export function App(props: AppProps) {
       if (pending?.sessionId === sessionId) {
         void deliverReviewNotes(sessionId, pending.notes, "confirm");
       }
-    } else if (action === "kill-all") {
-      // The daemon reaps in-flight invoke workers itself (it owns the
-      // authoritative in-flight set); the client only needs to ask once.
-      fetch(`${getDaemonUrl()}/sessions/kill-all`, { method: "POST" });
-    } else if (action === "kill-group") {
+    } else if (action === "kill-all" || action === "kill-group") {
       for (const id of store.state.confirmSessionIds) {
         killOrCancelSession(id);
       }
@@ -3316,8 +3757,25 @@ export function App(props: AppProps) {
   const isVisible = (): boolean => visibility?.visible() ?? true;
 
   let sseClient: SSEClient | null = null;
+  /**
+   * Each view's preview scrollbox. One shared ref would outlive the box it
+   * named: the Sessions preview unmounts off its view, and a panel's with
+   * its panel (or when its cursor leaves a row for a header), so the scroll
+   * keys read the live box of the view on screen, or none.
+   */
+  const previewBoxes: Partial<Record<View, ScrollBoxRenderable>> = {};
+  function previewBox(): ScrollBoxRenderable | undefined {
+    const box = previewBoxes[view()];
+    return store.state.showPreview && box && !box.isDestroyed ? box : undefined;
+  }
+  /** Ctrl+D/U: half a page of the current view's preview. */
+  function pagePreview(direction: 1 | -1): void {
+    const box = previewBox();
+    if (!box) return;
+    const half = Math.floor((box.viewport?.height ?? 10) / 2);
+    box.scrollTo(box.scrollTop + direction * half);
+  }
   let hydrationAbort: AbortController | null = null;
-  let previewScrollbox: ScrollBoxRenderable | undefined;
   let helpScrollbox: ScrollBoxRenderable | undefined;
   const [previewRefreshKey, setPreviewRefreshKey] = createSignal(0);
   const [initialDataReceived, setInitialDataReceived] = createSignal(false);
@@ -3586,24 +4044,27 @@ export function App(props: AppProps) {
     onCleanup(() => clearInterval(timer));
   });
 
-  // Sync state across TUI instances (sidebar reads state.json changes made by picker)
-  if (props.sidebar) {
-    onMount(() => {
-      let disposed = false;
-      try {
-        const stopWatching = watchStateFile(STATE_FILE, async () => {
-          const freshState = await getUIState();
-          if (!disposed) store.actions.reloadUIState(freshState);
-        });
-        onCleanup(() => {
-          disposed = true;
-          void stopWatching();
-        });
-      } catch {
-        // Keep local controls usable if the watcher cannot be created.
-      }
-    });
-  }
+  // Sync UI state across TUI instances: every picker and sidebar re-reads
+  // state.json when another one writes it, so a rename, a pin, a collapse or
+  // a group-by change in one surface reaches the rest. A picker used to skip
+  // this, keeping launch-time state and, on its next write, putting it back
+  // over whatever the others had saved since. `reloadUIState` skips keys
+  // this instance still has queued, so its own pending change survives.
+  onMount(() => {
+    let disposed = false;
+    try {
+      const stopWatching = watchStateFile(STATE_FILE, async () => {
+        const freshState = await getUIState();
+        if (!disposed) store.actions.reloadUIState(freshState);
+      });
+      onCleanup(() => {
+        disposed = true;
+        void stopWatching();
+      });
+    } catch {
+      // Keep local controls usable if the watcher cannot be created.
+    }
+  });
 
   // Adaptive tick: 1s when any session has a timestamp under 60s (seconds display),
   // 10s otherwise (minutes display only changes every 60s).
@@ -3684,7 +4145,11 @@ export function App(props: AppProps) {
     return {
       groupKey:
         item.type === "session"
-          ? getGroupKey(item.filteredSession.session, store.state.groupBy)
+          ? groupKeyOf(
+              item.filteredSession.session,
+              store.state.groupBy,
+              store.groupAliases(),
+            )
           : item.groupKey,
       sessionId:
         item.type === "session" ? item.filteredSession.session.id : undefined,
@@ -3704,6 +4169,8 @@ export function App(props: AppProps) {
     if (visibility && !visibility.visible()) visibility.refresh();
 
     const key = event.name;
+    const armedZ = pendingZ;
+    pendingZ = false;
 
     // First, and it swallows the key that dismissed it. This is raised over
     // whatever was already on screen (including the new-session dialog, which
@@ -3711,6 +4178,32 @@ export function App(props: AppProps) {
     // reached the dialog would act on a message the user had not read yet.
     if (store.state.notice) {
       dismissNotice();
+      event.preventDefault();
+      return;
+    }
+
+    // The palette owns the keyboard while open. Only the keys that move,
+    // run and close are taken here; text keys are left undefaulted for its
+    // `<input>`, the way Start's filter is (and the panels, disabled while
+    // it is up, ignore them).
+    if (store.state.palette?.rename) {
+      // The rename prompt: Enter commits, Esc cancels, and every other key
+      // (`j`/`k` and the arrows included) is the input's, as text.
+      if (key === "escape") store.actions.closePalette();
+      else if (key === "return" || key === "enter")
+        store.actions.commitRenamePrompt();
+      else return;
+      event.preventDefault();
+      return;
+    }
+    if (store.state.palette) {
+      if (key === "escape") store.actions.closePalette();
+      else if (key === "up" || (key === "p" && event.ctrl))
+        movePaletteHighlight(-1);
+      else if (key === "down" || (key === "n" && event.ctrl))
+        movePaletteHighlight(1);
+      else if (key === "return" || key === "enter") runActivePaletteCommand();
+      else if (key !== "tab") return;
       event.preventDefault();
       return;
     }
@@ -3726,20 +4219,6 @@ export function App(props: AppProps) {
         helpScrollbox.scrollTo(helpScrollbox.scrollTop + delta);
       }
       event.preventDefault();
-      return;
-    }
-
-    // The Worktrees panel owns every key while it is up (it registers its own
-    // handler), so nothing here may also act on them.
-    if (store.state.worktrees) {
-      event.preventDefault();
-      return;
-    }
-
-    // The source picker likewise — and it must NOT preventDefault here, the
-    // way the panel does: its filter is an `<input>`, and a key defaulted on
-    // the way past would never reach it.
-    if (store.state.sourcePicker) {
       return;
     }
 
@@ -3777,6 +4256,27 @@ export function App(props: AppProps) {
 
     if (store.state.newSession) {
       handleNewSessionKey(event);
+      return;
+    }
+
+    // Ahead of the panels, which are disabled while their preview has
+    // focus: the keys scroll the preview instead.
+    if (store.state.previewFocused && view() !== "sessions") {
+      handleFocusedPanelPreviewKey(event);
+      event.preventDefault();
+      return;
+    }
+
+    // The Worktrees panel owns every key while it is up (it registers its own
+    // handler), so nothing here may also act on them.
+    if (store.state.worktrees) {
+      return;
+    }
+
+    // The source picker likewise — and it must NOT preventDefault here, the
+    // way a modal does: its filter is an `<input>`, and a key defaulted on
+    // the way past would never reach it.
+    if (store.state.sourcePicker) {
       return;
     }
 
@@ -3848,16 +4348,8 @@ export function App(props: AppProps) {
         store.actions.moveSelection(key === "n" ? 1 : -1);
       } else if (event.meta && (key === "h" || key === "l")) {
         store.actions.resizePreview(key === "h" ? 5 : -5);
-      } else if (
-        event.ctrl &&
-        (key === "d" || key === "u") &&
-        previewScrollbox
-      ) {
-        const halfPage = Math.floor(
-          (previewScrollbox.viewport?.height ?? 10) / 2,
-        );
-        const delta = key === "d" ? halfPage : -halfPage;
-        previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
+      } else if (event.ctrl && (key === "d" || key === "u")) {
+        pagePreview(key === "d" ? 1 : -1);
       } else {
         const session = store.selectedSession();
         if (session?.tmuxPane && ensureSameServer()) {
@@ -3873,8 +4365,7 @@ export function App(props: AppProps) {
     if (key !== "g" && pendingG) {
       pendingG = false;
     }
-    if (pendingZ) {
-      pendingZ = false;
+    if (armedZ) {
       if (key === "m" && store.state.groupBy !== "none") {
         store.actions.collapseAll();
         event.preventDefault();
@@ -3912,6 +4403,17 @@ export function App(props: AppProps) {
         event.preventDefault();
         break;
 
+      case "e": {
+        // Rename the selected header's group, or the selected row's, the way
+        // J/K and </> move it. `openRenamePrompt` says why when there is
+        // nothing to rename (no grouping, a synthetic header).
+        const item = store.selectedFlatItem();
+        const ctx = getGroupMoveContext(item);
+        store.actions.openRenamePrompt(ctx?.groupKey ?? item?.groupKey ?? "");
+        event.preventDefault();
+        break;
+      }
+
       case "<": {
         const ctx = getGroupMoveContext(store.selectedFlatItem());
         if (ctx)
@@ -3943,12 +4445,7 @@ export function App(props: AppProps) {
           // as `"N"` or as `"n"` with `shift` set.
           store.actions.showSourcePicker(selectedRepoRoot());
         } else {
-          const item = store.selectedFlatItem();
-          if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
-            event.preventDefault();
-            break;
-          }
-          openNewSession(newSessionContext(item));
+          openNewSession(newSessionContext(store.selectedFlatItem()));
         }
         event.preventDefault();
         break;
@@ -3979,8 +4476,29 @@ export function App(props: AppProps) {
       case " ": {
         const item = store.selectedFlatItem();
         if (item?.type === "header") {
-          store.actions.toggleGroupCollapse(item.groupKey);
-        }
+          store.actions.markSessions(item.members.map((m) => m.session.id));
+        } else if (item?.type === "session")
+          store.actions.markSessions([item.filteredSession.session.id]);
+        event.preventDefault();
+        break;
+      }
+
+      case "a":
+      case "A":
+        store.actions.markAllSessions(key === "A" || event.shift);
+        event.preventDefault();
+        break;
+
+      case "s":
+        store.actions.setScope(store.state.scope ? null : selectedRepoRoot());
+        event.preventDefault();
+        break;
+
+      case "o": {
+        const session = store.selectedSession();
+        const pr = session ? branchPR(session, repoFacts.data().repos) : null;
+        if (pr) liveEffects.openUrl(pr.href);
+        else store.actions.showToast("No GitHub PR on this row");
         event.preventDefault();
         break;
       }
@@ -3988,11 +4506,31 @@ export function App(props: AppProps) {
       case "X":
       case "x":
         if (key === "X" || event.shift) {
-          if (store.filteredSessions().length > 0) {
-            store.actions.showConfirmDialog(null, "kill-all");
+          const ids = store
+            .flatItems()
+            .flatMap((item) =>
+              item.type === "session" ? [item.filteredSession.session.id] : [],
+            );
+          if (ids.length > 0) {
+            store.actions.showConfirmDialog(null, "kill-all", ids);
           }
         } else {
+          const marked = store
+            .filteredSessions()
+            .filter((s) => store.state.markedSessions.has(s.session.id))
+            .map((s) => s.session);
           const sessionToKill = store.selectedSession();
+          if (marked.length) {
+            store.actions.showConfirmDialog(
+              null,
+              "kill-group",
+              marked.map((s) => s.id),
+              marked
+                .map((s) => s.tmuxTarget ?? s.tmuxPane ?? s.project)
+                .join(", "),
+            );
+            break;
+          }
           if (sessionToKill) {
             store.actions.showConfirmDialog(sessionToKill.id, "kill");
           } else if (store.selectedGroupHeader()) {
@@ -4011,14 +4549,9 @@ export function App(props: AppProps) {
         // `shift` set rather than as `"W"`; gating on the modifier is what
         // keeps a bare `w` from opening a surface that can delete.
         if (key !== "W" && !event.shift) break;
-        const item = store.selectedFlatItem();
-        if (item?.type === "header" && isSyntheticGroupKey(item.groupKey)) {
-          event.preventDefault();
-          break;
-        }
         // Scoped to the selected row's repo when there is one, so `W` on a
         // group behaves like the group menu's item; global otherwise. The
-        // panel's own Tab widens from there.
+        // panel's own `s` widens from there.
         store.actions.showWorktrees(selectedRepoRoot());
         event.preventDefault();
         break;
@@ -4064,8 +4597,7 @@ export function App(props: AppProps) {
       case "R":
       case "r":
         if (key === "R" || event.shift) {
-          sseClient?.disconnect();
-          sseClient?.connect();
+          refreshAll();
         } else {
           const sessionToRestart = store.selectedSession();
           if (sessionToRestart) {
@@ -4123,12 +4655,8 @@ export function App(props: AppProps) {
         // matched because terminals deliver it as name `"d"` with `shift`
         // set as readily as `"D"`; without the lowercase case the branch
         // review would be unreachable on half of them.
-        if (event.ctrl && previewScrollbox && store.state.showPreview) {
-          const halfPage = Math.floor(
-            (previewScrollbox.viewport?.height ?? 10) / 2,
-          );
-          const delta = key === "u" ? -halfPage : halfPage;
-          previewScrollbox.scrollTo(previewScrollbox.scrollTop + delta);
+        if (event.ctrl && previewBox()) {
+          pagePreview(key === "u" ? -1 : 1);
           event.preventDefault();
         } else if (key !== "u" && !event.ctrl && !props.sidebar) {
           const session = store.selectedSession();
@@ -4149,38 +4677,12 @@ export function App(props: AppProps) {
         break;
 
       case "h":
-        if (event.meta && store.state.showPreview) {
-          store.actions.resizePreview(5);
-          event.preventDefault();
-        } else if (!event.meta && store.state.groupBy !== "none") {
-          // Collapse: on a session, collapse parent group; on a header, collapse it
-          const item = store.selectedFlatItem();
-          if (item?.type === "session") {
-            store.actions.collapseParent();
-          } else if (item?.type === "header" && !item.collapsed) {
-            store.actions.toggleGroupCollapse(item.groupKey);
-          }
-          event.preventDefault();
-        }
-        break;
-
       case "l":
-        if (event.meta && store.state.showPreview) {
-          store.actions.resizePreview(-5);
-          event.preventDefault();
-        } else if (!event.meta && store.state.groupBy !== "none") {
-          // Expand: on a collapsed header, expand it; on expanded header, move to first child
-          const item = store.selectedFlatItem();
-          if (item?.type === "header") {
-            if (item.collapsed) {
-              store.actions.expandGroup(item.groupKey);
-            } else {
-              // Move to first child session
-              store.actions.moveSelection(1);
-            }
-          }
-          event.preventDefault();
-        }
+        if (event.meta && store.state.showPreview)
+          store.actions.resizePreview(key === "h" ? 5 : -5);
+        else if (!event.meta && !props.sidebar)
+          switchMainView(nextView(view(), key === "h" ? -1 : 1));
+        event.preventDefault();
         break;
 
       case "-":
@@ -4204,6 +4706,11 @@ export function App(props: AppProps) {
 
       case "?":
         store.actions.toggleHelp();
+        event.preventDefault();
+        break;
+
+      case ":":
+        store.actions.openPalette();
         event.preventDefault();
         break;
 
@@ -4246,20 +4753,47 @@ export function App(props: AppProps) {
       }}
     >
       <box flexDirection="column" width="100%" height="100%">
-        <Header
-          sessionCount={store.filteredSessions().length}
-          totalCount={
-            store.state.hideIdle ||
-            (store.state.searchMode && store.state.searchQuery)
-              ? store.sortedSessions().length
-              : undefined
+        <Show
+          when={props.sidebar}
+          fallback={
+            <ViewStrip
+              view={view()}
+              scope={store.state.scope}
+              baseScope={store.baseScope()}
+              sessions={store.filteredSessions().length}
+              total={
+                store.baseScope() ||
+                store.state.hideIdle ||
+                (store.state.searchMode && store.state.searchQuery)
+                  ? store.sortedSessions().length
+                  : undefined
+              }
+              hideIdle={store.state.hideIdle}
+              connectionState={store.state.connectionState}
+              daemonDegraded={store.state.daemonHealth.degraded}
+              invokeInFlight={store.invocationInFlightCount()}
+              facts={repoFacts.data().repos}
+              onView={switchMainView}
+            />
           }
-          hideIdle={store.state.hideIdle}
-          connectionState={store.state.connectionState}
-          daemonDegraded={store.state.daemonHealth.degraded}
-          dimmed={store.state.previewFocused}
-          invokeInFlight={store.invocationInFlightCount()}
-        />
+        >
+          <Header
+            sessionCount={store.filteredSessions().length}
+            totalCount={
+              store.baseScope() ||
+              store.state.hideIdle ||
+              (store.state.searchMode && store.state.searchQuery)
+                ? store.sortedSessions().length
+                : undefined
+            }
+            scope={store.state.scope}
+            hideIdle={store.state.hideIdle}
+            connectionState={store.state.connectionState}
+            daemonDegraded={store.state.daemonHealth.degraded}
+            dimmed={store.state.previewFocused}
+            invokeInFlight={store.invocationInFlightCount()}
+          />
+        </Show>
 
         <Show when={store.state.searchMode}>
           <SearchInput
@@ -4295,18 +4829,17 @@ export function App(props: AppProps) {
 
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
-            <Text fg={theme.red}>Error: {store.state.error}</Text>
+            <Text fg={theme.red}>
+              {connectionErrorText(store.state.error ?? "")}
+            </Text>
           </box>
         </Show>
 
         <box flexDirection="row" flexGrow={1}>
           <SessionList
             items={store.flatItems()}
-            // Deliberately NOT the filtered list: the only thing reading it
-            // is the worktree-counts scope, which must not move when a
-            // search query or the hide-idle toggle changes.
-            sessions={store.unfilteredSessions()}
-            groupBy={store.state.groupBy}
+            repoFacts={repoFacts.data()}
+            marks={store.state.markedSessions}
             selectedIndex={store.selectedIndex()}
             iconStyle={store.state.iconStyle}
             showPreview={store.state.showPreview}
@@ -4315,7 +4848,7 @@ export function App(props: AppProps) {
             activeSessionId={store.state.activeSessionId}
             columns={store.state.columns}
             ageFadeAfter={store.state.ageFadeAfter}
-            connectionState={store.state.connectionState}
+            columnHeader={showColumnHeader(store.state.columnHeader)}
             promptLines={store.state.promptLines}
             // The same "a query is narrowing the list" the flat items are
             // built from, so the block yields exactly when rows carry
@@ -4351,13 +4884,23 @@ export function App(props: AppProps) {
               readSidebarScrollTop = fn;
             }}
           />
-          <Show when={!props.sidebar && store.state.showPreview}>
+          {/* Only in Sessions: under a panel it would keep capturing the
+              selected pane, and its scrollbox would take the panel's keys. */}
+          <Show
+            when={
+              !props.sidebar &&
+              store.state.showPreview &&
+              view() === "sessions"
+            }
+          >
             <Show
               when={store.selectedGroupHeader()}
               fallback={
                 <Preview
                   session={store.selectedSession()}
-                  onScrollboxRef={(ref) => (previewScrollbox = ref)}
+                  facts={repoFacts.data().repos}
+                  headerPR={repoFacts.data().headerPR}
+                  onScrollboxRef={(ref) => (previewBoxes.sessions = ref)}
                   iconStyle={store.state.iconStyle}
                   width={store.state.previewWidth}
                   focused={store.state.previewFocused}
@@ -4371,8 +4914,10 @@ export function App(props: AppProps) {
               {(header: () => Extract<FlatItem, { type: "header" }>) => (
                 <GroupPreview
                   header={header()}
+                  facts={repoFacts.data().repos}
+                  headerPR={repoFacts.data().headerPR}
                   sessions={store.selectedGroupSessions()}
-                  onScrollboxRef={(ref) => (previewScrollbox = ref)}
+                  onScrollboxRef={(ref) => (previewBoxes.sessions = ref)}
                   iconStyle={store.state.iconStyle}
                   width={store.state.previewWidth}
                 />
@@ -4387,23 +4932,157 @@ export function App(props: AppProps) {
             confirmMode={store.state.confirmMode}
             helpMode={store.state.showHelp}
             previewFocused={store.state.previewFocused}
-            persistent={props.persistent}
             groupBy={store.state.groupBy}
             newSessionMode={store.state.newSession !== null}
             newSessionOption={newSessionOptionMode()}
             handoffPickMode={store.state.handoffPick !== null}
             handoffDialogMode={store.state.handoffDialog !== null}
             copyDialogMode={store.state.copyDialog !== null}
-            reviewable={reviewEnabled}
+            paletteMode={store.state.palette !== null}
+            renameMode={store.state.palette?.rename !== undefined}
+            view={view()}
           />
         </Show>
 
-        <Show when={store.state.showHelp}>
-          <HelpOverlay
-            sidebar={props.sidebar}
-            reviewable={reviewEnabled}
-            onScrollboxRef={(ref) => (helpScrollbox = ref)}
-          />
+        <Show when={store.state.worktrees}>
+          {(panel: () => NonNullable<typeof store.state.worktrees>) => (
+            <WorktreesPanel
+              onModalChange={setWorktreeModal}
+              scope={store.state.scope}
+              activeSessionId={store.state.activeSessionId}
+              facts={repoFacts.data()}
+              showPreview={!props.sidebar && store.state.showPreview}
+              previewWidth={store.state.previewWidth}
+              previewFocused={store.state.previewFocused}
+              onPreviewScrollbox={(ref) => (previewBoxes.worktrees = ref)}
+              sessionById={sessionById}
+              memory={
+                worktreeMemory?.scope === store.state.scope
+                  ? worktreeMemory
+                  : undefined
+              }
+              onRemember={(value) => {
+                worktreeMemory = value;
+              }}
+              embedded={!props.sidebar}
+              enabled={panelOwnsKeys()}
+              onNavigate={navigateView}
+              onScope={store.actions.setScope}
+              onRefresh={refreshAll}
+              onNew={(cwd) => {
+                const scope = store.state.scope;
+                // The panel stays up behind the dialog, dimmed.
+                openNewSession({
+                  cwd,
+                  returnToWorktrees: {
+                    scope,
+                    cursor: worktreeMemory?.cursor ?? cwd,
+                  },
+                });
+              }}
+              onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
+              onKillAll={(ids) => {
+                if (ids.length)
+                  store.actions.showConfirmDialog(
+                    null,
+                    "kill-group",
+                    ids,
+                    "Sessions in these worktrees",
+                  );
+              }}
+              repo={panel().repo}
+              cwd={pickerCwd()}
+              compact={props.sidebar}
+              iconStyle={store.state.iconStyle}
+              initialCursor={panel().initialCursor}
+              isReturn={panel().isReturn}
+              onClose={store.actions.hideWorktrees}
+              onJump={jumpToWorktreeSession}
+              onSpawn={spawnInWorktree}
+              effects={liveEffects}
+              // Review suspends the renderer into a full-screen tool, which
+              // the sidebar has neither the room nor the focus for — the same
+              // reason its `d` key is inert on a session row.
+              onReview={props.sidebar ? undefined : reviewWorktree}
+              dimmed={store.state.newSession !== null}
+            />
+          )}
+        </Show>
+
+        <Show when={store.state.sourcePicker}>
+          {(picker: () => NonNullable<typeof store.state.sourcePicker>) => (
+            <SourcePicker
+              scope={store.state.scope}
+              activeSessionId={store.state.activeSessionId}
+              effects={liveEffects}
+              showPreview={!props.sidebar && store.state.showPreview}
+              previewWidth={store.state.previewWidth}
+              previewFocused={store.state.previewFocused}
+              onPreviewScrollbox={(ref) => (previewBoxes.start = ref)}
+              memory={
+                sourceMemory?.scope === store.state.scope
+                  ? sourceMemory
+                  : undefined
+              }
+              onRemember={(value) => {
+                sourceMemory = value;
+              }}
+              embedded={!props.sidebar}
+              enabled={panelOwnsKeys()}
+              onNavigate={navigateView}
+              onScope={store.actions.setScope}
+              onRefresh={refreshAll}
+              onNew={(cwd) => {
+                const marker = sourcesReturn({
+                  repoRoot: store.state.scope ?? cwd,
+                  cursor: sourceMemory?.cursor ?? "",
+                  filter: sourceMemory?.filter ?? "",
+                });
+                // Start stays up behind the dialog, dimmed.
+                openNewSession({ cwd, returnToSources: marker });
+              }}
+              onRestart={(id) => store.actions.showConfirmDialog(id, "restart")}
+              onKill={(ids) =>
+                store.actions.showConfirmDialog(
+                  null,
+                  "kill-group",
+                  ids,
+                  "Sessions on these checkouts",
+                )
+              }
+              onReview={
+                props.sidebar
+                  ? undefined
+                  : (target) =>
+                      reviewWorktree({
+                        ...target,
+                        panelScope: store.state.scope,
+                        returnToSources: sourcesReturn({
+                          repoRoot: store.state.scope ?? target.path,
+                          cursor: target.cursor,
+                          filter: target.filter,
+                        }),
+                      })
+              }
+              dimmed={store.state.newSession !== null}
+              repo={picker().repo}
+              cwd={pickerCwd()}
+              compact={props.sidebar}
+              iconStyle={store.state.iconStyle}
+              initialCursor={picker().initialCursor}
+              initialFilter={
+                picker().initialFilter ||
+                (sourceMemory?.scope === store.state.scope
+                  ? sourceMemory.filter
+                  : undefined)
+              }
+              origin={picker().origin}
+              onClose={closeSourcePicker}
+              onPickPR={spawnFromSourcePR}
+              onPickIssue={spawnFromSourceIssue}
+              onOpenWorktree={openWorktreeFromSources}
+            />
+          )}
         </Show>
 
         <Show when={store.state.confirmMode}>
@@ -4413,11 +5092,12 @@ export function App(props: AppProps) {
             sessionCount={
               store.state.confirmAction === "send-review"
                 ? pendingReviewNoteCount()
-                : store.state.confirmAction === "kill-group"
+                : store.state.confirmAction === "kill-group" ||
+                    store.state.confirmAction === "kill-all"
                   ? store.state.confirmSessionIds.length
                   : store.filteredSessions().length
             }
-            groupLabel={store.selectedGroupHeader()?.label}
+            groupLabel={store.state.confirmLabel ?? undefined}
             onConfirm={confirmDialogAction}
             onCancel={cancelConfirmDialog}
           />
@@ -4493,48 +5173,14 @@ export function App(props: AppProps) {
           )}
         </Show>
 
-        <Show when={store.state.worktrees}>
-          {(panel: () => NonNullable<typeof store.state.worktrees>) => (
-            <WorktreesPanel
-              repo={panel().repo}
-              cwd={pickerCwd()}
-              compact={props.sidebar}
-              iconStyle={store.state.iconStyle}
-              initialCursor={panel().initialCursor}
-              isReturn={panel().isReturn}
-              startWidened={panel().startWidened}
-              onClose={store.actions.hideWorktrees}
-              onJump={jumpToWorktreeSession}
-              onSpawn={spawnInWorktree}
-              onSpawnFromPR={spawnFromPR}
-              onStartFromSource={startFromSource}
-              effects={liveEffects}
-              // Review suspends the renderer into a full-screen tool, which
-              // the sidebar has neither the room nor the focus for — the same
-              // reason its `d` key is inert on a session row.
-              onReview={props.sidebar ? undefined : reviewWorktree}
-            />
-          )}
+        <Show when={store.state.showHelp}>
+          <HelpOverlay
+            sidebar={props.sidebar}
+            reviewable={reviewEnabled}
+            view={view()}
+            onScrollboxRef={(ref) => (helpScrollbox = ref)}
+          />
         </Show>
-
-        <Show when={store.state.sourcePicker}>
-          {(picker: () => NonNullable<typeof store.state.sourcePicker>) => (
-            <SourcePicker
-              repo={picker().repo}
-              cwd={pickerCwd()}
-              compact={props.sidebar}
-              iconStyle={store.state.iconStyle}
-              initialCursor={picker().initialCursor}
-              initialFilter={picker().initialFilter}
-              origin={picker().origin}
-              onClose={closeSourcePicker}
-              onPickPR={spawnFromSourcePR}
-              onPickIssue={spawnFromSourceIssue}
-              onOpenWorktree={openWorktreeFromSources}
-            />
-          )}
-        </Show>
-
         <Show when={store.state.contextMenu}>
           {(cm: () => NonNullable<typeof store.state.contextMenu>) => (
             <ContextMenu
@@ -4562,10 +5208,37 @@ export function App(props: AppProps) {
           )}
         </Show>
 
+        <Show when={store.state.palette?.rename}>
+          {(rename: () => { groupKey: string; label: string }) => (
+            <RenamePrompt
+              label={rename().label}
+              value={store.state.palette?.query ?? ""}
+              onInput={(name) => store.actions.setPaletteQuery(name)}
+              onSubmit={() => store.actions.commitRenamePrompt()}
+              mergesInto={store.renameMergeTarget()}
+            />
+          )}
+        </Show>
+        <Show when={store.state.palette?.rename ? null : store.state.palette}>
+          {(open: () => NonNullable<typeof store.state.palette>) => (
+            <CommandPalette
+              query={open().query}
+              matches={paletteMatches()}
+              highlight={open().highlight}
+              onQuery={(query) => store.actions.setPaletteQuery(query)}
+              onSubmit={runActivePaletteCommand}
+              onRun={runPaletteCommand}
+            />
+          )}
+        </Show>
+
         {/* Transient feedback, rendered in every mode: the one-shot and persistent
             pickers need the switch-failure toast too, not just the sidebar. */}
         <Show when={store.state.toastMessage}>
-          <Toast message={store.state.toastMessage!} />
+          <Toast
+            message={store.state.toastMessage!}
+            fit={store.toastFit()}
+          />
         </Show>
       </box>
     </TickContext.Provider>

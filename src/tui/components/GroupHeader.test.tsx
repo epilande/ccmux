@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
 import { MouseButtons } from "@opentui/core/testing";
 import { GroupHeader } from "./GroupHeader";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { emptySummary, membersFromSummary } from "./test-helpers";
 import type { StatusSummary } from "../utils/grouping";
 
@@ -19,16 +21,20 @@ async function renderHeader(props: {
   selected?: boolean;
   statusSummary?: StatusSummary;
   dimmed?: boolean;
+  width?: number;
+  notice?: { text: string; short: string; color: string };
 }) {
   setup = await testRender(
     () => (
       <GroupHeader
         label={props.label ?? "testgroup"}
+        notice={props.notice}
         count={props.count ?? 3}
         collapsed={props.collapsed ?? false}
         selected={props.selected ?? false}
         members={membersFromSummary(props.statusSummary ?? emptySummary())}
         dimmed={props.dimmed}
+        width={props.width}
       />
     ),
     { width: 80, height: 3 },
@@ -40,20 +46,86 @@ async function renderHeader(props: {
 describe("GroupHeader", () => {
   it("renders collapse indicator when collapsed", async () => {
     const frame = await renderHeader({ collapsed: true });
-    expect(frame).toContain("▶");
-    expect(frame).not.toContain("▼");
+    expect(frame).toContain("▸");
+    expect(frame).not.toContain("▾");
   });
 
   it("renders expand indicator when expanded", async () => {
     const frame = await renderHeader({ collapsed: false });
-    expect(frame).toContain("▼");
-    expect(frame).not.toContain("▶");
+    expect(frame).toContain("▾");
+    expect(frame).not.toContain("▸");
+  });
+
+  it("keeps a notice after the count, shortening it before cutting the label", async () => {
+    const notice = {
+      text: "+2 waiting in other repos",
+      short: "+2 elsewhere",
+      color: "#ff0000",
+    };
+    const wide = await renderHeader({
+      label: "needs attention",
+      count: 0,
+      notice,
+    });
+    expect(wide).toContain("needs attention (0)  +2 waiting in other repos");
+    const narrow = await renderHeader({
+      label: "needs attention",
+      count: 0,
+      notice,
+      width: 40,
+    });
+    expect(narrow).toContain("needs attention (0)  +2 elsewhere");
+    const tiny = await renderHeader({
+      label: "needs attention",
+      count: 0,
+      notice,
+      width: 26,
+    });
+    expect(tiny).toContain("(0)  +2 elsewhere");
+    expect(tiny).toContain("…");
   });
 
   it("renders group label and count", async () => {
     const frame = await renderHeader({ label: "ccmux", count: 4 });
     expect(frame).toContain("ccmux");
     expect(frame).toContain("(4)");
+  });
+
+  it("fills the rest of the line with a rule, one space after the label", async () => {
+    // The header is the group divider: no separate rule line above it.
+    const frame = await renderHeader({ label: "ccmux", count: 4 });
+    const line = frame.split("\n")[0];
+    expect(line).toMatch(/^ ▾ ccmux \(4\) ─+ $/);
+    // width 80, one cell of padding each side
+    expect(line.trimEnd().length).toBe(79);
+  });
+
+  it("ends the rule at the box edge whatever width budget the caller passed", async () => {
+    // `width` only budgets the label; the rule is sized by layout, so a
+    // caller whose estimate drifts from the real box neither stops short
+    // nor overflows.
+    for (const width of [40, 120]) {
+      const frame = await renderHeader({ label: "ccmux", count: 4, width });
+      const [line, next] = frame.split("\n");
+      expect(line).toMatch(/^ ▾ ccmux \(4\) ─+ $/);
+      expect(line.trimEnd().length).toBe(79);
+      expect(next.trim()).toBe("");
+      setup.renderer.destroy();
+    }
+  });
+
+  it("keeps a label with a wide glyph on one line", async () => {
+    // `⚠` is one cell to displayWidth and two to the renderer; the extra
+    // column must come out of the rule, not wrap the count off the line.
+    const frame = await renderHeader({ label: "⚠ build", count: 4 });
+    const [line, next] = frame.split("\n");
+    expect(line).toMatch(/\(4\) ─+ $/);
+    expect(next.trim()).toBe("");
+  });
+
+  it("drops the rule when the label leaves no room for it", async () => {
+    const frame = await renderHeader({ label: "x".repeat(200), count: 4 });
+    expect(frame.split("\n")[0]).not.toContain("─");
   });
 
   it("shows status dots when collapsed", async () => {
@@ -216,5 +288,19 @@ describe("GroupHeader", () => {
 
     expect(activateCalls).toBe(1);
     expect(contextMenuCalls).toBe(0);
+  });
+});
+
+describe("GroupHeader legibility", () => {
+  it("draws the collapse triangle and the count in subtext", async () => {
+    await renderHeader({ collapsed: true, label: "ccmux", count: 4 });
+    const spans = setup.captureSpans().lines.flatMap((l) => l.spans);
+    const subtext = RGBA.fromHex(theme.subtext).toInts();
+    expect(spans.find((s) => s.text.includes("▸"))?.fg.toInts()).toEqual(
+      subtext,
+    );
+    expect(spans.find((s) => s.text.includes("(4)"))?.fg.toInts()).toEqual(
+      subtext,
+    );
   });
 });

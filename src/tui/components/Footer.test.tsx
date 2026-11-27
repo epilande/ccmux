@@ -1,6 +1,9 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { testRender } from "@opentui/solid";
-import { Footer, fitHints, defaultHints } from "./Footer";
+import { Footer, fitHints, footerHints, hintLine } from "./Footer";
+import { ACTIONS } from "../actions";
+import { RGBA } from "@opentui/core";
+import { theme } from "../theme";
 import { DEFAULT_GROUP_BY, type GroupBy } from "../../lib/preferences";
 
 type Setup = Awaited<ReturnType<typeof testRender>>;
@@ -15,12 +18,12 @@ async function renderFooter(props: {
   confirmMode?: boolean;
   helpMode?: boolean;
   previewFocused?: boolean;
-  persistent?: boolean;
   groupBy?: GroupBy;
   newSessionMode?: boolean;
   newSessionOption?: "focused" | "dropdown";
   handoffPickMode?: boolean;
-  reviewable?: boolean;
+  paletteMode?: boolean;
+  view?: "sessions" | "worktrees" | "start";
   width?: number;
 }) {
   setup = await testRender(
@@ -30,12 +33,12 @@ async function renderFooter(props: {
         confirmMode={props.confirmMode}
         helpMode={props.helpMode}
         previewFocused={props.previewFocused}
-        persistent={props.persistent}
         groupBy={props.groupBy}
         newSessionMode={props.newSessionMode}
         newSessionOption={props.newSessionOption}
         handoffPickMode={props.handoffPickMode}
-        reviewable={props.reviewable}
+        paletteMode={props.paletteMode}
+        view={props.view}
       />
     ),
     { width: props.width ?? 120, height: 4 },
@@ -77,23 +80,28 @@ describe("Footer", () => {
     expect(frame).toContain("keys sent to pane");
   });
 
-  it("shows switch label when persistent", async () => {
-    const frame = await renderFooter({ persistent: true });
-    expect(frame).toContain("switch");
+  it("draws its hints in subtext, which stays legible on light themes", async () => {
+    await renderFooter({});
+    const line = setup
+      .captureSpans()
+      .lines.flatMap((l) => l.spans)
+      .find((span) => span.text.includes("q quit"));
+    expect(line?.fg.toInts()).toEqual(RGBA.fromHex(theme.subtext).toInts());
   });
 
-  it("shows select label when not persistent", async () => {
-    const frame = await renderFooter({ persistent: false });
-    expect(frame).toContain("select");
+  it("glosses enter with the same verb as every other view", async () => {
+    const frame = await renderFooter({});
+    expect(frame).toContain("enter go");
   });
 
   it("shows current groupBy mode", async () => {
-    const frame = await renderFooter({ groupBy: "cwd" });
+    // The lowest rank: on the line once every hint fits.
+    const frame = await renderFooter({ groupBy: "cwd", width: 200 });
     expect(frame).toContain("group:cwd");
   });
 
   it("shows default groupBy when none specified", async () => {
-    const frame = await renderFooter({});
+    const frame = await renderFooter({ width: 200 });
     expect(frame).toContain(`group:${DEFAULT_GROUP_BY}`);
   });
 
@@ -109,14 +117,32 @@ describe("Footer", () => {
     expect(frame).not.toContain("type to search");
   });
 
-  it("shows the review hint when reviewable", async () => {
-    const frame = await renderFooter({ reviewable: true });
-    expect(frame).toContain("d/D review");
+  it("points at the palette rather than listing the rare keys", async () => {
+    const frame = await renderFooter({ width: 200 });
+    expect(frame).toContain(": more");
+    // Still keys, still in `?` and `:`; just not on the line.
+    for (const gone of ["d/D review", "R refresh", "N start", "P preview"])
+      expect(frame).not.toContain(gone);
   });
 
-  it("omits the review hint when not reviewable", async () => {
-    const frame = await renderFooter({ reviewable: false });
-    expect(frame).not.toContain("d/D review");
+  it("shows the palette's keys while it is open", async () => {
+    const frame = await renderFooter({ paletteMode: true, searchMode: true });
+    expect(frame).toContain("enter run");
+    expect(frame).toContain("esc close");
+    expect(frame).not.toContain("type to search");
+  });
+
+  it("says a focused preview sends keys to the pane only in Sessions", async () => {
+    expect(await renderFooter({ previewFocused: true })).toContain(
+      "keys sent to pane",
+    );
+    setup.renderer.destroy();
+    const frame = await renderFooter({
+      previewFocused: true,
+      view: "worktrees",
+    });
+    expect(frame).toContain("j/k scroll");
+    expect(frame).not.toContain("keys sent to pane");
   });
 
   it("shows the new-session hints in newSessionMode", async () => {
@@ -192,7 +218,6 @@ describe("Footer", () => {
     const frame = await renderFooter({
       width: 120,
       groupBy: "project",
-      reviewable: true,
     });
     expect(frame).toContain("? help");
     expect(frame).toContain("q quit");
@@ -203,16 +228,111 @@ describe("Footer", () => {
   });
 
   it("keeps the exits when a narrow terminal drops the rest", async () => {
-    const frame = await renderFooter({ width: 40, reviewable: true });
+    const frame = await renderFooter({ width: 40 });
     expect(frame).toContain("? help");
     expect(frame).toContain("q quit");
     expect(frame).not.toContain("r restart");
   });
 });
 
+describe("footerHints", () => {
+  const VIEWS = ["sessions", "worktrees", "start"] as const;
+  const texts = (view: (typeof VIEWS)[number]) =>
+    footerHints(view, { groupBy: "project" }).map((segment) => segment.text);
+  const keyOf = (text: string) => text.split(" ")[0]!;
+
+  it("lists every view's hints in the registry's order", () => {
+    const order = ACTIONS.flatMap((action) =>
+      "hint" in action ? [action.hint.key] : [],
+    );
+    for (const view of VIEWS) {
+      const keys = texts(view).map(keyOf);
+      const positions = keys.map((key) => (order as string[]).indexOf(key));
+      expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    }
+  });
+
+  it("uses one verb per key everywhere, except where the key differs by view", () => {
+    const verbs = new Map<string, Set<string>>();
+    for (const view of VIEWS)
+      for (const text of texts(view)) {
+        const key = keyOf(text);
+        verbs.set(key, (verbs.get(key) ?? new Set()).add(text));
+      }
+    for (const [key, seen] of verbs) {
+      if (key === "x" || key === "q") continue;
+      expect([key, seen.size]).toEqual([key, 1]);
+    }
+    expect(texts("sessions")).toContain("x kill");
+    expect(texts("worktrees")).toContain("x remove");
+    expect(texts("sessions")).toContain("q quit");
+    expect(texts("start")).toContain("q back");
+  });
+
+  it("teaches each view the keys it handles", () => {
+    expect(texts("sessions")).toEqual([
+      "j/k nav",
+      "h/l views",
+      "enter go",
+      "s scope",
+      "/ search",
+      "x kill",
+      "n new",
+      "r restart",
+      "b group:project",
+      ": more",
+      "? help",
+      "q quit",
+    ]);
+    expect(texts("worktrees")).not.toContain("/ search");
+    // Marks are how a removal is chosen, so only Worktrees teaches them.
+    expect(texts("worktrees")).toContain("space mark");
+    expect(texts("sessions")).not.toContain("space mark");
+    expect(texts("start")).toContain("/ search");
+    expect(texts("start")).not.toContain("b group:project");
+  });
+
+  it("ranks n higher in Worktrees, where it starts a session in the row's worktree", () => {
+    const rankOf = (view: "sessions" | "worktrees" | "start") =>
+      footerHints(view).find((s) => s.text === "n new")?.rank;
+    expect(rankOf("worktrees")).toBe(4);
+    expect(rankOf("sessions")).toBe(2);
+    expect(rankOf("start")).toBe(2);
+    const worktrees = (width: number) =>
+      fitHints(footerHints("worktrees"), width - 2);
+    // 100 columns: `n new` stays, ahead of `space mark`.
+    expect(worktrees(100)).toBe(
+      "j/k nav · h/l views · enter go · s scope · x remove · n new · r restart · : more · ? help · q back",
+    );
+    // 70 columns: the existing rules drop it, the pinned five stay.
+    expect(worktrees(70)).toBe(
+      "j/k nav · h/l views · enter go · s scope · : more · ? help · q back",
+    );
+    // Start ranks it lower, so it is gone at 100 there.
+    expect(fitHints(footerHints("start"), 98)).not.toContain("n new");
+  });
+
+  it("keeps the sidebar's session list to the keys it has", () => {
+    const sidebar = footerHints("sessions", { sidebar: true }).map(
+      (s) => s.text,
+    );
+    expect(sidebar).not.toContain("h/l views");
+    // The rail has no palette.
+    expect(sidebar).not.toContain(": more");
+    expect(
+      footerHints("worktrees", { sidebar: true }).map((s) => s.text),
+    ).not.toContain(": more");
+  });
+});
+
 describe("fitHints", () => {
-  const hints = () =>
-    defaultHints({ groupBy: "project", reviewable: true, persistent: false });
+  const hints = (view: "sessions" | "worktrees" | "start" = "sessions") =>
+    footerHints(view, { groupBy: "project" });
+  const PINNED_TEXT = {
+    sessions: ["h/l", "s", ":", "?", "q quit"],
+    worktrees: ["h/l", "s", ":", "?", "q back"],
+    start: ["h/l", "s", ":", "?", "q back"],
+  };
 
   it("returns every hint when they all fit", () => {
     const full = fitHints(hints(), 500);
@@ -221,65 +341,36 @@ describe("fitHints", () => {
     }
   });
 
-  it("never exceeds the width it is given", () => {
-    for (let width = 8; width <= 130; width++) {
-      expect(fitHints(hints(), width).length).toBeLessThanOrEqual(
-        Math.max(width, "q quit".length),
-      );
-    }
+  it("never drops views, scope, more, help or quit, in any view, at any width", () => {
+    for (const view of ["sessions", "worktrees", "start"] as const)
+      for (let width = 40; width <= 200; width++) {
+        const line = fitHints(hints(view), width);
+        expect(line.length).toBeLessThanOrEqual(width);
+        for (const text of PINNED_TEXT[view]) expect(line).toContain(text);
+      }
   });
 
-  it("drops the lowest-ranked hints first and keeps the exits longest", () => {
-    // `? help` and `q quit` are how a stuck user gets out, so they outlive
-    // every view toggle no matter how narrow the terminal gets.
-    for (let width = 20; width <= 118; width++) {
-      const line = fitHints(hints(), width);
-      expect(line).toContain("? help");
-      expect(line).toContain("q quit");
-    }
-    // The view toggles are among the first to go.
-    const tight = fitHints(hints(), 60);
-    expect(tight).not.toContain("P preview");
+  it("shrinks the pinned hints to their keys, left first, when they alone overflow", () => {
+    // The sidebar overlay's 36 columns (no palette there): one short of all
+    // four words.
+    expect(fitHints(footerHints("worktrees", { sidebar: true }), 36)).toBe(
+      "h/l · s scope · ? help · q back",
+    );
+    expect(fitHints(hints("worktrees"), 36)).toBe(
+      "h/l · s · : more · ? help · q back",
+    );
+    expect(fitHints(hints("worktrees"), 20)).toBe("h/l · s · : · ? · q");
   });
 
-  it("gives up the hints the row menu also teaches first", () => {
-    // `r` and `x` are named on the row itself by the `m` menu, so the footer
-    // stops teaching them before it gives up a mode with no other home
-    // (`/ search`) or the only advertisement the review integration has
-    // (`d/D review`). Widths, not ranks, because the rank scale is an
-    // implementation detail and the drop ORDER is the behaviour.
-    const dropped = (width: number) =>
-      hints()
-        .map((segment) => segment.text)
-        .filter((text) => !fitHints(hints(), width).includes(text));
-
-    // The first column the line has to give up takes the Worktrees pointer
-    // (the panel it opens teaches its own keys), the next takes Kill, and the
-    // one after that Restart. (Listed in display order, which is what the
-    // helper reads them off in — Restart sits left of Kill on the line, and
-    // both sit left of Worktrees.)
-    expect(dropped(132)).toEqual(["W worktrees"]);
-    expect(dropped(118)).toEqual(["x kill", "W worktrees"]);
-    expect(dropped(106)).toEqual(["r restart", "x kill", "W worktrees"]);
-    // Both gone while everything they were ranked against is still there.
-    const line = fitHints(hints(), 106);
-    expect(line).toContain("/ search");
-    expect(line).toContain("d/D review");
-    expect(line).toContain("P preview");
-    expect(line).toContain("b group:project");
+  it("keeps the whole everyday line on a 150-column session list", () => {
+    const line = fitHints(hints(), 148);
+    for (const segment of hints()) expect(line).toContain(segment.text);
   });
 
-  it("keeps the two view toggles longer than the two menu-backed actions", () => {
-    // The tie-break inside rank 1 is positional, so this is the assertion
-    // that would catch a reshuffle of `defaultHints` silently reversing it.
-    // The width is the narrowest that still holds the two toggles, so it
-    // tracks the line's length: it moved from 100 when `d review` became
-    // `d/D review`.
-    const line = fitHints(hints(), 102);
-    expect(line).not.toContain("x kill");
-    expect(line).not.toContain("r restart");
-    expect(line).toContain("P preview");
-    expect(line).toContain("b group:project");
+  it("keeps j/k on the Worktrees line", () => {
+    const line = fitHints(hints("worktrees"), 118);
+    expect(line).toContain("j/k nav");
+    expect(line).toContain("q back");
   });
 
   it("drops whole hints rather than truncating mid-word", () => {
@@ -296,8 +387,32 @@ describe("fitHints", () => {
     const positions = shown.map((text) => order.indexOf(text));
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
   });
+});
 
-  it("keeps at least one hint even at an absurd width", () => {
-    expect(fitHints(hints(), 1)).toBe("q quit");
+describe("hintLine", () => {
+  it("fits droppable hints around a note that leaves the pinned hints whole", () => {
+    const { note, hints } = hintLine("worktrees", 120, {
+      note: "scanning…",
+    });
+    expect(note).toBe("scanning…  ");
+    expect(hints).toContain("j/k nav");
+    expect(hints).toContain("q back");
+    expect((note + hints).length).toBeLessThanOrEqual(120);
+  });
+
+  it("shrinks the pinned hints to keys before cutting a long note", () => {
+    const error = "daemon is out of date (restart it: ccmux daemon restart)";
+    const { note, hints } = hintLine("start", 88, { note: error });
+    expect(note).toBe(`${error}  `);
+    expect(hints).toBe("h/l · s · : · ? help · q back");
+  });
+
+  it("truncates a note that does not fit even then, and keeps the keys", () => {
+    const { note, hints } = hintLine("start", 50, {
+      note: "gh pr list exited 1: no git remotes found in this repository at all",
+    });
+    expect(note.endsWith("…  ")).toBe(true);
+    expect(hints).toBe("h/l · s · : · ? · q");
+    expect((note + hints).length).toBeLessThanOrEqual(50);
   });
 });

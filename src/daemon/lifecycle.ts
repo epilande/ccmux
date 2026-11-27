@@ -296,24 +296,84 @@ export function spawnDaemonBackground(): void {
 }
 
 /**
- * Find daemon PID by checking what process is listening on the daemon port
- * Uses -sTCP:LISTEN to only find the server, not client connections
+ * Who, if anyone, listens on the daemon port. `none` means a lookup tool RAN
+ * and found no listener. `unknown` means nothing could say: no tool ran, or
+ * one saw a listener it could not name (`ss` lists another user's socket
+ * without its owner). A daemon may well be serving then, and
+ * `stopDaemonByPort` must keep its pid file.
+ */
+type PortLookup =
+  | { kind: "listener"; pid: number }
+  | { kind: "none" }
+  | { kind: "unknown" };
+
+/** What one tool's output says: a pid, nothing, or a socket with no owner. */
+type ToolAnswer = number | "none" | "unowned";
+
+/** `lsof -ti` prints one pid per line. */
+function parseLsof(output: string): ToolAnswer {
+  const pid = parseInt(output.trim(), 10);
+  return isNaN(pid) ? "none" : pid;
+}
+
+/**
+ * `ss -p` names the owner as `users:(("bun",pid=1234,fd=11))`. The field is
+ * only there for the caller's own sockets (or under root); the daemon runs as
+ * the user, so a line without one is a listener that is not ours to name.
+ */
+function parseSs(output: string): ToolAnswer {
+  const match = output.match(/\bpid=(\d+)/);
+  if (match) return parseInt(match[1]!, 10);
+  return output.trim() ? "unowned" : "none";
+}
+
+/**
+ * Ask the OS who listens on the daemon port, from the live socket table and
+ * never the pid file (which may name a recycled pid). Only LISTEN sockets
+ * count, so a client connection is never mistaken for the server.
+ *
+ * `lsof` first (present by default on macOS), then `ss` (iproute2, on every
+ * mainstream Linux, where `lsof` is an optional package). Without the
+ * fallback such a machine never replaced an outdated daemon, and `ccmux
+ * daemon restart` removed the live daemon's pid file. A tool that runs and
+ * finds nothing still falls through, so a no-op `lsof` stub cannot hide `ss`;
+ * that costs one extra spawn only when nothing is listening.
+ *
+ * Only a tool that exits 0 can confirm that nothing is listening. A pid it
+ * names counts whatever its exit code, but an empty answer from a failed run
+ * proves nothing: `lsof` exits 1 both for "no match" and for an error, so
+ * without `ss` to confirm, a quiet `lsof` is `unknown`, not `none`. (`ss`
+ * exits 0 when nothing matches.)
+ */
+async function lookupDaemonPort(): Promise<PortLookup> {
+  const lookups: Array<[string[], (output: string) => ToolAnswer]> = [
+    [["lsof", "-ti", `tcp:${DAEMON_PORT}`, "-sTCP:LISTEN"], parseLsof],
+    [["ss", "-ltnpH", `sport = :${DAEMON_PORT}`], parseSs],
+  ];
+  let ranClean = false;
+  let unowned = false;
+  for (const [argv, parse] of lookups) {
+    try {
+      const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
+      const answer = parse(await new Response(proc.stdout).text());
+      if (typeof answer === "number") return { kind: "listener", pid: answer };
+      if (((await proc.exited) ?? 0) !== 0) continue;
+      if (answer === "unowned") unowned = true;
+      else ranClean = true;
+    } catch {
+      // Not on PATH, or not spawnable: try the next tool.
+    }
+  }
+  return { kind: ranClean && !unowned ? "none" : "unknown" };
+}
+
+/**
+ * The LISTEN pid on the daemon port, or null when there is none or it cannot
+ * be determined.
  */
 export async function findDaemonPidByPort(): Promise<number | null> {
-  try {
-    const proc = Bun.spawn(
-      ["lsof", "-ti", `tcp:${DAEMON_PORT}`, "-sTCP:LISTEN"],
-      {
-        stdout: "pipe",
-        stderr: "ignore",
-      },
-    );
-    const output = await new Response(proc.stdout).text();
-    const pid = parseInt(output.trim(), 10);
-    return isNaN(pid) ? null : pid;
-  } catch {
-    return null;
-  }
+  const lookup = await lookupDaemonPort();
+  return lookup.kind === "listener" ? lookup.pid : null;
 }
 
 /**
@@ -345,17 +405,44 @@ async function isKillableDaemonPid(pid: number): Promise<boolean> {
 }
 
 /**
+ * Remove the PID file unless it names a live process that may be a ccmux
+ * daemon (`isKillableDaemonPid`, fail-open on an unreadable command line).
+ * Never signals anything. For when nothing could name the listener: a dead pid
+ * is stale for certain, and so is a live one that is plainly something else
+ * (a recycled pid, which would make the next `Daemon.start` refuse).
+ */
+async function removePidFileUnlessDaemon(): Promise<void> {
+  const pidFile = getPidFilePath();
+  if (!existsSync(pidFile)) return;
+  const pid = parseInt(readFileSync(pidFile, "utf-8").trim(), 10);
+  if (
+    Number.isNaN(pid) ||
+    !isProcessAlive(pid) ||
+    !(await isKillableDaemonPid(pid))
+  ) {
+    unlinkSync(pidFile);
+  }
+}
+
+/**
  * Stop the daemon holding the port, PID-reuse-safe: only ever signals the
- * confirmed port LISTENer (via findDaemonPidByPort), never the PID-file PID,
+ * confirmed port LISTENer (via `lookupDaemonPort`), never the PID-file PID,
  * which may have been recycled by an unrelated live process. Safe to call
  * whenever /health is unreachable (the auto-start path does).
  */
 export async function stopDaemonByPort(expectedPid?: number): Promise<boolean> {
-  const pid = await findDaemonPidByPort();
-  if (!pid) {
+  const lookup = await lookupDaemonPort();
+  if (lookup.kind === "unknown") {
+    // Nothing could say who listens, so a daemon may still be serving: its
+    // pid file stays unless it is provably stale.
+    await removePidFileUnlessDaemon();
+    return false;
+  }
+  if (lookup.kind === "none") {
     removeStalePidFile(); // no listener -> no daemon; clear stale state only
     return false;
   }
+  const pid = lookup.pid;
   // A confirm-time snapshot: another CLI may have already replaced the
   // outdated listener with a current daemon. Never signal a different pid.
   if (expectedPid !== undefined && pid !== expectedPid) return false;
@@ -365,4 +452,16 @@ export async function stopDaemonByPort(expectedPid?: number): Promise<boolean> {
   const killed = await killAndVerify(pid);
   removeStalePidFile();
   return killed;
+}
+
+/**
+ * The stop half of `ccmux daemon restart`. `still-running` means a daemon
+ * still answers after the stop (its listener could not be found, or is not a
+ * ccmux daemon), so the restart must not spawn: a second daemon would only
+ * die on bind while the first keeps serving. Its pid file is left as it was,
+ * so `ccmux daemon stop` still works.
+ */
+export async function stopForRestart(): Promise<"stopped" | "still-running"> {
+  if (await stopDaemonByPort()) return "stopped";
+  return (await isDaemonRunningAsync()) ? "still-running" : "stopped";
 }

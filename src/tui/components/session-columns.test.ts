@@ -17,6 +17,13 @@ import {
   rowHasContent,
   rowHasFlexText,
   isFlexTextField,
+  columnHeaderCells,
+  hasHeaderLabels,
+  prColumnWidth,
+  sizePrColumn,
+  PR_COLUMN_MAX,
+  labelsToolCell,
+  showColumnHeader,
   SIDEBAR_DEFAULT_COLUMNS,
   trailingLabelsWidth,
   fitProjectCell,
@@ -289,7 +296,11 @@ describe("resolveColumns defaults", () => {
 describe("resolveSidebarColumns", () => {
   it("uses sidebar defaults when no user override", () => {
     const cols = resolveSidebarColumns(40);
-    expect(cols.row1.left.map((e) => e.field)).toEqual(["status", "project"]);
+    expect(cols.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+    ]);
     expect(cols.row1.right.map((e) => e.field)).toEqual(["pr", "agent"]);
     expect(cols.row1.right[0]?.mode).toBe("short");
     expect(cols.row1.right[1]?.mode).toBe("short");
@@ -753,24 +764,51 @@ describe("applyPromptDisplay", () => {
   it("inline flattens row 2 onto row 1 in the picker", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
     expect(cols.row1.left.map((e) => e.field)).toContain("summary");
-    // pr tucks onto row 1 next to the branch, not the far-right metadata.
-    expect(cols.row1.left.map((e) => e.field)).toContain("pr");
-    expect(cols.row1.right.map((e) => e.field)).not.toContain("pr");
+    // pr heads row 1's right side, where a list-sized width anchors it as a
+    // column the header can label (see `sizePrColumn`).
+    expect(cols.row1.left.map((e) => e.field)).not.toContain("pr");
+    expect(cols.row1.right[0]?.field).toBe("pr");
     expect(cols.row2.left).toEqual([]);
     expect(cols.row2.right).toEqual([]);
   });
 
-  it("inline puts pr right after project and the summary last on row 1 left", () => {
+  it("inline puts the summary last on row 1 left and pr ahead of agent", () => {
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
-    const left = cols.row1.left.map((e) => e.field);
-    expect(left).toEqual(["index", "status", "project", "pr", "summary"]);
+    expect(cols.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+      "summary",
+    ]);
+    expect(cols.row1.right.map((e) => e.field)).toEqual([
+      "pr",
+      "agent",
+      "version",
+      "pane",
+      "time",
+    ]);
+  });
+
+  it("keeps a custom row-2 trailing cell other than pr after project", () => {
+    const resolved = resolveColumns(120, {
+      row2: { left: ["summary"], right: ["cwd", "pr"] },
+    });
+    const cols = applyPromptDisplay(resolved, "inline", false);
+    expect(cols.row1.left.map((e) => e.field)).toEqual([
+      "index",
+      "status",
+      "project",
+      "cwd",
+      "summary",
+    ]);
+    expect(cols.row1.right[0]?.field).toBe("pr");
   });
 
   it("inline forces pr to short (no `PR ` prefix) even at wide widths", () => {
     // At 120 (>= lg) the row2 pr default resolves to `full`; inline collapse
-    // must still drop the prefix so the bare `#id` rides next to the branch.
+    // must still drop the prefix, which the header's `pr` label replaces.
     const cols = applyPromptDisplay(resolveColumns(120), "inline", false);
-    const pr = cols.row1.left.find((e) => e.field === "pr");
+    const pr = cols.row1.right.find((e) => e.field === "pr");
     expect(pr?.mode).toBe("short");
   });
 
@@ -846,10 +884,10 @@ describe("applyPromptDisplay", () => {
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 
-  it("inline appends pr then prompt when row 1 has no project cell", () => {
+  it("inline appends the prompt and heads the right with pr when row 1 has no project cell", () => {
     // Custom row 1 without `project`: flattenToRow1's projectIdx === -1 branch
-    // appends the row-2 metadata (pr) and then the prompt to the end of the
-    // left side, rather than inserting them after a project anchor.
+    // appends the prompt to the end of the left side, rather than inserting
+    // it after a project anchor; pr goes right either way.
     const resolved = resolveColumns(120, {
       row1: { left: ["index", "status"] },
     });
@@ -857,11 +895,10 @@ describe("applyPromptDisplay", () => {
     expect(cols.row1.left.map((e) => e.field)).toEqual([
       "index",
       "status",
-      "pr",
       "summary",
     ]);
     // pr is still forced to short even without a project anchor.
-    expect(cols.row1.left.find((e) => e.field === "pr")?.mode).toBe("short");
+    expect(cols.row1.right.find((e) => e.field === "pr")?.mode).toBe("short");
     expect(cols.row2).toEqual({ left: [], right: [] });
   });
 });
@@ -932,7 +969,11 @@ describe("rowHasFlexText", () => {
 
 describe("SIDEBAR_DEFAULT_COLUMNS", () => {
   it("has status/project on row1 left and pr/agent shorts on right", () => {
-    expect(SIDEBAR_DEFAULT_COLUMNS.row1?.left).toEqual(["status", "project"]);
+    expect(SIDEBAR_DEFAULT_COLUMNS.row1?.left).toEqual([
+      "index",
+      "status",
+      "project",
+    ]);
     expect(SIDEBAR_DEFAULT_COLUMNS.row1?.right).toEqual([
       "pr:short",
       "agent:short",
@@ -1240,14 +1281,14 @@ describe("fitProjectCell", () => {
     });
   });
 
-  it("appends the worktree marker and caps the branch with ~", () => {
+  it("appends the worktree marker and caps the branch with an ellipsis", () => {
     const out = fitProjectCell(
       { ...base, branch: "feature/really-long-branch", isWorktree: true },
       60,
       8,
     );
-    // 8-char cap: 7 chars + "~", then "+"
-    expect(out.branchLabel).toBe(":feature~+");
+    // 8-char cap: 7 chars + "…", then "+"
+    expect(out.branchLabel).toBe(":feature…+");
   });
 
   it("shrinks the prefix with an ellipsis before touching the dirname", () => {
@@ -1333,21 +1374,23 @@ describe("fitProjectCell", () => {
   it("takes the worktree name below the normal dirname floor to keep the repo", () => {
     // A plain path cell floors the dirname at 5 and would rather drop the
     // prefix; with repo identity in the prefix that trade is backwards.
+    // No branch here: with one, the branch takes the cut instead (see
+    // "never cuts both the path and the branch").
     const out = fitProjectCell(
       {
         prefix: "ccmux/",
         dirname: "parking",
-        branch: "feat/sidebar",
+        branch: null,
         isWorktree: true,
         repoPrefix: true,
       },
-      19,
+      10,
       8,
     );
     expect(out.prefix).toBe("ccmux/");
     expect(displayWidth(out.dirname)).toBeLessThan(5);
     expect(out.dirname.endsWith("…")).toBe(true);
-    expect(cellWidth(out)).toBeLessThanOrEqual(19);
+    expect(cellWidth(out)).toBeLessThanOrEqual(10);
   });
 
   it("drops a repo prefix that no longer names the repo, giving the space back", () => {
@@ -1492,6 +1535,53 @@ describe("fitProjectCell", () => {
     }
   });
 
+  it("never drops a branch it showed at a narrower cell", () => {
+    // Where the repo's reserve first cuts the branch, the path is cut too,
+    // and the one-mark rule used to settle that by dropping the branch: it
+    // showed at 14 (`workt…:fix-me+`), vanished at 15-18, and came back at 19.
+    const shapes = [
+      { prefix: "project/", dirname: "worktree-super-long", branch: "fix-me" },
+      {
+        prefix: "claude-toolkit/",
+        dirname: "worktree-super-long",
+        branch: "fix-me",
+      },
+      { prefix: "ccmux/", dirname: "parking", branch: "fix/a" },
+      // Longer than the cap, so only ever shown cut, beside a whole name.
+      {
+        prefix: "project/",
+        dirname: "worktree-super-long",
+        branch: "feat/sidebar-parking-renderer",
+      },
+    ];
+    for (const shape of shapes) {
+      let shown = false;
+      for (let budget = 8; budget <= 50; budget++) {
+        const out = fitProjectCell(
+          { ...shape, isWorktree: true, repoPrefix: true },
+          budget,
+          8,
+        );
+        if (shown)
+          expect([shape.prefix, budget, out.branchLabel]).not.toEqual([
+            shape.prefix,
+            budget,
+            "",
+          ]);
+        shown ||= out.branchLabel !== "";
+        expect(cellWidth(out)).toBeLessThanOrEqual(budget);
+      }
+      expect(shown).toBe(true);
+    }
+    expect(
+      fitProjectCell(
+        { ...shapes[0]!, isWorktree: true, repoPrefix: true },
+        15,
+        8,
+      ),
+    ).toEqual({ prefix: "", dirname: "worktr…", branchLabel: ":fix-me+" });
+  });
+
   it("makes the branch yield before the worktree row loses its identity", () => {
     // A long branch used to spell itself out to `maxBranchLen` while the repo
     // dropped and the worktree name fell to a stub, which is backwards for a
@@ -1508,8 +1598,9 @@ describe("fitProjectCell", () => {
       24,
     );
     expect(out.prefix).toBe("ccmux/");
-    expect(out.dirname.startsWith("p")).toBe(true);
-    expect(out.branchLabel.endsWith("~+")).toBe(true);
+    // One mark: the identity stays whole and only the branch is cut.
+    expect(out.dirname).toBe("parking");
+    expect(out.branchLabel).toBe(":feat/side…+");
     expect(cellWidth(out)).toBeLessThanOrEqual(25);
   });
 
@@ -1522,11 +1613,28 @@ describe("fitProjectCell", () => {
     expect(out.branchLabel).toBe("");
   });
 
-  it("shortens the branch as a last resort with a ~ marker", () => {
-    // Tight budget: even after dropping the prefix and flooring the dirname to
-    // its 5-char minimum, the branch still overflows, so step 3 truncates it
-    // with `~` rather than dropping it to "". Exercises the positive
-    // shortenBranchLabel path (avail >= 3), not the zero-budget drop.
+  it("keeps the branch whole while the path context and dirname yield", () => {
+    // The design order on a plain path cell: prefix, then dirname, then
+    // the branch as a last resort. One mark, on the dirname.
+    const out = fitProjectCell(
+      {
+        prefix: "epilande/",
+        dirname: "claude-toolkit",
+        branch: "feature-x",
+        isWorktree: false,
+      },
+      20,
+      24,
+    );
+    expect(out.prefix).toBe("");
+    expect(out.dirname).toBe("claude-to…");
+    expect(out.branchLabel).toBe(":feature-x");
+    expect(cellWidth(out)).toBeLessThanOrEqual(20);
+  });
+
+  it("never cuts both the path and the branch", () => {
+    // At 12 the dirname cannot stay whole beside any branch label, so the
+    // branch drops rather than leaving `claude…:featu…`.
     const out = fitProjectCell(
       {
         prefix: "epilande/",
@@ -1537,13 +1645,30 @@ describe("fitProjectCell", () => {
       12,
       24,
     );
-    expect(out.prefix).toBe("");
-    expect(out.dirname.endsWith("…")).toBe(true);
-    // Branch truncated with the `~` marker: neither dropped to "" nor left whole.
-    expect(out.branchLabel).toBe(":featu~");
-    expect(out.branchLabel.endsWith("~")).toBe(true);
-    // The cascade never overshoots its budget.
-    expect(cellWidth(out)).toBeLessThanOrEqual(12);
+    expect(out).toEqual({
+      prefix: "",
+      dirname: "claude-tool…",
+      branchLabel: "",
+    });
+    for (let budget = 4; budget <= 70; budget++)
+      for (const repoPrefix of [false, true]) {
+        const cell = fitProjectCell(
+          {
+            prefix: repoPrefix ? "claude-toolkit/" : "epilande/",
+            dirname: "worktree-detection",
+            branch: "fix/worktree-detection",
+            isWorktree: true,
+            repoPrefix,
+          },
+          budget,
+          24,
+        );
+        const text = cell.prefix + cell.dirname + cell.branchLabel;
+        expect([budget, (text.match(/…|~/g) ?? []).length]).toEqual([
+          budget,
+          Math.min(1, (text.match(/…|~/g) ?? []).length),
+        ]);
+      }
   });
 });
 
@@ -1607,13 +1732,13 @@ describe("fitProjectCell with wide glyphs", () => {
   });
 
   it("caps an emoji branch at maxBranchLen columns", () => {
-    // Six rockets are 12 columns; the 8-column cap keeps three plus the `~`.
+    // Six rockets are 12 columns; the 8-column cap keeps three plus the `…`.
     const out = fitProjectCell(
       { prefix: "", dirname: "app", branch: "🚀🚀🚀🚀🚀🚀", isWorktree: false },
       40,
       8,
     );
-    expect(out.branchLabel).toBe(":🚀🚀🚀~");
+    expect(out.branchLabel).toBe(":🚀🚀🚀…");
     expect(displayWidth(out.branchLabel)).toBeLessThanOrEqual(8 + 1);
   });
 
@@ -1669,7 +1794,7 @@ describe("fitProjectCell with wide glyphs", () => {
       12,
       24,
     );
-    expect(out.branchLabel).toBe(":🚀🚀🚀~+");
+    expect(out.branchLabel).toBe(":🚀🚀🚀…+");
     expect(cellWidth(out)).toBeLessThanOrEqual(12);
   });
 
@@ -1872,5 +1997,246 @@ describe("stripPrompt with the summary cell", () => {
       "project",
     ]);
     expect(stripped.row2).toEqual({ left: [], right: [] });
+  });
+});
+
+describe("columnHeaderCells", () => {
+  const inline = (width: number, user?: Parameters<typeof resolveColumns>[1]) =>
+    applyPromptDisplay(resolveColumns(width, user), "inline", false).row1;
+
+  it("labels the default picker layout's anchored cells at a wide width", () => {
+    const cells = columnHeaderCells(inline(160));
+    expect(cells.left.map((c) => [c.field, c.text, c.width])).toEqual([
+      ["index", "", 1],
+      ["status", "status", 9],
+      ["project", "project", 0],
+    ]);
+    expect(cells.right.map((c) => [c.field, c.text, c.width])).toEqual([
+      ["agent", "agent", 8],
+      ["version", "version", 10],
+      ["pane", "pane", 12],
+      ["time", "age", 4],
+    ]);
+  });
+
+  it("stops the left side at the first intrinsic-width cell", () => {
+    // Inline mode puts the summary after `project`; it has no fixed start,
+    // so it gets no label.
+    const fields = columnHeaderCells(inline(160)).left.map((c) => c.field);
+    expect(fields).not.toContain("summary");
+  });
+
+  it("labels the pr column once the list has sized it", () => {
+    // Unsized, the inline `pr` is intrinsic-width and ends the right walk.
+    expect(columnHeaderCells(inline(160)).right.map((c) => c.field)).toEqual([
+      "agent",
+      "version",
+      "pane",
+      "time",
+    ]);
+    const sized = sizePrColumn(
+      applyPromptDisplay(resolveColumns(160), "inline", false),
+      4,
+    );
+    expect(
+      columnHeaderCells(sized.row1).right.map((c) => [
+        c.field,
+        c.text,
+        c.width,
+      ]),
+    ).toEqual([
+      ["pr", "pr", 4],
+      ["agent", "agent", 8],
+      ["version", "version", 10],
+      ["pane", "pane", 12],
+      ["time", "age", 4],
+    ]);
+  });
+
+  it("lets a label too wide for its cell borrow the next cell's unused width", () => {
+    // At `sm` the agent cell is the 2-column short code. "agent" takes five
+    // header columns starting on the agent column, and the pane cell (12
+    // wide, its label 4) gives the same three up, so every label after it
+    // stays where it was.
+    const sm = columnHeaderCells(inline(60));
+    const agent = sm.right.find((c) => c.field === "agent");
+    expect(agent).toEqual({ field: "agent", text: "agent", width: 2, span: 5 });
+    const pane = sm.right.find((c) => c.field === "pane");
+    expect(pane).toEqual({ field: "pane", text: "pane", width: 12, span: 9 });
+  });
+
+  it("blanks a label that would not fit and has no neighbor to borrow from", () => {
+    // Last on the right: nothing after it to lend columns.
+    const last = columnHeaderCells(
+      inline(60, { row1: { right: [{ field: "agent", mode: "short" }] } }),
+    );
+    expect(last.right).toEqual([{ field: "agent", text: "", width: 2 }]);
+    // A neighbor whose own label fills it cannot lend either.
+    const tight = columnHeaderCells(
+      inline(60, {
+        row1: { right: [{ field: "agent", mode: "short" }, "time"] },
+      }),
+    );
+    expect(tight.right[0]).toEqual({ field: "agent", text: "", width: 2 });
+  });
+
+  it("fits left-side labels to their own cells", () => {
+    // The short status cell is exactly 6 wide, which "status" fills.
+    const sm = columnHeaderCells(inline(60));
+    const status = sm.left.find((c) => c.field === "status");
+    expect(status).toEqual({ field: "status", text: "status", width: 6 });
+    // Icon-only status at `xs` is one column: blank, since the cell after
+    // it is the flexible project, whose label has a fixed start to keep.
+    const xs = columnHeaderCells(inline(40));
+    expect(xs.left.find((c) => c.field === "status")?.text).toBe("");
+  });
+
+  it("sizes the status label to the cell the icon style draws", () => {
+    // An emoji glyph is two columns, so the status cell is one wider than
+    // under the default dot style, and the label has to follow it.
+    const status = (style?: "dot" | "emoji") =>
+      columnHeaderCells(inline(160), style).left.find(
+        (c) => c.field === "status",
+      );
+    expect(status()?.width).toBe(9);
+    expect(status("dot")?.width).toBe(9);
+    expect(status("emoji")?.width).toBe(10);
+  });
+
+  it("labels only the fixed-width suffix of a custom right side", () => {
+    const row = inline(160, { row1: { right: ["pr", "time"] } });
+    const cells = columnHeaderCells(row);
+    expect(cells.right.map((c) => c.field)).toEqual(["time"]);
+  });
+
+  it("labels nothing on the right when its last cell is intrinsic-width", () => {
+    const row = inline(160, {
+      row1: { right: ["agent", "prompt"] },
+      row2: { left: [] },
+    });
+    expect(columnHeaderCells(row).right).toEqual([]);
+  });
+
+  it("follows a reordered right side", () => {
+    const row = inline(160, { row1: { right: ["time", "agent"] } });
+    expect(columnHeaderCells(row).right.map((c) => c.text)).toEqual([
+      "age",
+      "agent",
+    ]);
+  });
+
+  it("labels a flexible first cell at its fixed start", () => {
+    const row = inline(160, { row1: { left: ["summary"] } });
+    expect(columnHeaderCells(row).left).toEqual([
+      { field: "summary", text: "summary", width: 0 },
+    ]);
+  });
+
+  it("reports whether any label survived", () => {
+    expect(hasHeaderLabels(columnHeaderCells(inline(160)))).toBe(true);
+    const bare = inline(160, {
+      row1: { left: ["index"], right: ["prompt"] },
+      row2: { left: [], right: [] },
+    });
+    expect(hasHeaderLabels(columnHeaderCells(bare))).toBe(false);
+  });
+});
+
+describe("showColumnHeader", () => {
+  it("auto draws it in every grouping, as always does", () => {
+    expect(showColumnHeader("auto")).toBe(true);
+    expect(showColumnHeader(undefined)).toBe(true);
+    expect(showColumnHeader("always")).toBe(true);
+  });
+
+  it("never turns it off", () => {
+    expect(showColumnHeader("never")).toBe(false);
+  });
+});
+
+describe("labelsToolCell", () => {
+  const row1 = sizePrColumn(
+    applyPromptDisplay(resolveColumns(160), "inline", false),
+    4,
+  ).row1;
+  const waiting = mockEnrichedSession({
+    status: "waiting",
+    attentionType: "permission",
+    pendingTool: "Bash",
+  });
+  const idle = mockEnrichedSession({ status: "idle" });
+
+  it("labels the tool cell while some row draws one", () => {
+    expect(labelsToolCell(row1, columnHeaderCells(row1), [idle, waiting])).toBe(
+      true,
+    );
+    expect(labelsToolCell(row1, columnHeaderCells(row1), [idle])).toBe(false);
+  });
+
+  it("leaves it unlabeled when a drifting right-side cell unanchors it", () => {
+    // The unsized `pr` is intrinsic-width, so the tool cell's end drifts.
+    const drifting = applyPromptDisplay(
+      resolveColumns(160),
+      "inline",
+      false,
+    ).row1;
+    expect(
+      labelsToolCell(drifting, columnHeaderCells(drifting), [waiting]),
+    ).toBe(false);
+  });
+});
+
+describe("sizePrColumn", () => {
+  const inline = () => applyPromptDisplay(resolveColumns(160), "inline", false);
+  const withPRs = (...ids: string[]) =>
+    mockEnrichedSession({
+      branchPRs: ids.map((id) => ({
+        id,
+        href: `https://github.com/o/r/pull/${id}`,
+      })),
+    });
+
+  it("sizes the column to the widest badge in the list", () => {
+    const sessions = [withPRs("7"), withPRs("206"), withPRs()];
+    expect(prColumnWidth(sessions, "short")).toBe(4);
+    const sized = sizePrColumn(inline(), 4);
+    expect(sized.row1.right[0]).toEqual({
+      field: "pr",
+      mode: "short",
+      width: 4,
+    });
+    expect(entryRightWidth(sized.row1.right[0]!)).toBe(4);
+  });
+
+  it("counts the stale marker and caps a long run of PRs", () => {
+    expect(
+      prColumnWidth(
+        [
+          mockEnrichedSession({
+            branchPRs: [{ id: "7", href: "h", stale: true }],
+          }),
+        ],
+        "short",
+      ),
+    ).toBe(4);
+    expect(
+      prColumnWidth([withPRs("1001", "1002", "1003", "1004")], "short"),
+    ).toBe(PR_COLUMN_MAX);
+  });
+
+  it("drops the cell when no row has a PR, rather than reserving a blank column", () => {
+    expect(prColumnWidth([withPRs(), withPRs()], "short")).toBe(0);
+    const sized = sizePrColumn(inline(), 0);
+    expect(sized.row1.right.map((e) => e.field)).toEqual([
+      "agent",
+      "version",
+      "pane",
+      "time",
+    ]);
+  });
+
+  it("leaves a layout with no right-side pr alone", () => {
+    const resolved = resolveColumns(160);
+    expect(sizePrColumn(resolved, 4)).toBe(resolved);
   });
 });
