@@ -50,11 +50,13 @@ describe("update-homebrew-formula.sh", () => {
     );
   });
 
-  it("switches back from the rc with brew alone", () => {
+  it("switches back from the rc with brew alone, bar Linux without lsof", () => {
     // The daemon left running is replaced by the CLI that remains (it
     // publishes no build once its binary is uninstalled), and hooks are
     // identical across the two lines, so neither `ccmux daemon stop` nor
-    // `ccmux setup` belongs in the steps.
+    // `ccmux setup` belongs in the steps. The exception is Linux without
+    // lsof: a 1.4 CLI finds the daemon's process only through lsof, so it
+    // cannot replace it there, and `daemon stop` goes by the pid file.
     const caveats = rcFormula().match(/def caveats\n([\s\S]*?)\n  end\n/)?.[1];
     expect(caveats).toBe(
       [
@@ -65,6 +67,8 @@ describe("update-homebrew-formula.sh", () => {
         "",
         "      If ccmux is already installed but unlinked, use",
         '      "brew link ccmux" in place of the install step.',
+        "",
+        '      On Linux without lsof, run "ccmux daemon stop" before switching back.',
         "    EOS",
       ].join("\n"),
     );
