@@ -690,6 +690,9 @@ export class DaemonServer {
    * client can say "unreachable at <path>" instead of "no sessions".
    */
   private socketError: TmuxSocketError | null = null;
+  /** The `/server-info` probe in flight, shared by every caller that arrives
+   *  while it runs (see {@link getServerSocketPath}). */
+  private socketProbe: Promise<string | null> | null = null;
   private static readonly MAX_SIDEBAR_SENDERS = 128;
   private lastSidebarState: {
     selectedSessionId: string | null;
@@ -1712,9 +1715,25 @@ export class DaemonServer {
    * ({@link notePaneScanFailure}): a tmux restarted onto a different socket
    * would otherwise leave `/server-info` naming the dead one forever, which
    * flips every client guard into a false "different server" refusal.
+   *
+   * Concurrent callers share one probe. A failed probe can be slow (it waits on
+   * lsof), and two overlapping ones would race: the older failure could land
+   * after a newer success and put its error and pid back, which the cached
+   * socket would then keep serving to every later re-check.
    */
-  private async getServerSocketPath(): Promise<string | null> {
-    if (this.serverSocketPath) return this.serverSocketPath;
+  private getServerSocketPath(): Promise<string | null> {
+    if (this.serverSocketPath) return Promise.resolve(this.serverSocketPath);
+    if (!this.socketProbe) {
+      this.socketProbe = this.probeServerSocket().finally(() => {
+        this.socketProbe = null;
+      });
+    }
+    return this.socketProbe;
+  }
+
+  /** One `display-message` probe, recording its outcome. Only ever run through
+   *  {@link getServerSocketPath}, which keeps it to one at a time. */
+  private async probeServerSocket(): Promise<string | null> {
     try {
       const proc = Bun.spawn(
         tmuxArgv("display-message", "-p", "#{socket_path}"),

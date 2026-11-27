@@ -3539,6 +3539,75 @@ describe("getServerSocketPath and /server-info", () => {
     }
   });
 
+  it("never lets a slow failed probe overwrite a newer success", async () => {
+    // Probe A fails on a missing socket and then waits on lsof. A second
+    // /server-info arrives meanwhile. Were it to probe on its own, its success
+    // would cache the socket, and A's late lsof answer would then put the
+    // error and pid back for every later (cached) re-check to keep serving.
+    const { internals } = createServer();
+    const original = Bun.spawn;
+    let releaseLsof!: () => void;
+    const lsofGate = new Promise<void>((resolve) => (releaseLsof = resolve));
+    const outcomes: Array<{
+      code: number;
+      out: string;
+      err?: string;
+      gate?: Promise<void>;
+    }> = [
+      {
+        code: 1,
+        out: "",
+        err: "error connecting to /tmp/tmux-501/work (No such file or directory)\n",
+      },
+      { code: 0, out: "p4242\nf5\nn/tmp/tmux-501/work\n", gate: lsofGate },
+      { code: 0, out: "/tmp/tmux-501/work\n" },
+    ];
+    let calls = 0;
+    Bun.spawn = ((..._args: unknown[]) => {
+      calls++;
+      const next = outcomes.shift() ?? { code: 0, out: "" };
+      const exited = (next.gate ?? Promise.resolve()).then(() => next.code);
+      return {
+        exited,
+        stdout: new Blob([next.out]).stream(),
+        stderr: new Blob([next.err ?? ""]).stream(),
+      };
+    }) as unknown as typeof Bun.spawn;
+    type Info = {
+      socketPath: string | null;
+      socketError: { orphanedServerPid?: number } | null;
+    };
+    const serverInfo = async () =>
+      (await (
+        await internals.handleRequest(
+          new Request("http://localhost/server-info"),
+        )
+      ).json()) as Info;
+    try {
+      const first = serverInfo();
+      // Wait until A is parked on lsof (its second spawn).
+      for (let i = 0; i < 100 && calls < 2; i++) await Bun.sleep(1);
+      expect(calls).toBe(2);
+      const second = serverInfo();
+      await Bun.sleep(5);
+      releaseLsof();
+      const answers = await Promise.all([first, second]);
+      // The next re-check finds no stale error beside a live socket: it
+      // probes afresh, and its success clears the error.
+      const later = await serverInfo();
+      expect(later.socketPath).toBe("/tmp/tmux-501/work");
+      expect(later.socketError).toBe(null);
+      // Both early callers got the one probe's answer, the orphaned server.
+      for (const info of answers) {
+        expect(info.socketPath).toBe(null);
+        expect(info.socketError?.orphanedServerPid).toBe(4242);
+      }
+      expect(calls).toBe(3);
+    } finally {
+      Bun.spawn = original;
+    }
+  });
+
   it("omits orphanedServerPid when nothing still holds the missing socket", async () => {
     const { internals } = createServer();
     const { restore } = withSpawnQueue([
