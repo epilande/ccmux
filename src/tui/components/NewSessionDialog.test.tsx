@@ -934,6 +934,40 @@ describe("NewSessionDialog", () => {
     expect(frame).toContain("~/code/ccmux");
   });
 
+  // A long Directory keeps its start and its final folder, cutting the
+  // folders between: the end is what tells two checkouts apart.
+  for (const [width, expected] of [
+    // The dialog caps at 65 columns, so 70 and 100 give the row the same 48.
+    [70, "~/code/…/customer-analytics-dashboard-staging"],
+    [100, "~/code/…/customer-analytics-dashboard-staging"],
+    // Only the start's first folder fits beside the final one.
+    [61, "~/…/customer-analytics-dashboard-staging"],
+  ] as const)
+    it(`shortens a long directory from the middle at ${width} columns`, async () => {
+      const home = process.env.HOME ?? "/Users/dev";
+      const frame = await renderDialog({
+        draft: draft({
+          cwd: `${home}/code/worktrees/customer-analytics-dashboard-staging`,
+        }),
+        width,
+      });
+      const row = frame.split("\n").find((l) => l.includes("Directory"))!;
+      expect(row).toContain(expected);
+      expect(row).not.toContain("dashboard-s…");
+    });
+
+  it("still keeps both ends when not even one folder fits beside the last", async () => {
+    const home = process.env.HOME ?? "/Users/dev";
+    const frame = await renderDialog({
+      draft: draft({
+        cwd: `${home}/code/worktrees/customer-analytics-dashboard-staging`,
+      }),
+      width: 50,
+    });
+    const row = frame.split("\n").find((l) => l.includes("Directory"))!;
+    expect(row).toMatch(/~\/code\S*…\S*-staging/);
+  });
+
   it("windows the dropdown against the screen and keeps the highlight visible", async () => {
     const many = Array.from({ length: 9 }, (_, i) => agent(`agent${i}`));
     const frame = await renderDialog({

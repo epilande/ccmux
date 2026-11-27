@@ -131,6 +131,35 @@ export function truncateMiddle(text: string, maxLen: number): string {
 }
 
 /**
+ * Shorten a path to `maxLen` columns from the MIDDLE, by whole folders: its
+ * start and its final folder stay, and the folders between give way to `…`
+ * (`~/code/…/customer-analytics-dashboard-staging`). Leading folders are
+ * kept while they fit, so a little more room keeps a little more of the
+ * start. Where even `start/…/final` does not fit, it falls back to
+ * {@link truncateMiddle}, which still keeps both ends' characters.
+ *
+ * Clipping a path from the right loses exactly the part that tells two
+ * checkouts apart, the final folder; its start is usually shared.
+ */
+export function truncatePath(path: string, maxLen: number): string {
+  if (displayWidth(path) <= maxLen) return path;
+  const parts = path.split("/");
+  const last = parts.pop() ?? "";
+  // Nothing between a start and the final folder to give way.
+  if (parts.length < 2 || !last) return truncateMiddle(path, maxLen);
+  const shown = (head: string[]) => `${head.join("/")}/…/${last}`;
+  let head = [parts[0]!];
+  if (displayWidth(shown(head)) > maxLen) return truncateMiddle(path, maxLen);
+  // Every folder but one at most: the path itself already did not fit.
+  for (let i = 1; i < parts.length - 1; i++) {
+    const wider = [...head, parts[i]!];
+    if (displayWidth(shown(wider)) > maxLen) break;
+    head = wider;
+  }
+  return shown(head);
+}
+
+/**
  * Window single-span highlight markup (one `<b>…</b>`, as `wrapFirstMatch`
  * emits) to `maxLen` VISIBLE columns (tags excluded from the count) so a match
  * deep in a long prompt still renders within a height-1 row instead of

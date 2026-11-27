@@ -1,4 +1,4 @@
-import { For, Show, type Component } from "solid-js";
+import { createMemo, For, Show, type Component } from "solid-js";
 import type { RepoFacts } from "../../daemon/repo-facts";
 import { VIEWS, type View } from "../actions";
 import { theme } from "../theme";
@@ -33,13 +33,37 @@ export interface RightSegment {
   fg: string;
 }
 
-/** Between two signals, and between the last signal and `scope:`. */
+/** Between two signals, and between the last signal and the scope. */
 const SEP = " · ";
-/** The scope's label, never truncated: only the name after it is. */
-const SCOPE_PREFIX = "scope: ";
+/** The scope's label, longest first: a tight strip shortens it, and only
+ *  then drops it, before the name after it is ever cut. */
+const SCOPE_PREFIXES = ["scope: ", "in ", ""] as const;
 /** Columns the right end spends around its content: the space that ends the
- *  rule's fill, and the ` ──` that closes the line. */
-const RIGHT_DRESSING = 4;
+ *  rule's fill. Nothing follows the scope's name: the strip ends on it, at
+ *  the last column, the way it starts on "Sessions" at the first. */
+const RIGHT_DRESSING = 1;
+/** Columns every tab spends besides its name and count: the `── ` stub and
+ *  the space after it. The first tab has no stub (see `tabDressing`). */
+const TAB_DRESSING = 4;
+/** The rule stub drawn before every tab but the first. */
+const TAB_STUB = 3;
+
+/** What `view`'s tab spends besides its name and count. The first tab starts
+ *  flush at column 0, so it pays only for the space after it. */
+function tabDressing(view: View): number {
+  return view === VIEWS[0] ? TAB_DRESSING - TAB_STUB : TAB_DRESSING;
+}
+/** Rule cells kept between the tabs and the right end, so the two never
+ *  run together as `Start  in api-server`. */
+const MIN_FILL = 1;
+
+/** What every tab's name shrinks to on a strip too narrow for the scope's
+ *  name. Two letters so Sessions and Start stay apart. */
+const SHORT_VIEW_NAMES: Record<View, string> = {
+  sessions: "Se",
+  worktrees: "Wt",
+  start: "St",
+};
 
 /** Not `⚠` (what the sidebar's Header uses): it carries the Emoji property,
  *  so OpenTUI draws it two cells wide while tmux gives it one, and a strip
@@ -47,22 +71,51 @@ const RIGHT_DRESSING = 4;
  *  after a search narrowed the count). `▲` is one cell everywhere. */
 const WARN = "▲";
 
+/** One tab as fitted: the name it shows and its count (`""` when dropped). */
+export interface FittedTab {
+  name: string;
+  count: string;
+}
+
+/** The whole strip as fitted to its width. */
+export interface StripFit {
+  tabs: Record<View, FittedTab>;
+  signals: RightSegment[];
+  /** `scope: `, `in `, or `""`. */
+  prefix: string;
+  scope: string;
+}
+
 /**
- * The strip's right end: status signals, then the scope's name, fitted into
- * `budget` columns (the scope's `scope: ` prefix is charged here too, but
- * never truncated). Priority when space runs out, cheapest first:
- * 1. the scope's name truncates, then drops with its prefix (a name budget
- *    under two columns would draw a lone `…`, which says nothing);
- * 2. `N invoking` drops, then `active`;
- * 3. the connection word shrinks to `●`, then the degraded word to `▲`.
- * The glyphs themselves are never dropped: a broken connection or a
- * degraded daemon outranks anything else the strip could say.
+ * Fit the strip into `width` columns (inside its padding), giving way from
+ * the least important part up so the scope's NAME stays whole: it says which
+ * repo every list on screen is narrowed to, and `scope: d…` says nothing.
+ *
+ * In order, until the line fits:
+ * 1. `N invoking` drops, then `active`, then the connection and degraded
+ *    words shrink to `●` and `▲`. The glyphs are never dropped: a broken
+ *    connection or a degraded daemon outranks anything else here.
+ * 2. `scope: ` shortens to `in `: a word is cheaper to lose than the
+ *    counts, which are data.
+ * 3. Every tab drops its count.
+ * 4. Every tab shortens its name to two letters.
+ * 5. The prefix drops.
+ * 6. Only then, on a strip too narrow for the name even so, the name is
+ *    cut (and below two columns, dropped).
+ *
+ * The tab steps apply to all three tabs together, and the fit is not told
+ * which view is active: the active tab differs only in color and weight, so
+ * switching views never moves a label. (A `W`/`N` jump can still change the
+ * current view's count TEXT, which is data, not layout.)
  */
-export function rightSegments(
-  status: StripStatus,
-  scopeName: string,
-  budget: number,
-): { signals: RightSegment[]; scope: string } {
+export function fitStrip(input: {
+  /** Each tab's count as drawn after its name (` (6)`), or `""`. */
+  counts: Record<View, string>;
+  status: StripStatus;
+  scopeName: string;
+  width: number;
+}): StripFit {
+  const { status } = input;
   const connection =
     status.connectionState && status.connectionState !== "connected"
       ? status.connectionState
@@ -70,7 +123,7 @@ export function rightSegments(
   // Each signal lists its forms from fullest to smallest; "" means dropped.
   type Signal = { forms: string[]; fg: string; shrink: number };
   const signals: Signal[] = [];
-  // `shrink` orders rule 2 before rule 3 (lower shrinks first).
+  // `shrink` orders the signal steps (lower shrinks first).
   if (connection)
     signals.push({
       forms: [`● ${connection}`, "●"],
@@ -90,55 +143,93 @@ export function rightSegments(
       shrink: 0,
     });
   if (status.hideIdle)
-    signals.push({ forms: ["active", ""], fg: theme.overlay, shrink: 1 });
+    signals.push({ forms: ["active", ""], fg: theme.subtext, shrink: 1 });
   const level = signals.map(() => 0);
-  const steps = signals
-    .map((s, i) => ({ i, shrink: s.shrink }))
-    .sort((x, y) => x.shrink - y.shrink)
-    .map((x) => x.i);
-  const shown = () =>
+  const shown = (): RightSegment[] =>
     signals
       .map((s, i) => ({ text: s.forms[level[i]!]!, fg: s.fg }))
       .filter((s) => s.text);
-  const width = (segs: RightSegment[]) =>
-    segs.reduce((n, s) => n + displayWidth(s.text), 0) +
-    Math.max(0, segs.length - 1) * SEP.length;
-  for (const i of steps) {
-    if (width(shown()) <= budget) break;
-    level[i] = signals[i]!.forms.length - 1;
-  }
-  const segs = shown();
-  // Signals shrink only when they overflow with no scope at all, so whatever
-  // is left over is room no higher-ranked signal could use: the scope takes it.
-  const room =
-    budget - width(segs) - (segs.length ? SEP.length : 0) - SCOPE_PREFIX.length;
-  return {
-    signals: segs,
-    scope: room < 2 ? "" : truncateText(scopeName, room),
+
+  const tabs = Object.fromEntries(
+    VIEWS.map((v) => [v, { name: VIEW_NAMES[v], count: input.counts[v] }]),
+  ) as Record<View, FittedTab>;
+  let prefix: string = SCOPE_PREFIXES[0];
+  let scope = input.scopeName;
+
+  const used = () => {
+    const tabCols = VIEWS.reduce(
+      (n, v) =>
+        n +
+        tabDressing(v) +
+        displayWidth(tabs[v].name) +
+        displayWidth(tabs[v].count),
+      0,
+    );
+    const parts = [
+      ...shown().map((s) => s.text),
+      ...(scope ? [prefix + scope] : []),
+    ];
+    const rightCols = parts.length
+      ? parts.reduce((n, p) => n + displayWidth(p), 0) +
+        (parts.length - 1) * SEP.length +
+        RIGHT_DRESSING +
+        MIN_FILL
+      : 0;
+    return tabCols + rightCols;
   };
+  const fits = () => used() <= input.width;
+
+  const steps: (() => void)[] = [
+    ...signals
+      .map((s, i) => ({ i, shrink: s.shrink }))
+      .sort((x, y) => x.shrink - y.shrink)
+      .map(
+        ({ i }) =>
+          () =>
+            (level[i] = signals[i]!.forms.length - 1),
+      ),
+    () => (prefix = SCOPE_PREFIXES[1]),
+    () => VIEWS.forEach((v) => (tabs[v].count = "")),
+    () => VIEWS.forEach((v) => (tabs[v].name = SHORT_VIEW_NAMES[v])),
+    () => (prefix = SCOPE_PREFIXES[2]),
+  ];
+  for (const step of steps) {
+    if (fits()) break;
+    step();
+  }
+  if (!fits()) {
+    // The last resort: what the name has left once everything else is at
+    // its smallest. Below two columns it would be a lone `…`.
+    const room = input.width - (used() - displayWidth(scope));
+    scope = room < 2 ? "" : truncateText(scope, room);
+  }
+  return { tabs, signals: shown(), prefix: scope ? prefix : "", scope };
 }
 
 /**
- * The view strip is a titled RULE, not a row of chips: `━━ Sessions ·2 ──
- * Worktrees ── Start ───────── scope: all repos ──`. Drawn that way so the
+ * The view strip is a titled RULE, not a row of chips: `Sessions (2) ──
+ * Worktrees ── Start ───────── scope: all repos`. Drawn that way so the
  * line above the list reads as chrome at a glance. A row of names on a plain
  * background looked like one more data row, and the column-header line that
- * follows it (see `SessionList`) then had nothing to set it apart from.
+ * follows it (see `SessionList`) then had nothing to set it apart from. The
+ * first tab starts flush at column 0 with no rule before it, and the line
+ * ends on the scope's name at the last column with none after it.
  *
- * Three cues mark the active view, and the head line below claims none of
- * them: its rule stub is the accent bar (`━━` in `theme.blue` where the
- * others are `──` in `theme.border`), its name is bold, and its name is the
- * text color where the others are subtext. The count rides after the name in
- * the overlay color (`·2`, or `·2/8` while a scope, `f` or a search hides
- * rows) so the name reads alone. Each count is taken in its OWN view's scope:
+ * The active view is marked by its label alone, the lazygit way: its name
+ * and count are bold and in the accent color (`theme.blue`), where the
+ * others are plain subtext. The rules between tabs are all the same
+ * `theme.border` `──`, so switching views changes colors and weight but
+ * never a column. The count rides after the name (`(2)`, or `(2/8)` while a
+ * scope, `f` or a search hides rows). Each count is taken in its OWN view's scope:
  * a `W`/`N` jump narrows only the view it opened, so the other tabs count in
  * the base scope they will show when reached. The scope carries a `scope:`
  * prefix because bare at the right edge it read as a column label over the
- * last column; it names the current view's scope.
+ * last column; it names the current view's scope, and a narrow strip gives
+ * up everything else before it cuts that name (see `fitStrip`).
  *
  * Board-wide signals (see `StripStatus`) sit inside the rule's right end,
  * ahead of `scope:` and joined to it by the same ` · `: `──── ● reconnecting
- * · 1 invoking · scope: all repos ──`. A healthy board draws none of them,
+ * · 1 invoking · scope: all repos`. A healthy board draws none of them,
  * so its strip is exactly the plain titled rule.
  */
 export const ViewStrip: Component<
@@ -152,7 +243,7 @@ export const ViewStrip: Component<
     /** Sessions in the Sessions view's own scope and filters. */
     sessions: number;
     /** Sessions before a scope, `f` or a search hid any; shown as
-     *  `·n/total`. */
+     *  `(n/total)`. */
     total?: number;
     facts: RepoFacts[];
     onView: (view: View) => void;
@@ -207,22 +298,35 @@ export const ViewStrip: Component<
   const countText = (view: View) =>
     count(view) === undefined
       ? ""
-      : ` ·${count(view)}${stale(view) ? "~" : ""}`;
-  const tabWidth = (view: View) =>
-    displayWidth(VIEW_NAMES[view]) + displayWidth(countText(view));
-  // Every tab is `stub(3) + name + count + space(1)`.
-  const tabsWidth = () => VIEWS.reduce((n, v) => n + 4 + tabWidth(v), 0);
-  const right = () =>
-    rightSegments(
-      props,
-      props.scope?.split("/").pop() ?? "all repos",
-      dims().width - 2 - tabsWidth() - RIGHT_DRESSING,
+      : ` (${count(view)}${stale(view) ? "~" : ""})`;
+  const fit = createMemo(() =>
+    fitStrip({
+      counts: {
+        sessions: countText("sessions"),
+        worktrees: countText("worktrees"),
+        start: countText("start"),
+      },
+      status: props,
+      scopeName: props.scope?.split("/").pop() ?? "all repos",
+      // No padding either side: the first tab starts at column 0, and the
+      // scope's name ends on the last.
+      width: dims().width,
+    }),
+  );
+  const tabsWidth = () =>
+    VIEWS.reduce(
+      (n, v) =>
+        n +
+        tabDressing(v) +
+        displayWidth(fit().tabs[v].name) +
+        displayWidth(fit().tabs[v].count),
+      0,
     );
   const rightWidth = () => {
-    const { signals, scope } = right();
+    const { signals, prefix, scope } = fit();
     const parts = [
       ...signals.map((s) => s.text),
-      ...(scope ? [SCOPE_PREFIX + scope] : []),
+      ...(scope ? [prefix + scope] : []),
     ];
     return parts.length
       ? parts.reduce((n, p) => n + displayWidth(p), 0) +
@@ -232,29 +336,28 @@ export const ViewStrip: Component<
   };
   /** The right end as text nodes, each a run of colored spans. */
   const rightNodes = (): RightSegment[][] => {
-    const { signals, scope } = right();
+    const { signals, prefix, scope } = fit();
     const nodes: RightSegment[][] = signals.map((seg) => [seg]);
     if (scope)
       nodes.push([
-        { text: SCOPE_PREFIX, fg: theme.overlay },
+        ...(prefix ? [{ text: prefix, fg: theme.subtext }] : []),
         { text: scope, fg: props.scope ? theme.blue : theme.subtext },
       ]);
-    nodes.forEach((node, i) =>
-      node.push(
-        i < nodes.length - 1
-          ? { text: SEP, fg: theme.overlay }
-          : { text: " ──", fg: theme.border },
-      ),
-    );
+    nodes.forEach((node, i) => {
+      if (i < nodes.length - 1) node.push({ text: SEP, fg: theme.overlay });
+    });
     return nodes;
   };
-  const fill = () => Math.max(0, dims().width - 2 - tabsWidth() - rightWidth());
+  /** A tab's name and its count, as fitted. */
+  const tabLabel = (view: View) =>
+    fit().tabs[view].name + fit().tabs[view].count;
+  const fill = () => Math.max(0, dims().width - tabsWidth() - rightWidth());
   return (
     <box
       height={1}
       width="100%"
-      paddingLeft={1}
-      paddingRight={1}
+      paddingLeft={0}
+      paddingRight={0}
       flexDirection="row"
     >
       <For each={VIEWS}>
@@ -264,18 +367,19 @@ export const ViewStrip: Component<
             flexDirection="row"
             onMouseDown={() => props.onView(view)}
           >
-            <Text fg={view === props.view ? theme.blue : theme.border}>
-              {view === props.view ? "━━ " : "── "}
-            </Text>
-            <Text fg={view === props.view ? theme.text : theme.subtext}>
-              <Show when={view === props.view} fallback={VIEW_NAMES[view]}>
-                <b>{VIEW_NAMES[view]}</b>
+            {/* The rules BETWEEN tabs, all alike: the first tab has none
+                before it, and no tab gets an accent of its own. */}
+            <Show when={view !== VIEWS[0]}>
+              <Text fg={theme.border}>{"── "}</Text>
+            </Show>
+            {/* The label, count included, is one run: accent and bold while
+                active, subtext otherwise. Neither changes its width, so
+                switching views never moves the strip. */}
+            <Text fg={view === props.view ? theme.blue : theme.subtext}>
+              <Show when={view === props.view} fallback={tabLabel(view)}>
+                <b>{tabLabel(view)}</b>
               </Show>
             </Text>
-            {/* Guarded: an empty text node still paints one column. */}
-            <Show when={countText(view)}>
-              <Text fg={theme.overlay}>{countText(view)}</Text>
-            </Show>
             <Text> </Text>
           </box>
         )}
@@ -285,8 +389,8 @@ export const ViewStrip: Component<
       <Text fg={theme.border}>
         {"─".repeat(fill()) + (rightWidth() ? " " : "")}
       </Text>
-      {/* One text node per item, each carrying the separator or closing
-          rule that FOLLOWS it: dynamic children inside a single text node
+      {/* One text node per item, each carrying the separator that FOLLOWS
+          it (the last carries none): dynamic children inside a single text node
           are appended rather than inserted in place (a signal arriving after
           the scope drew behind it), and a node's leading space is dropped. */}
       <For each={rightNodes()}>

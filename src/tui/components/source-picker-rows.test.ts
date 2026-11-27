@@ -8,6 +8,7 @@ import {
   buildSourceRepos,
   emptyStateText,
   filterRepos,
+  fitSourceRow,
   hasRows,
   isIssueRowKey,
   issueRowKey,
@@ -15,7 +16,9 @@ import {
   pickerRows,
   rowHaystack,
   sectionText,
+  sourceCellWidths,
   sourceDetailPhrases,
+  sourceRowCells,
   sourceRowDim,
   sourceRowLabel,
   sourceRowMarker,
@@ -677,5 +680,93 @@ describe("the empty state", () => {
       home: null,
     });
     expect(emptyStateText(repos, "").text).toBe("No repository here");
+  });
+});
+
+describe("Start row cells", () => {
+  const rowsOf = (input: Parameters<typeof build>[0]) =>
+    pickerRows(build(input));
+
+  it("puts CI, review and age in fixed cells and the rest in the middle", () => {
+    const [row] = rowsOf({
+      prs: [
+        pr({
+          ciStatus: "failing",
+          reviewDecision: "APPROVED",
+          isDraft: true,
+          labels: ["bug"],
+        }),
+      ],
+    });
+    const cells = sourceRowCells(row!, "29d", true);
+    expect(cells.ci?.text).toBe("CI ✗");
+    expect(cells.review?.text).toBe("approved");
+    expect(cells.age).toBe("29d");
+    expect(cells.middle.map((p) => p.text)).toEqual([
+      "draft",
+      "bug",
+      "feat/sidebar-parking",
+      "@epilande",
+    ]);
+  });
+
+  it("sizes each fixed cell to the widest row and drops what no row has", () => {
+    const widths = (input: Parameters<typeof build>[0]) =>
+      sourceCellWidths(
+        rowsOf(input).map((row, i) =>
+          sourceRowCells(row, i ? "426d" : "3h", false),
+        ),
+      );
+    expect(widths({ issues: [issue()] })).toEqual({ ci: 0, review: 0, age: 2 });
+    expect(
+      widths({
+        prs: [pr({ ciStatus: "passing" }), pr({ number: 7 })],
+        issues: [issue()],
+      }),
+    ).toEqual({ ci: 4, review: 0, age: 4 });
+  });
+});
+
+describe("fitSourceRow", () => {
+  const middle = [
+    { text: "draft", fg: "", rank: 3 },
+    { text: "bug,ux", fg: "", rank: 1 },
+    { text: "feat/sidebar-parking", fg: "", rank: 2 },
+    { text: "@epilande", fg: "", rank: 0 },
+  ];
+  const texts = (fit: ReturnType<typeof fitSourceRow>) =>
+    fit.middle.map((p) => p.text.replace(/^ · /, ""));
+  const title = "⊙ #156 park the renderer"; // 24 columns
+
+  it("keeps everything when it fits", () => {
+    const fit = fitSourceRow(title, middle, 100);
+    expect(fit.title).toBe(title);
+    expect(texts(fit)).toEqual([
+      "draft",
+      "bug,ux",
+      "feat/sidebar-parking",
+      "@epilande",
+    ]);
+  });
+
+  it("yields the middle first: author, then labels, then branch", () => {
+    // 24 + 2 + "draft · bug,ux · feat/sidebar-parking" (38) = 64
+    expect(texts(fitSourceRow(title, middle, 64))).toEqual([
+      "draft",
+      "bug,ux",
+      "feat/sidebar-parking",
+    ]);
+    expect(texts(fitSourceRow(title, middle, 60))).toEqual([
+      "draft",
+      "feat/sidebar-parking",
+    ]);
+    expect(texts(fitSourceRow(title, middle, 40))).toEqual(["draft"]);
+    expect(fitSourceRow(title, middle, 40).title).toBe(title);
+  });
+
+  it("truncates the title only once the middle is gone", () => {
+    const fit = fitSourceRow(title, middle, 20);
+    expect(fit.middle).toEqual([]);
+    expect(fit.title).toBe("⊙ #156 park the ren…");
   });
 });
