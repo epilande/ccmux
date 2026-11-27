@@ -533,10 +533,69 @@ describe("App", () => {
       expect(frame).not.toContain("unreachable");
     });
 
+    it("drops a slow /server-info answer that a newer one has overtaken", async () => {
+      await renderApp();
+      sseCallbacks!.onInit([], null);
+      await flush();
+      expect(setup.captureCharFrame()).toContain("No sessions found");
+
+      // The first re-check's answer (the server orphaned) is held back; the
+      // second one (the server fixed) lands first. The late one must not put
+      // the old diagnostic, or the old socket, back over the newer answer.
+      const stale = {
+        socketPath: null,
+        socketError: {
+          attemptedSocket: "/tmp/tmux-501/default",
+          message:
+            "error connecting to /tmp/tmux-501/default (No such file or directory)",
+          orphanedServerPid: 42,
+        },
+      };
+      const fresh = {
+        socketPath: "/tmp/tmux-501/default",
+        socketError: null,
+      };
+      let releaseStale!: () => void;
+      const staleGate = new Promise<void>((r) => (releaseStale = r));
+      const answers: Array<() => Promise<unknown>> = [
+        async () => {
+          await staleGate;
+          return stale;
+        },
+        async () => fresh,
+      ];
+      globalThis.fetch = (async (url: string | URL) => {
+        if (String(url).includes("/server-info")) {
+          const body = await (answers.shift() ?? (async () => fresh))();
+          return { ok: true, json: async () => body } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as unknown as typeof fetch;
+
+      await fireRecheck();
+      await fireRecheck();
+      expect(answers.length).toBe(0);
+      expect(setup.captureCharFrame()).toContain("No sessions found");
+
+      releaseStale();
+      await flush();
+      await flush();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("No sessions found");
+      expect(frame).not.toContain("unreachable");
+      expect(frame).not.toContain("kill -USR1 42");
+    });
+
     it("does not re-check a populated, reachable board", async () => {
       await renderApp();
       sseCallbacks!.onInit(
-        [mockEnrichedSession({ id: "s1", project: "myapp", cwd: "/code/myapp" })],
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+          }),
+        ],
         null,
       );
       await flush();

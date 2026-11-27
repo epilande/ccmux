@@ -394,10 +394,21 @@ export function App(props: AppProps) {
     return false;
   }
 
+  /** The newest `/server-info` request, and the newest one whose answer has
+   *  been applied (see {@link refreshServerInfo}). */
+  let serverInfoRequested = 0;
+  let serverInfoApplied = 0;
+
   /** (Re)learn the daemon's tmux socket, on every SSE (re)connect: a daemon
    *  restarted onto a different socket would otherwise leave the guard comparing
-   *  a stale one. Fail-open until it resolves. */
+   *  a stale one. Fail-open until it resolves.
+   *
+   *  Mount, reconnect and the empty board's re-check can overlap, and their
+   *  answers can land out of order. Each request is numbered and an answer
+   *  older than one already applied is dropped, so a slow stale response can
+   *  never put back an old socket (or socket error) over a newer one. */
   function refreshServerInfo(): void {
+    const request = ++serverInfoRequested;
     fetch(`${getDaemonUrl()}/server-info`)
       .then(
         (r) =>
@@ -407,6 +418,8 @@ export function App(props: AppProps) {
           }>,
       )
       .then((d) => {
+        if (request < serverInfoApplied) return;
+        serverInfoApplied = request;
         setDaemonSocketPath(d.socketPath ?? null);
         // A daemon predating the field omits it, which reads as "no error".
         store.actions.setTmuxSocketError(d.socketError ?? null);
