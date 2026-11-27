@@ -89,9 +89,14 @@ function mockFetch(fn: (input: any, init?: any) => any) {
 function mockBunSpawn(
   lsofStdout: string,
   psStdout = "/usr/bin/bun /app/src/index.ts daemon start",
-  options: { ssStdout?: string; ssExit?: number; missing?: string[] } = {},
+  options: {
+    ssStdout?: string;
+    ssExit?: number;
+    lsofExit?: number;
+    missing?: string[];
+  } = {},
 ) {
-  const { ssStdout = "", ssExit = 0, missing = [] } = options;
+  const { ssStdout = "", ssExit = 0, lsofExit = 0, missing = [] } = options;
   Bun.spawn = ((cmd: string[]) => {
     if (missing.includes(cmd[0]!)) {
       throw new Error(`Executable not found in $PATH: "${cmd[0]}"`);
@@ -100,7 +105,9 @@ function mockBunSpawn(
       cmd[0] === "ps" ? psStdout : cmd[0] === "ss" ? ssStdout : lsofStdout;
     return {
       stdout: new Blob([stdout]).stream(),
-      exited: Promise.resolve(cmd[0] === "ss" ? ssExit : 0),
+      exited: Promise.resolve(
+        cmd[0] === "ss" ? ssExit : cmd[0] === "lsof" ? lsofExit : 0,
+      ),
     };
   }) as unknown as typeof Bun.spawn;
 }
@@ -439,6 +446,41 @@ describe("stopDaemonByPort", () => {
     mockBunSpawn("", undefined, { missing: ["lsof"], ssExit: 1 });
     expect(await stopDaemonByPort()).toBe(false);
     expect(existsSync(getPidFilePath())).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when lsof fails empty and ss is missing", async () => {
+    // lsof exits 1 with nothing on stdout both for "no match" and for an
+    // error, so on its own it cannot confirm that nothing is listening.
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { lsofExit: 1, missing: ["ss"] });
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+    expect(isProcessAlive(daemon)).toBe(true);
+  });
+
+  it("keeps a live daemon's pid file when lsof fails empty and ss fails", async () => {
+    const daemon = spawnSleepProcess();
+    writePidFile(daemon);
+    mockBunSpawn("", undefined, { lsofExit: 1, ssExit: 1 });
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(true);
+  });
+
+  it("clears the pid file when lsof fails empty but ss confirms no listener", async () => {
+    const innocent = spawnSleepProcess();
+    writePidFile(innocent);
+    mockBunSpawn("", undefined, { lsofExit: 1 }); // ss ran clean, found nothing
+    expect(await stopDaemonByPort()).toBe(false);
+    expect(existsSync(getPidFilePath())).toBe(false);
+  });
+
+  it("still kills the pid lsof names, whatever its exit code", async () => {
+    const pid = spawnSleepProcess();
+    mockBunSpawn(`${pid}\n`, undefined, { lsofExit: 1, missing: ["ss"] });
+    expect(await stopDaemonByPort()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(isProcessAlive(pid)).toBe(false);
   });
 
   it("drops a dead pid file when no lookup tool can run", async () => {

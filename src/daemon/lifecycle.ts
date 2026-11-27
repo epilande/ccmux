@@ -339,36 +339,25 @@ function parseSs(output: string): ToolAnswer {
  * finds nothing still falls through, so a no-op `lsof` stub cannot hide `ss`;
  * that costs one extra spawn only when nothing is listening.
  *
- * `lsof` is read by its stdout alone, because it exits 1 both for "no match"
- * and for a usage error. `ss` exits 0 when nothing matches, so a non-zero
- * exit means it did not really look.
+ * Only a tool that exits 0 can confirm that nothing is listening. A pid it
+ * names counts whatever its exit code, but an empty answer from a failed run
+ * proves nothing: `lsof` exits 1 both for "no match" and for an error, so
+ * without `ss` to confirm, a quiet `lsof` is `unknown`, not `none`. (`ss`
+ * exits 0 when nothing matches.)
  */
 async function lookupDaemonPort(): Promise<PortLookup> {
-  const lookups: Array<{
-    argv: string[];
-    parse: (output: string) => ToolAnswer;
-    exitMatters: boolean;
-  }> = [
-    {
-      argv: ["lsof", "-ti", `tcp:${DAEMON_PORT}`, "-sTCP:LISTEN"],
-      parse: parseLsof,
-      exitMatters: false,
-    },
-    {
-      argv: ["ss", "-ltnpH", `sport = :${DAEMON_PORT}`],
-      parse: parseSs,
-      exitMatters: true,
-    },
+  const lookups: Array<[string[], (output: string) => ToolAnswer]> = [
+    [["lsof", "-ti", `tcp:${DAEMON_PORT}`, "-sTCP:LISTEN"], parseLsof],
+    [["ss", "-ltnpH", `sport = :${DAEMON_PORT}`], parseSs],
   ];
   let ranClean = false;
   let unowned = false;
-  for (const { argv, parse, exitMatters } of lookups) {
+  for (const [argv, parse] of lookups) {
     try {
       const proc = Bun.spawn(argv, { stdout: "pipe", stderr: "ignore" });
-      const output = await new Response(proc.stdout).text();
-      if (exitMatters && ((await proc.exited) ?? 0) !== 0) continue;
-      const answer = parse(output);
+      const answer = parse(await new Response(proc.stdout).text());
       if (typeof answer === "number") return { kind: "listener", pid: answer };
+      if (((await proc.exited) ?? 0) !== 0) continue;
       if (answer === "unowned") unowned = true;
       else ranClean = true;
     } catch {
