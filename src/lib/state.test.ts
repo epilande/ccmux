@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, rmSync, existsSync } from "fs";
-import { join } from "path";
+import { mkdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
-import { resolvePromptDisplay } from "./state";
+import {
+  claimNotice,
+  decideNotice,
+  resolvePromptDisplay,
+  stampNewStateFile,
+  type UIState,
+} from "./state";
+import { STATE_FILE } from "./config";
 
 // Override STATE_FILE before importing state module
 const testDir = join(tmpdir(), `ccmux-state-test-${Date.now()}`);
@@ -96,5 +103,102 @@ describe("resolvePromptDisplay", () => {
   it("returns undefined when nothing is set (store default applies)", () => {
     expect(resolvePromptDisplay({})).toBeUndefined();
     expect(resolvePromptDisplay({ showPrompt: true })).toBeUndefined();
+  });
+});
+
+describe("decideNotice", () => {
+  const id = "keys-1.5";
+
+  it("is fresh when there is no state file", () => {
+    expect(decideNotice(null, id)).toBe("fresh");
+  });
+
+  it("shows for a file only a 1.4 daemon wrote", () => {
+    // The 1.4 daemon's attention tracker writes `lastSeen` and `version` in
+    // ordinary use, so this is what most 1.4 users have. A 1.5 process that
+    // creates the file stamps `seenNotices`, so a file without it is older.
+    expect(
+      decideNotice(
+        { lastSeen: { a: "2024-01-15T12:00:00Z" }, version: 1 } as UIState,
+        id,
+      ),
+    ).toBe("show");
+  });
+
+  it("shows for a file a 1.4 picker wrote", () => {
+    expect(decideNotice({ collapsedGroups: ["alpha"] }, id)).toBe("show");
+  });
+
+  it("shows for a file that exists but holds nothing it can read", () => {
+    // `getUIState` reads a malformed file as {}; it still predates the flag.
+    expect(decideNotice({}, id)).toBe("show");
+  });
+
+  it("is seen once recorded, whatever else the state holds", () => {
+    expect(
+      decideNotice({ collapsedGroups: ["alpha"], seenNotices: [id] }, id),
+    ).toBe("seen");
+  });
+
+  it("ignores another notice's record", () => {
+    expect(
+      decideNotice({ collapsedGroups: ["alpha"], seenNotices: ["other"] }, id),
+    ).toBe("show");
+  });
+});
+
+describe("stampNewStateFile", () => {
+  it("marks every current notice seen, so a 1.5-created file never owes one", () => {
+    expect(stampNewStateFile()).toEqual({ seenNotices: ["keys-1.5"] });
+  });
+});
+
+describe("claimNotice", () => {
+  const id = "keys-1.5";
+  const read = () => JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+  const write = (state: unknown) => {
+    mkdirSync(dirname(STATE_FILE), { recursive: true });
+    writeFileSync(STATE_FILE, JSON.stringify(state));
+  };
+
+  beforeEach(() => rmSync(STATE_FILE, { force: true }));
+  afterEach(() => rmSync(STATE_FILE, { force: true }));
+
+  it("a fresh install records the notice as seen without showing it", async () => {
+    expect(await claimNotice(id, { mayShow: true })).toBe(false);
+    expect(read()).toEqual({ seenNotices: [id] });
+  });
+
+  it("a 1.4 state shows it once, recording it the moment it shows", async () => {
+    write({ lastSeen: {}, version: 1, seenNotices: ["other"] });
+    expect(await claimNotice(id, { mayShow: true })).toBe(true);
+    expect(read()).toEqual({
+      lastSeen: {},
+      version: 1,
+      seenNotices: ["other", id],
+    });
+    expect(await claimNotice(id, { mayShow: true })).toBe(false);
+  });
+
+  it("a surface that may not show it leaves a 1.4 state for one that may", async () => {
+    // The sidebar: a fleet would raise the notice in every pane at once.
+    const before = { collapsedGroups: ["alpha"] };
+    write(before);
+    expect(await claimNotice(id, { mayShow: false })).toBe(false);
+    expect(read()).toEqual(before);
+  });
+
+  it("a surface that may not show it still records a fresh install", async () => {
+    // Otherwise the 1.5 sidebar's own writes would create a file without the
+    // flag, and the picker opened later would read it as a 1.4 state.
+    expect(await claimNotice(id, { mayShow: false })).toBe(false);
+    expect(read()).toEqual({ seenNotices: [id] });
+  });
+
+  it("does nothing once seen", async () => {
+    const before = { collapsedGroups: ["alpha"], seenNotices: [id] };
+    write(before);
+    expect(await claimNotice(id, { mayShow: true })).toBe(false);
+    expect(read()).toEqual(before);
   });
 });

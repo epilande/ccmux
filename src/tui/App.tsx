@@ -197,6 +197,9 @@ interface AppProps {
   /** How "Open transcript" runs the pager. Explicit so tests never start a
    *  real one; the default is `$PAGER`, then `less`. */
   pager?: PagerDeps;
+  /** A one-time notice the launch decided is owed (`claimNotice`), raised
+   *  before the first frame. */
+  startupNotice?: { title: string; lines: string[] };
 }
 
 /** Message text for a rejected fetch/parse, for a toast. */
@@ -367,6 +370,12 @@ export function App(props: AppProps) {
     sidebar: props.sidebar,
     lastSpawnAgent: props.lastSpawnAgent,
   });
+  if (props.startupNotice) {
+    store.actions.showNotice(
+      props.startupNotice.title,
+      props.startupNotice.lines,
+    );
+  }
   markStartup("store_created");
   let readSidebarScrollTop: (() => number) | null = null;
   /** Identifies the latest user action. A sidebar click holds its value across
