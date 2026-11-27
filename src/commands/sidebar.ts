@@ -6,8 +6,7 @@ import {
   DEFAULT_SIDEBAR_WIDTH,
   type Preferences,
 } from "../lib/preferences";
-import { claimNotice, getUIState, resolvePromptDisplay } from "../lib/state";
-import { KEY_CHANGES_NOTICE } from "../tui/key-changes-notice";
+import { getUIState, resolvePromptDisplay } from "../lib/state";
 import { markStartup } from "../lib/startup-timing";
 import { SIDEBAR_PANE_TITLE, parseCcmuxPort } from "../lib/config";
 import { PANE_FIELD_SEP } from "../lib/tmux-format";
@@ -164,12 +163,6 @@ export function createSidebarCommand(): Command {
           repairResizeHook(width),
         ]);
         markStartup("daemon_ready");
-
-        // Never shown here, but a fresh install is recorded, so the state
-        // file this sidebar creates is not read later as a pre-1.5 one.
-        await claimNotice(KEY_CHANGES_NOTICE.id, { mayShow: false }).catch(
-          () => {},
-        );
 
         await tui.launchTUI({
           initialPreview: false,

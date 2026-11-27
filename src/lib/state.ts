@@ -33,9 +33,6 @@ export interface UIState {
    *  because the one-shot picker exits as soon as it spawns, so the
    *  "last agent" default only survives on disk. */
   lastSpawnAgent?: string;
-  /** One-time notices already decided (`claimNotice`): shown, or skipped on
-   *  an install that never had the behavior they announce. */
-  seenNotices?: string[];
 }
 
 /** One groupBy mode's record of its merges, for a reset to undo them. */
@@ -123,60 +120,4 @@ export async function setUIState(updates: Partial<UIState>): Promise<void> {
     }
     throw err;
   }
-}
-
-/** The one-time notice naming the keys 1.5 changed (`tui/key-changes-notice.ts`). */
-export const KEY_CHANGES_NOTICE_ID = "keys-1.5";
-
-/**
- * What a 1.5 process puts in a state.json it CREATES: every one-time notice
- * marked seen, since a new install has nothing to unlearn.
- *
- * This is what makes "a file without the flag" mean "a pre-1.5 file". The
- * file merely existing proves nothing, because the daemon's attention
- * tracker writes it in ordinary use (1.4's did too), so every 1.5 creator
- * stamps it: `claimNotice` for the picker and sidebar, and
- * `AttentionTracker.save()` for the daemon.
- */
-export function stampNewStateFile(): Pick<UIState, "seenNotices"> {
-  return { seenNotices: [KEY_CHANGES_NOTICE_ID] };
-}
-
-/**
- * Whether one-time notice `id` is owed, from the state file's contents, or
- * null when there is no file: `fresh` for no file, `seen` once recorded, and
- * `show` for a file a pre-1.5 process wrote.
- */
-export function decideNotice(
-  state: UIState | null,
-  id: string,
-): "seen" | "show" | "fresh" {
-  if (state === null) return "fresh";
-  return state.seenNotices?.includes(id) ? "seen" : "show";
-}
-
-/**
- * Decide notice `id` for this launch and record it. True when the caller
- * should show it now.
- *
- * A fresh install is recorded by any surface (`stampNewStateFile`). A
- * surface that may not show it (`mayShow: false`) leaves an owed notice for
- * one that may. The record is written when the notice is SHOWN, not when it
- * is dismissed, so a picker that exits under it does not raise it again.
- */
-export async function claimNotice(
-  id: string,
-  { mayShow }: { mayShow: boolean },
-): Promise<boolean> {
-  const exists = await Bun.file(STATE_FILE).exists();
-  const state = exists ? await getUIState() : null;
-  const decision = decideNotice(state, id);
-  if (decision === "seen" || (decision === "show" && !mayShow)) return false;
-  if (decision === "fresh") {
-    await setUIState(stampNewStateFile());
-    return false;
-  }
-  const seen = (await getUIState()).seenNotices ?? [];
-  if (!seen.includes(id)) await setUIState({ seenNotices: [...seen, id] });
-  return true;
 }

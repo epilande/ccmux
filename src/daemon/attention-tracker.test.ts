@@ -207,22 +207,5 @@ describe("AttentionTracker", () => {
       expect(data.version).toBe(1);
       expect(data.lastSeen["test-session"]).toBeString();
     });
-
-    it("stamps the one-time notices as seen only when it creates the file", () => {
-      // A file this daemon creates is a 1.5 install's, with nothing to
-      // unlearn. One that already exists without the flag is a 1.4 user's,
-      // and the picker owes them the notice, so it must not be stamped here.
-      rmSync(stateFile, { force: true });
-      tracker.save();
-      expect(JSON.parse(readFileSync(stateFile, "utf-8")).seenNotices).toEqual(
-        ["keys-1.5"],
-      );
-
-      writeFileSync(stateFile, JSON.stringify({ lastSeen: {}, version: 1 }));
-      tracker.save();
-      expect(
-        "seenNotices" in JSON.parse(readFileSync(stateFile, "utf-8")),
-      ).toBe(false);
-    });
   });
 });

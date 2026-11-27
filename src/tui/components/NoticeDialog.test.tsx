@@ -86,48 +86,6 @@ describe("NoticeDialog", () => {
     expect(bottom).toBe(13);
   });
 
-  it("widens to keep a link in one piece when the terminal has room", async () => {
-    // A URL broken across two rows is two halves no terminal can open.
-    const url =
-      "https://github.com/epilande/ccmux/blob/main/docs/tui-views-migration.md";
-    setup = await testRender(
-      () => (
-        <NoticeDialog
-          title="Keys changed"
-          lines={[`Details: ${url}`]}
-          onDismiss={() => {}}
-        />
-      ),
-      { width: 100, height: 12 },
-    );
-    await setup.renderOnce();
-    const frame = setup.captureCharFrame();
-    expect(frame).toContain(url);
-    for (const line of frame.split("\n")) {
-      expect(line.length).toBeLessThanOrEqual(100);
-    }
-  });
-
-  it("keeps ordinary prose at its usual width", async () => {
-    setup = await testRender(
-      () => (
-        <NoticeDialog
-          title="Move failed"
-          lines={["word ".repeat(40).trim()]}
-          onDismiss={() => {}}
-        />
-      ),
-      { width: 100, height: 20 },
-    );
-    await setup.renderOnce();
-    const top = setup
-      .captureCharFrame()
-      .split("\n")
-      .find((line) => line.includes("┌"))!;
-    // MAX_WIDTH (72) wide, border to border.
-    expect(top.trim().length).toBe(72);
-  });
-
   it("dismisses on a click", async () => {
     const onDismiss = createSpy();
     setup = await testRender(

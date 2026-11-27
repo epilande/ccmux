@@ -41,7 +41,6 @@ interface TUIOptions {
   theme?: ThemeConfig;
   reviewHandback?: Preferences["reviewHandback"];
   forkableAgents?: string[];
-  startupNotice?: { title: string; lines: string[] };
 }
 
 export async function launchTUI(options: TUIOptions = {}): Promise<void> {
@@ -104,7 +103,6 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         lastSpawnAgent={options.lastSpawnAgent}
         reviewHandback={options.reviewHandback}
         forkableAgents={options.forkableAgents}
-        startupNotice={options.startupNotice}
       />
     ),
     renderer,

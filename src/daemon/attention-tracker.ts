@@ -1,7 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import { STATE_FILE } from "../lib/config";
-import { stampNewStateFile } from "../lib/state";
 import type { AttentionState, Session } from "../types/session";
 
 /** Default timeout before "read" decays to null (ms) */
@@ -125,11 +124,7 @@ export class AttentionTracker {
       // STATE_FILE is shared with the TUI's persisted UI state
       // (src/lib/state.ts), so merge over the existing contents instead of
       // overwriting; a whole-file write here would clobber the UI keys.
-      // A file this creates is a 1.5 install's: stamp it, so the picker
-      // never reads it as a 1.4 user's and raises the key-changes notice.
-      let existing: Record<string, unknown> = existsSync(STATE_FILE)
-        ? {}
-        : stampNewStateFile();
+      let existing: Record<string, unknown> = {};
       try {
         existing = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
       } catch {

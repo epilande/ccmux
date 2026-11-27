@@ -2,7 +2,7 @@ import type { Component } from "solid-js";
 import { createMemo, For } from "solid-js";
 import { useSharedTerminalDimensions } from "../utils/use-shared-dimensions";
 import { MouseButton } from "@opentui/core";
-import { displayWidth, truncateText, wrapText } from "../utils/format";
+import { truncateText, wrapText } from "../utils/format";
 import { theme } from "../theme";
 import { Text } from "./Text";
 
@@ -35,25 +35,8 @@ interface NoticeDialogProps {
 export const NoticeDialog: Component<NoticeDialogProps> = (props) => {
   const dims = useSharedTerminalDimensions();
 
-  /**
-   * Prose wraps at MAX_WIDTH, but a word that cannot be broken (a URL) widens
-   * the dialog to fit it while the terminal has the room: `wrapText` would
-   * otherwise split it mid-word into two halves no terminal can open. Border
-   * and padding are the 4.
-   */
-  const longestWord = createMemo(() =>
-    Math.max(
-      0,
-      ...props.lines.flatMap((line) =>
-        line.split(/\s+/).map((word) => displayWidth(word)),
-      ),
-    ),
-  );
   const width = () =>
-    Math.max(
-      MIN_WIDTH,
-      Math.min(Math.max(MAX_WIDTH, longestWord() + 4), dims().width - 4),
-    );
+    Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, dims().width - 4));
   const contentWidth = () => Math.max(1, width() - 4);
 
   /**

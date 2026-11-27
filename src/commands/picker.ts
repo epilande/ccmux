@@ -1,8 +1,7 @@
 import { Command } from "commander";
 import { defaultReconcileDeps, probeDaemon, settleDaemon } from "./shared";
 import { getPreferences } from "../lib/preferences";
-import { claimNotice, getUIState, resolvePromptDisplay } from "../lib/state";
-import { KEY_CHANGES_NOTICE } from "../tui/key-changes-notice";
+import { getUIState, resolvePromptDisplay } from "../lib/state";
 import {
   VALID_ICON_STYLES,
   isValidIconStyle,
@@ -89,12 +88,6 @@ export function createPickerCommand(): Command {
           prefs.persistent,
         );
 
-        // Decided and recorded before the first frame, so a picker that
-        // exits under the notice does not raise it again next launch.
-        const showKeyChanges = await claimNotice(KEY_CHANGES_NOTICE.id, {
-          mayShow: true,
-        }).catch(() => false);
-
         // Tag persistent picker panes so the daemon ignores them for active-pane tracking
         const selfPane = process.env.TMUX_PANE;
         if (persistent && selfPane) {
@@ -128,7 +121,6 @@ export function createPickerCommand(): Command {
           reviewHandback: prefs.reviewHandback,
           forkableAgents: forkableAgentNames(prefs),
           theme: prefs.theme,
-          startupNotice: showKeyChanges ? KEY_CHANGES_NOTICE : undefined,
         });
       },
     );

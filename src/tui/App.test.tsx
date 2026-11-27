@@ -11510,23 +11510,3 @@ describe("App group rename and merge (#42)", () => {
     }
   });
 });
-
-describe("startup notice", () => {
-  it("raises the notice it was launched with, and any key dismisses it", async () => {
-    const frame = await renderApp(120, 30, {
-      startupNotice: {
-        title: "Keys changed in ccmux 1.5",
-        lines: ["h/l now switch views."],
-      },
-    });
-    expect(frame).toContain("Keys changed in ccmux 1.5");
-    expect(frame).toContain("any key to dismiss");
-    setup.mockInput.pressKey("j");
-    await setup.renderOnce();
-    expect(setup.captureCharFrame()).not.toContain("Keys changed in ccmux 1.5");
-  });
-
-  it("raises nothing without one", async () => {
-    expect(await renderApp(120, 30)).not.toContain("any key to dismiss");
-  });
-});
