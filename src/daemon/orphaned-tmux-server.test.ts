@@ -22,6 +22,18 @@ const LSOF_ORPHANED = [
   "",
 ].join("\n");
 
+/** Real Linux lsof 4.99.7 output for the same case: an orphaned server (pid
+ *  1524666) holding the path on two fds and an attached client (1526376).
+ *  Linux follows the path with the socket type, and a client names no path. */
+const LSOF_ORPHANED_LINUX = [
+  "p1524666",
+  "n/tmp/ccv.RKcNR9/tt/tmux-1000/ccv type=STREAM",
+  "n/tmp/ccv.RKcNR9/tt/tmux-1000/ccv type=STREAM",
+  "p1526376",
+  "ntype=STREAM",
+  "",
+].join("\n");
+
 describe("missingSocketPath", () => {
   it("reads the path out of tmux's missing-socket error", () => {
     expect(missingSocketPath(MISSING)).toBe("/private/tmp/tmux-501/default");
@@ -59,6 +71,24 @@ describe("parseSocketHolders", () => {
         "/private/tmp/tmux-501/work",
       ),
     ).toEqual([7]);
+  });
+
+  it("reads the path out of Linux's `<path> type=STREAM` name", () => {
+    expect(
+      parseSocketHolders(
+        LSOF_ORPHANED_LINUX,
+        "/tmp/ccv.RKcNR9/tt/tmux-1000/ccv",
+      ),
+    ).toEqual([1524666]);
+  });
+
+  it("does not match a Linux socket that only shares a prefix", () => {
+    expect(
+      parseSocketHolders(
+        LSOF_ORPHANED_LINUX,
+        "/tmp/ccv.RKcNR9/tt/tmux-1000/cc",
+      ),
+    ).toEqual([]);
   });
 
   it("does not match a different socket in the same directory", () => {

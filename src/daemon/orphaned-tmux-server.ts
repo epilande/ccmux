@@ -40,10 +40,20 @@ function canonicalSocketPath(path: string): string {
 }
 
 /**
+ * The socket path an lsof `n` field names. Linux lsof follows the path with
+ * the socket's type (`/tmp/tmux-1000/default type=STREAM`), where macOS prints
+ * the bare path, so an exact comparison would never match on Linux.
+ */
+function lsofSocketName(name: string): string {
+  return name.replace(/ type=\S+.*$/, "");
+}
+
+/**
  * The distinct pids that hold a unix socket bound to `socketPath`, from
  * `lsof -F pn` output (`p<pid>` starts a process, `n<name>` names each of its
  * files). A server holds the path on more than one fd, and its clients'
- * sockets show as `->0x...` peers rather than a path, so they never match.
+ * sockets never name it (a `->0x...` peer on macOS, a bare `type=STREAM` on
+ * Linux), so they never match.
  */
 export function parseSocketHolders(
   lsofOutput: string,
@@ -59,7 +69,7 @@ export function parseSocketHolders(
     } else if (
       line.startsWith("n") &&
       pid !== null &&
-      canonicalSocketPath(line.slice(1)) === target
+      canonicalSocketPath(lsofSocketName(line.slice(1))) === target
     ) {
       pids.add(pid);
     }
