@@ -4,6 +4,7 @@ import {
   startDaemon,
   stopDaemon,
   stopDaemonByPort,
+  stopForRestart,
   isDaemonRunning,
   isDaemonRunningAsync,
   getDaemonPid,
@@ -216,7 +217,17 @@ export function createDaemonCommand(): Command {
         if (!isRunningPid && isRunningHealth) {
           console.log("(Detected orphaned daemon via health check)");
         }
-        await stopDaemonByPort();
+        // A daemon still serving after the stop would make the spawn below
+        // a second daemon that dies on bind. Refuse, and leave its pid file
+        // for `daemon stop`, which goes by it.
+        if ((await stopForRestart()) === "still-running") {
+          console.error(
+            `Could not stop the daemon: the process listening on port ${DAEMON_PORT} ` +
+              "could not be found (needs `lsof` or `ss` on PATH), or it is not " +
+              "a ccmux daemon. Run `ccmux daemon stop`, then `ccmux daemon start`.",
+          );
+          process.exit(1);
+        }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
