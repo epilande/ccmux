@@ -443,6 +443,167 @@ describe("App", () => {
     expect(frame).not.toContain("No sessions found");
   });
 
+  describe("tmux reachability re-check", () => {
+    // Capture the 5s re-check instead of waiting for it: every other interval
+    // runs for real, the re-check is fired by hand, and `active` tracks which
+    // of its registrations the effect has not cleared.
+    const RECHECK_MS = 5000;
+    let active: Map<number, () => void>;
+    let restoreTimers: () => void;
+    let serverInfo: Record<string, unknown>;
+    let probes: number;
+    const flush = async () => {
+      await new Promise((r) => setTimeout(r, 0));
+      await setup.renderOnce();
+    };
+    const fireRecheck = async () => {
+      expect(active.size).toBe(1);
+      [...active.values()][0]!();
+      await flush();
+    };
+
+    beforeEach(() => {
+      active = new Map();
+      probes = 0;
+      serverInfo = { socketPath: "/tmp/tmux-501/default", socketError: null };
+      const realSetInterval = globalThis.setInterval;
+      const realClearInterval = globalThis.clearInterval;
+      let nextId = 1_000_000;
+      const setSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+        fn: () => void,
+        ms?: number,
+        ...rest: unknown[]
+      ) => {
+        if (ms !== RECHECK_MS) return realSetInterval(fn, ms, ...rest);
+        const id = nextId++;
+        active.set(id, fn);
+        return id;
+      }) as unknown as typeof setInterval);
+      const clearSpy = spyOn(globalThis, "clearInterval").mockImplementation(((
+        id?: unknown,
+      ) => {
+        if (typeof id === "number" && active.delete(id)) return;
+        realClearInterval(id as Parameters<typeof clearInterval>[0]);
+      }) as unknown as typeof clearInterval);
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: string | URL) => {
+        if (String(url).includes("/server-info")) {
+          probes++;
+          return { ok: true, json: async () => serverInfo } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as unknown as typeof fetch;
+      restoreTimers = () => {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+        globalThis.fetch = original;
+      };
+    });
+
+    afterEach(() => restoreTimers());
+
+    it("surfaces a server lost mid-session and clears the diagnostic once it is fixed", async () => {
+      await renderApp();
+      sseCallbacks!.onInit([], null);
+      await flush();
+      expect(setup.captureCharFrame()).toContain("No sessions found");
+
+      // The socket goes away with the board open: no SSE event says so.
+      serverInfo = {
+        socketPath: null,
+        socketError: {
+          attemptedSocket: "/tmp/tmux-501/default",
+          message:
+            "error connecting to /tmp/tmux-501/default (No such file or directory)",
+          orphanedServerPid: 42,
+        },
+      };
+      const before = probes;
+      await fireRecheck();
+      expect(probes).toBe(before + 1);
+      let frame = setup.captureCharFrame();
+      expect(frame).toContain("tmux server unreachable at");
+      expect(frame).toContain("kill -USR1 42");
+
+      // The user runs the fix; a server back with no agents sends no event.
+      serverInfo = { socketPath: "/tmp/tmux-501/default", socketError: null };
+      await fireRecheck();
+      frame = setup.captureCharFrame();
+      expect(frame).toContain("No sessions found");
+      expect(frame).not.toContain("unreachable");
+    });
+
+    it("drops a slow /server-info answer that a newer one has overtaken", async () => {
+      await renderApp();
+      sseCallbacks!.onInit([], null);
+      await flush();
+      expect(setup.captureCharFrame()).toContain("No sessions found");
+
+      // The first re-check's answer (the server orphaned) is held back; the
+      // second one (the server fixed) lands first. The late one must not put
+      // the old diagnostic, or the old socket, back over the newer answer.
+      const stale = {
+        socketPath: null,
+        socketError: {
+          attemptedSocket: "/tmp/tmux-501/default",
+          message:
+            "error connecting to /tmp/tmux-501/default (No such file or directory)",
+          orphanedServerPid: 42,
+        },
+      };
+      const fresh = {
+        socketPath: "/tmp/tmux-501/default",
+        socketError: null,
+      };
+      let releaseStale!: () => void;
+      const staleGate = new Promise<void>((r) => (releaseStale = r));
+      const answers: Array<() => Promise<unknown>> = [
+        async () => {
+          await staleGate;
+          return stale;
+        },
+        async () => fresh,
+      ];
+      globalThis.fetch = (async (url: string | URL) => {
+        if (String(url).includes("/server-info")) {
+          const body = await (answers.shift() ?? (async () => fresh))();
+          return { ok: true, json: async () => body } as Response;
+        }
+        return { ok: true, json: async () => ({}) } as Response;
+      }) as unknown as typeof fetch;
+
+      await fireRecheck();
+      await fireRecheck();
+      expect(answers.length).toBe(0);
+      expect(setup.captureCharFrame()).toContain("No sessions found");
+
+      releaseStale();
+      await flush();
+      await flush();
+      const frame = setup.captureCharFrame();
+      expect(frame).toContain("No sessions found");
+      expect(frame).not.toContain("unreachable");
+      expect(frame).not.toContain("kill -USR1 42");
+    });
+
+    it("does not re-check a populated, reachable board", async () => {
+      await renderApp();
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "myapp",
+            cwd: "/code/myapp",
+          }),
+        ],
+        null,
+      );
+      await flush();
+      expect(setup.captureCharFrame()).toContain("myapp");
+      expect(active.size).toBe(0);
+    });
+  });
+
   it("enters search mode on / key", async () => {
     await renderApp();
     setup.mockInput.pressKey("/");

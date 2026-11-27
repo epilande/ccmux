@@ -19,6 +19,7 @@ import {
   resetTmuxSocketCache,
   resolveTmuxSocketOverride,
   socketErrorMessage,
+  socketRecoveryHint,
   tmuxSocketPath,
 } from "./tmux-socket";
 
@@ -243,5 +244,44 @@ describe("socketErrorMessage", () => {
 
   it("stays generic when it is not", () => {
     expect(socketErrorMessage(null)).toBe("tmux server unreachable");
+  });
+});
+
+describe("socketRecoveryHint", () => {
+  it("prints the mkdir + SIGUSR1 fix for an orphaned server", () => {
+    expect(
+      socketRecoveryHint({
+        attemptedSocket: "/private/tmp/tmux-501/default",
+        message: "error connecting to ... (No such file or directory)",
+        orphanedServerPid: 19086,
+      }),
+    ).toEqual({
+      reason:
+        "The socket file was deleted but tmux (pid 19086) is still running. Restore it with:",
+      command: "mkdir -p -m 700 /private/tmp/tmux-501 && kill -USR1 19086",
+    });
+  });
+
+  it("quotes a directory the shell would split", () => {
+    expect(
+      socketRecoveryHint({
+        attemptedSocket: "/tmp/it's here/sock",
+        message: "",
+        orphanedServerPid: 7,
+      })?.command,
+    ).toBe("mkdir -p -m 700 '/tmp/it'\\''s here' && kill -USR1 7");
+  });
+
+  it("stays silent without an orphaned server", () => {
+    expect(
+      socketRecoveryHint({ attemptedSocket: "/tmp/tmux-501/x", message: "" }),
+    ).toBe(null);
+    expect(
+      socketRecoveryHint({
+        attemptedSocket: "/tmp/tmux-501/x",
+        message: "",
+        orphanedServerPid: null,
+      }),
+    ).toBe(null);
   });
 });

@@ -50,7 +50,11 @@ import { createPromptBlockCache } from "./prompt-block-cache";
 import { theme } from "../theme";
 import { TEXT_ROLES } from "../text-roles";
 import { Text } from "./Text";
-import { socketErrorMessage } from "../../lib/tmux-socket";
+import {
+  socketErrorMessage,
+  socketRecoveryHint,
+  type SocketRecoveryHint,
+} from "../../lib/tmux-socket";
 import { displayWidth, padStartWidth } from "../utils/format";
 
 interface SessionListProps {
@@ -716,9 +720,19 @@ export const SessionList: Component<SessionListProps> = (props) => {
                 fallback={<Text fg={theme.overlay}>No sessions found</Text>}
               >
                 {(error: () => TmuxSocketError) => (
-                  <Text fg={theme.red}>
-                    {socketErrorMessage(error().attemptedSocket)}
-                  </Text>
+                  <box flexDirection="column" gap={1}>
+                    <Text fg={theme.red}>
+                      {socketErrorMessage(error().attemptedSocket)}
+                    </Text>
+                    <Show when={socketRecoveryHint(error())}>
+                      {(hint: () => SocketRecoveryHint) => (
+                        <box flexDirection="column">
+                          <Text fg={theme.subtext}>{hint().reason}</Text>
+                          <Text fg={theme.text}>{hint().command}</Text>
+                        </box>
+                      )}
+                    </Show>
+                  </box>
                 )}
               </Show>
             </box>

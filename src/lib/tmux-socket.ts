@@ -24,7 +24,8 @@
  */
 
 import { realpathSync } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
+import type { TmuxSocketError } from "../types/events";
 import { getPreferencesSync } from "./preferences";
 
 /** A configured tmux server: `-S <value>` for a path, `-L <value>` for a label. */
@@ -150,4 +151,36 @@ export function socketErrorMessage(attemptedSocket: string | null): string {
   return attemptedSocket
     ? `tmux server unreachable at ${attemptedSocket}`
     : "tmux server unreachable";
+}
+
+/** Quote a path for a copy-pasted shell line only when it needs it. */
+function shellPath(path: string): string {
+  return /^[\w./-]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`;
+}
+
+/** What `socketRecoveryHint` returns: why, and the line to paste. */
+export interface SocketRecoveryHint {
+  reason: string;
+  command: string;
+}
+
+/**
+ * The fix for a tmux server orphaned from its socket file, or null when the
+ * daemon did not find one. tmux recreates its socket on SIGUSR1, but binds it
+ * inside the directory, which may have been deleted along with the file, so the
+ * `mkdir` comes first (`-p` makes it a no-op when the directory survived). A
+ * suggestion only: ccmux never signals the server itself. The command is kept
+ * apart from the reason so every surface can give it a line of its own, where
+ * it wraps least and copies cleanly.
+ */
+export function socketRecoveryHint(
+  error: TmuxSocketError,
+): SocketRecoveryHint | null {
+  const pid = error.orphanedServerPid;
+  if (!pid || !error.attemptedSocket) return null;
+  const dir = shellPath(dirname(error.attemptedSocket));
+  return {
+    reason: `The socket file was deleted but tmux (pid ${pid}) is still running. Restore it with:`,
+    command: `mkdir -p -m 700 ${dir} && kill -USR1 ${pid}`,
+  };
 }

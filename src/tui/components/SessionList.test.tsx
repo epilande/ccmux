@@ -370,6 +370,26 @@ describe("SessionList", () => {
     expect(frame).not.toContain("No sessions found");
   });
 
+  it("adds the recovery command when the daemon found an orphaned server", async () => {
+    const frame = await renderEmptyWithSocketError({
+      attemptedSocket: "/private/tmp/tmux-501/default",
+      message:
+        "error connecting to /private/tmp/tmux-501/default (No such file or directory)",
+      orphanedServerPid: 19086,
+    });
+    expect(frame).toContain("tmux server unreachable at");
+    expect(frame).toContain("tmux (pid 19086) is still running");
+    expect(frame).toContain("kill -USR1 19086");
+  });
+
+  it("shows no recovery command for a plain unreachable server", async () => {
+    const frame = await renderEmptyWithSocketError({
+      attemptedSocket: "/private/tmp/tmux-501/work",
+      message: "no server running",
+    });
+    expect(frame).not.toContain("kill -USR1");
+  });
+
   it("keeps the plain empty state when the server is reachable", async () => {
     const frame = await renderEmptyWithSocketError(null);
     expect(frame).toContain("No sessions found");
