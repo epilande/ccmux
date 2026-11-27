@@ -11,7 +11,7 @@ import type {
   ColumnHeaderMode,
 } from "../lib/preferences";
 import { applyTheme } from "./theme";
-import type { GroupBy } from "./utils/grouping";
+import type { GroupAliases, GroupBy, GroupLayouts } from "./utils/grouping";
 import { PERF_ENABLED } from "./utils/perf";
 import { markStartup } from "../lib/startup-timing";
 
@@ -31,6 +31,8 @@ interface TUIOptions {
   groupBy?: GroupBy;
   collapsedGroups?: string[];
   pinnedGroups?: string[];
+  groupAliases?: GroupAliases;
+  groupLayouts?: GroupLayouts;
   hideIdle?: boolean;
   promptDisplay?: PromptDisplay;
   persistent?: boolean;
@@ -92,6 +94,8 @@ export async function launchTUI(options: TUIOptions = {}): Promise<void> {
         groupBy={options.groupBy}
         collapsedGroups={options.collapsedGroups}
         pinnedGroups={options.pinnedGroups}
+        groupAliases={options.groupAliases}
+        groupLayouts={options.groupLayouts}
         hideIdle={options.hideIdle}
         promptDisplay={options.promptDisplay}
         persistent={options.persistent}
