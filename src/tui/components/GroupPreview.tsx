@@ -315,13 +315,16 @@ export function inventoryEntries(
     let lead: EnrichedSession | null = null;
     for (const session of here)
       if (!lead || statusRank(session) < statusRank(lead)) lead = session;
+    // An own-key check, not a truthy read: a branch named `constructor` or
+    // `__proto__` would otherwise find Object.prototype's member.
+    const entry =
+      tree.branch &&
+      facts.branchPRs &&
+      Object.hasOwn(facts.branchPRs, tree.branch)
+        ? facts.branchPRs[tree.branch]
+        : undefined;
     const cached =
-      tree.branch && facts.branchPRs?.[tree.branch]
-        ? facts.branchPRs[tree.branch]!.value.map((pr) => ({
-            ...pr,
-            stale: facts.branchPRs![tree.branch!]!.stale,
-          }))
-        : [];
+      entry?.value.map((pr) => ({ ...pr, stale: entry.stale })) ?? [];
     return {
       name: tree.isMain
         ? "⌂ main"

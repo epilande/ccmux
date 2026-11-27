@@ -275,8 +275,9 @@ describe("RepoAnswerCache maxEntries", () => {
     const first = subject.answer("a", false, () => slow);
     await subject.answer("b", false, () => Promise.resolve(ok("b")));
     await settle();
-    // Over the cap, but `a` is still running: `b` went instead.
-    expect(subject.entries.has("a")).toBe(true);
+    // Over the cap, but `a` is still running: `b` went instead, trimmed the
+    // moment it settled rather than at some later miss.
+    expect([...subject.entries.keys()]).toEqual(["a"]);
     // A second caller for `a` joins rather than spawning another call.
     let calls = 0;
     const joined = subject.answer("a", false, () => {
@@ -287,5 +288,29 @@ describe("RepoAnswerCache maxEntries", () => {
     expect(await first).toEqual(ok("a"));
     expect(await joined).toEqual(ok("a"));
     expect(calls).toBe(0);
+    await settle();
+    expect(subject.entries.size).toBe(1);
+  });
+
+  it("trims back to the cap as a burst of concurrent misses settles", async () => {
+    const subject = bounded(2);
+    const finishers: ((result: SourceResult<string>) => void)[] = [];
+    const answers = ["a", "b", "c", "d"].map((key) =>
+      subject.answer(
+        key,
+        false,
+        () =>
+          new Promise<SourceResult<string>>((resolve) => {
+            finishers.push(resolve);
+          }),
+      ),
+    );
+    // All four are locks, so none can go yet.
+    expect(subject.entries.size).toBe(4);
+    for (const [i, finish] of finishers.entries()) finish(ok(String(i)));
+    await Promise.all(answers);
+    await settle();
+    // The oldest settled ones went; the newest two are kept.
+    expect([...subject.entries.keys()]).toEqual(["c", "d"]);
   });
 });

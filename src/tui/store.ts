@@ -59,6 +59,7 @@ import {
   buildFlatItems,
   flatItemIdentity,
   isSyntheticGroupKey,
+  NEEDS_YOU_GROUP_KEY,
   aliasedRawKey,
   groupKeyOf,
   groupSessions,
@@ -786,10 +787,11 @@ function computePinnedFromOrder(
   return cleaned.slice(0, desiredIdx + 1);
 }
 
-/** A selected header as {@link followGroupSelection} needs it. */
-interface HeaderSnapshot {
-  key: string;
-  rawKeys: string[];
+/** The cursor before a change of names, as {@link followGroupSelection}
+ *  needs it: the selected header, or whether the selected row was drawn. */
+interface SelectionSnapshot {
+  header: { key: string; rawKeys: string[] } | null;
+  rowDrawn: boolean;
 }
 
 /** `aliases` with mode `mode`'s map replaced by `entries` (dropped when
@@ -1815,7 +1817,16 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       if (idx !== -1) return idx;
     }
 
-    // Fall back to first item
+    // Fall back to the first item, except past a needs-attention band with
+    // someone in it: Enter does nothing on that header, and the point of
+    // opening the picker is to reach whoever is waiting.
+    const [first, second] = items;
+    if (
+      first?.type === "header" &&
+      first.groupKey === NEEDS_YOU_GROUP_KEY &&
+      second?.type === "session"
+    )
+      return 1;
     return items.length > 0 ? 0 : -1;
   });
 
@@ -1949,22 +1960,37 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
    * names can put the cursor back on whichever group they fold into now.
    * Read through `selectedFlatItem`, not `selectedHeaderKey`: with nothing
    * chosen yet the cursor sits on the first row by fallback, and a rename
-   * that re-sorts that header must still take the cursor with it.
+   * that re-sorts that header must still take the cursor with it. Also
+   * whether the selected row is on the list, so one the new names hide can
+   * be told from one that was never drawn.
    */
-  function selectedHeaderSnapshot(): HeaderSnapshot | null {
+  function selectionSnapshot(): SelectionSnapshot {
     const item = selectedFlatItem();
-    return item?.type === "header" && item.rawKeys
-      ? { key: item.groupKey, rawKeys: item.rawKeys }
-      : null;
+    const id = state.selectedSessionId;
+    return {
+      header:
+        item?.type === "header" && item.rawKeys
+          ? { key: item.groupKey, rawKeys: item.rawKeys }
+          : null,
+      rowDrawn:
+        !!id &&
+        flatItems().some(
+          (i) => i.type === "session" && i.filteredSession.session.id === id,
+        ),
+    };
   }
 
   /**
    * After the group names changed, keep the cursor on what it was on: the
    * selected header moves to the group its raw keys now fold into (the first
-   * in display order, for a reset that split it), and a selected row a merge
-   * tucked into a collapsed group gives way to that group's header.
+   * in display order, for a reset that split it), and a selected row the
+   * new names hide is deselected, giving way to its group's header when a
+   * merge tucked it into a collapsed one.
    */
-  function followGroupSelection(before: HeaderSnapshot | null) {
+  function followGroupSelection({
+    header: before,
+    rowDrawn,
+  }: SelectionSnapshot) {
     const items = flatItems();
     const headers = items.filter(
       (item): item is Extract<FlatItem, { type: "header" }> =>
@@ -1987,12 +2013,23 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       )
     )
       return;
+    // Its group's header takes the cursor only when that header is drawn (a
+    // merge into a collapsed group); a search the new names no longer match
+    // leaves none.
     const session = state.sessions.find((s) => s.id === id);
     const key = session && sessionGroupKey(session);
-    if (key && headers.some((h) => h.groupKey === key)) {
+    const drawn = !!key && headers.some((h) => h.groupKey === key);
+    // A row the names just hid stops being the action target whether or not
+    // anything takes its place: the preview, a search Enter and preview focus
+    // would otherwise keep acting on a session nobody can see. One that was
+    // never drawn is left alone: the sidebar selects its pane's session by
+    // id before the session itself has arrived.
+    if (!drawn && !rowDrawn) return;
+    batch(() => {
       setState("selectedSessionId", null);
-      setSelectedHeaderKey(key);
-    }
+      setState("previewFocused", false);
+      setSelectedHeaderKey(drawn ? key : null);
+    });
   }
 
   /**
@@ -2007,7 +2044,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     pinned: string[],
     collapsed: Set<string>,
   ) {
-    const follow = selectedHeaderSnapshot();
+    const follow = selectionSnapshot();
     batch(() => {
       setGroupAliases(aliases);
       setGroupLayouts(layouts);
@@ -2066,6 +2103,24 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     expanded.delete(key);
     setCollapsedGroups(expanded);
     persistCollapsedGroups(expanded);
+  }
+
+  /**
+   * Turn the cursor's band fallback into a real selection before the list
+   * changes under it. `selectedIndex` opens on the first waiting session
+   * without committing it, so once that session stops waiting the band
+   * empties and the fallback drops to whatever header is now first, away
+   * from the row the user was looking at. Pinned, the cursor follows the
+   * session out of the band, as it would had the user moved there. Only the
+   * band case pins: every other fallback is the top row, which tracks the
+   * list's order on purpose. Local only, so it is not broadcast.
+   */
+  function pinBandFallback() {
+    if (state.selectedSessionId || selectedHeaderKey()) return;
+    const item = selectedFlatItem();
+    if (item?.type !== "session") return;
+    const session = item.filteredSession.session;
+    if (inBand(session)) setState("selectedSessionId", session.id);
   }
 
   /**
@@ -2294,6 +2349,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       );
       const merged =
         synthetic.length > 0 ? [...sessions, ...synthetic] : sessions;
+      pinBandFallback();
       const wasWaiting = selectedSession()?.status === "waiting";
       batch(() => {
         setState("sessions", merged);
@@ -2325,6 +2381,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         this.updateSession(session);
         return;
       }
+      pinBandFallback();
       setState("sessions", (s) => [...s, session]);
     },
 
@@ -2342,6 +2399,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
     updateSession(session: EnrichedSession) {
       const idx = state.sessions.findIndex((s) => s.id === session.id);
       if (idx !== -1) {
+        pinBandFallback();
         const wasWaiting =
           state.selectedSessionId === session.id &&
           state.sessions[idx]?.status === "waiting";
@@ -3353,7 +3411,7 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
      */
     reloadUIState(freshState: UIState) {
       const queued = (key: keyof UIState) => Object.hasOwn(pendingUpdates, key);
-      const follow = selectedHeaderSnapshot();
+      const follow = selectionSnapshot();
       batch(() => {
         const collapsed = freshState.collapsedGroups;
         if (
@@ -3426,6 +3484,10 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
       // differ, as cwd's home-shortened paths do) means that group.
       const name = resolveGroupName(rawName, groups, mode);
       if (!name || name === key) return;
+      // The rows move (a merge folds two groups, and a new name re-sorts
+      // this one), so a recorded scroll offset no longer lands where it
+      // did, the same reason the collapse actions drop it.
+      localScrollTop = undefined;
       const map = aliases[mode] ?? {};
       const members = new Set(
         Object.keys(map).filter((raw) => map[raw] === key),
@@ -3514,6 +3576,8 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         actions.showToast("No custom name to reset");
         return;
       }
+      // Splitting a merged group back out moves rows, as a rename does.
+      localScrollTop = undefined;
       const next = withModeAliases(
         aliases,
         mode,
@@ -3706,6 +3770,15 @@ export function createTUIStore(options: TUIStoreOptions = {}) {
         persistCollapsedGroups(next);
         return next;
       });
+    },
+
+    /**
+     * Pin the cursor's band fallback now rather than on the next session
+     * event (see `pinBandFallback`), for a caller about to snapshot the
+     * selection: the later pin would otherwise read as the user moving.
+     */
+    commitBandFallback() {
+      pinBandFallback();
     },
 
     /**

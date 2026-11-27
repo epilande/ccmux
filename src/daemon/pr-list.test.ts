@@ -560,6 +560,21 @@ describe("branch PR identity", () => {
       ),
     ).toEqual({ ok: true, value: [pr] });
   });
+  it("keeps an unparseable configured remote unknown so cached facts go stale", async () => {
+    expect(
+      await select(
+        "local-ahead",
+        "origin",
+        "refs/heads/patch-1",
+        "/srv/git/r.git",
+      ),
+    ).toEqual({ ok: false, error: "Cannot identify branch remote" });
+  });
+  it("still lets an exact tip answer past an unparseable configured remote", async () => {
+    expect(
+      await select("abc", "origin", "refs/heads/patch-1", "/srv/git/r.git"),
+    ).toEqual({ ok: true, value: [pr] });
+  });
   it("reports unreadable local identity as a failure, allowing cached facts to go stale", async () => {
     expect(
       (

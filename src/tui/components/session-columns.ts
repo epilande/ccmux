@@ -950,7 +950,12 @@ export function fitProjectCell(
   budget: number,
   maxBranchLen: number,
 ): ProjectCellDisplay {
-  return oneMark(input, budget, shrinkProjectCell(input, budget, maxBranchLen));
+  return oneMark(
+    input,
+    budget,
+    maxBranchLen,
+    shrinkProjectCell(input, budget, maxBranchLen),
+  );
 }
 
 /** The shrink cascade `fitProjectCell` describes, before `oneMark`. */
@@ -1039,12 +1044,15 @@ function shrinkProjectCell(
  * path beside a cut branch. Then the branch alone takes the cut beside a
  * whole identity: the repo and worktree name when they leave room for its
  * narrowest label, else the name alone (the repo goes before the branch
- * does, so a widening terminal never trades the branch for the repo). With
- * no room even for that, the name takes the whole cell.
+ * does, so a widening terminal never trades the branch for the repo). Next
+ * the name takes the cut beside a whole branch, the shape a narrower cell
+ * already draws (`workt…:fix-me+`). With no room even for that, the name
+ * takes the whole cell.
  */
 function oneMark(
   input: ProjectCellInput,
   budget: number,
+  maxBranchLen: number,
   fitted: ProjectCellDisplay,
 ): ProjectCellDisplay {
   const { prefix, dirname, branch, isWorktree, repoPrefix } = input;
@@ -1057,6 +1065,22 @@ function oneMark(
     const rest = budget - displayWidth(keep) - displayWidth(dirname);
     const branchLabel = shortenBranchLabel(branch, isWorktree, rest);
     if (branchLabel) return { prefix: keep, dirname, branchLabel };
+  }
+  // Without this the branch blinks out as the cell widens: the repo's
+  // reserve starts cutting it (and the name) a few columns before the whole
+  // name leaves room beside it, and the narrower cell showed it whole. Only
+  // a branch within its cap, so the name's mark stays the cell's one.
+  if (displayWidth(branch) <= maxBranchLen) {
+    const branchLabel = branchLabelFor(branch, isWorktree, maxBranchLen);
+    for (const keep of repoPrefix ? [prefix, ""] : [""]) {
+      const rest = budget - displayWidth(keep) - displayWidth(branchLabel);
+      if (rest >= (keep ? WORKTREE_NAME_FLOOR : DIRNAME_FLOOR))
+        return {
+          prefix: keep,
+          dirname: truncateText(dirname, rest),
+          branchLabel,
+        };
+    }
   }
   return { prefix: "", dirname: fitDirname(dirname, budget), branchLabel: "" };
 }

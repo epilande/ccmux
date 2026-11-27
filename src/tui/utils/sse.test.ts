@@ -1,5 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { dispatchSSEEvent, type SSECallbacks } from "./sse";
+import {
+  connectionErrorText,
+  dispatchSSEEvent,
+  type SSECallbacks,
+} from "./sse";
 import type {
   DaemonHealth,
   InvocationSnapshotEntry,
@@ -23,6 +27,20 @@ function makeCallbacks(over: Partial<SSECallbacks> = {}): SSECallbacks {
     ...over,
   };
 }
+
+describe("connectionErrorText", () => {
+  it("words an unreachable daemon as a state", () => {
+    expect(
+      connectionErrorText(
+        "Unable to connect. Is the computer able to access the url?",
+      ),
+    ).toBe("Daemon offline, reconnecting...");
+  });
+
+  it("keeps any other failure verbatim", () => {
+    expect(connectionErrorText("HTTP 500")).toBe("Error: HTTP 500");
+  });
+});
 
 describe("dispatchSSEEvent init handling", () => {
   it("threads init.invocations through to onInit", () => {

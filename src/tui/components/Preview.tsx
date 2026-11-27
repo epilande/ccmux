@@ -315,6 +315,16 @@ interface PreviewProps {
   pollDelays?: { min: number; max: number };
 }
 
+/**
+ * tmux captures a pane's whole height, so output that has not reached the
+ * bottom arrives followed by blank lines (styled ones too, under `-e`). The
+ * preview sticks to the bottom and would show only those.
+ */
+export function trimTrailingBlankLines(text: string): string {
+  // `:` too: tmux writes SGR subparameters colon-separated (`ESC[4:3m`).
+  return text.replace(/(?:\n(?:\x1b\[[0-9;:]*m|[ \t])*)+$/, "");
+}
+
 export const Preview: Component<PreviewProps> = (props) => {
   const dims = useSharedTerminalDimensions();
   const separatorWidth = createMemo(() =>
@@ -371,7 +381,8 @@ export const Preview: Component<PreviewProps> = (props) => {
     if (paneContent === null) {
       return applyCapture(CAPTURE_FAILED, "Failed to capture pane");
     }
-    return applyCapture(paneContent, paneContent);
+    const trimmed = trimTrailingBlankLines(paneContent);
+    return applyCapture(trimmed, trimmed);
   };
 
   createEffect(() => {

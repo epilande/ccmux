@@ -50,7 +50,7 @@ import {
   type HunkReviewNote,
 } from "./utils/review";
 import { copyToClipboard } from "./utils/clipboard";
-import { SSEClient } from "./utils/sse";
+import { connectionErrorText, SSEClient } from "./utils/sse";
 import {
   switchToPane,
   sendKeys,
@@ -1165,12 +1165,29 @@ export function App(props: AppProps) {
    */
   function modalOverlayOpen(): boolean {
     return (
+      dialogOwnsInput() ||
+      store.state.previewFocused ||
+      store.state.worktrees !== null ||
+      store.state.sourcePicker !== null
+    );
+  }
+
+  /**
+   * Whether a dialog over the views owns input: help, a confirmation, the
+   * notice, the palette, or the new-session, Copy or handoff dialog. Each one
+   * is answered ahead of the views in the keyboard handler, so nothing under
+   * it may act either: not a row click (`modalOverlayOpen`), not a Worktrees
+   * or Start body (`panelOwnsKeys`), and not a view switch from the strip
+   * (`switchMainView`). One predicate, because three hand-kept lists drifted:
+   * the handoff dialog was missing from two, so a strip click swapped Start
+   * in under it, and Start's `n` opened a new-session dialog whose Enter the
+   * handoff, answered first, took as its own.
+   */
+  function dialogOwnsInput(): boolean {
+    return (
       store.state.showHelp ||
       store.state.confirmMode ||
-      store.state.previewFocused ||
       store.state.newSession !== null ||
-      store.state.worktrees !== null ||
-      store.state.sourcePicker !== null ||
       store.state.notice !== null ||
       store.state.copyDialog !== null ||
       store.state.handoffDialog !== null ||
@@ -1497,15 +1514,15 @@ export function App(props: AppProps) {
       : store.state.sourcePicker
         ? "start"
         : "sessions";
-  /** Whether a Worktrees or Start body owns the keyboard: not while help, a
-   *  confirmation, a dialog or the palette is over it, and not while its
-   *  preview is focused (App scrolls that). A disabled body also yields its
-   *  footer to App's, which shows the keys of whatever does own them. */
+  /** Whether a Worktrees or Start body owns the keyboard: not while a dialog
+   *  owns input (`dialogOwnsInput`), a handoff is aiming or the session
+   *  search is typing, and not while its preview is focused (App scrolls
+   *  that). A disabled body also yields its footer to App's, which shows the
+   *  keys of whatever does own them. */
   const panelOwnsKeys = () =>
-    !store.state.showHelp &&
-    !store.state.confirmMode &&
-    !store.state.newSession &&
-    !store.state.palette &&
+    !dialogOwnsInput() &&
+    store.state.handoffPick === null &&
+    !store.state.searchMode &&
     !store.state.previewFocused;
   const repoFacts = createRepoFacts({
     connected: () => store.state.connectionState === "connected",
@@ -1513,19 +1530,37 @@ export function App(props: AppProps) {
     cwd: () => pickerCwd(),
     visible: () => isVisible(),
   });
+  /**
+   * Whether entering another view is refused now: under anything that owns
+   * input, since the entry would leave that owner answering keys over a view
+   * it is no longer drawn on, and the panel it opened disabled under it
+   * (`panelOwnsKeys`). A handoff being aimed and the search input live on the
+   * session list (Esc leaves either), and a removal prompt on the Worktrees
+   * panel.
+   *
+   * Every way INTO a view asks this, not only the strip: the group menu's
+   * Worktrees once opened the panel directly under a search, where the
+   * panel's early return kept Esc from the search and the strip refused the
+   * way back, so nothing recovered. The view keys need no check of their
+   * own, because each owner here takes the keyboard ahead of them.
+   */
+  function viewEntryRefused(): boolean {
+    return (
+      dialogOwnsInput() ||
+      store.state.handoffPick !== null ||
+      store.state.searchMode ||
+      worktreeModal()
+    );
+  }
   function switchMainView(next: View) {
-    if (
-      next === view() ||
-      worktreeModal() ||
-      store.state.newSession ||
-      store.state.confirmMode ||
-      store.state.showHelp ||
-      store.state.palette
-    )
-      return;
+    if (next === view() || viewEntryRefused()) return;
     // A focused preview belongs to the view it is in; the next view's
     // preview starts unfocused (and a strip click is how one gets here).
     store.actions.exitPreviewFocus();
+    // So does a row menu: it is the session list's, and the panels answer
+    // keys ahead of the branch that would dismiss it.
+    store.actions.hideContextMenu();
+    store.actions.hideGroupContextMenu();
     // The base scope: a `W`/`N` jump narrowed only the view it opened, and
     // leaving it for another view ends the jump.
     const scope = store.baseScope();
@@ -1807,6 +1842,13 @@ export function App(props: AppProps) {
       isSyntheticGroupKey(header.groupKey)
     )
       return;
+    // The strip's refusal, said aloud: a menu item that silently did nothing
+    // would read as broken, where the strip's tab simply stays put.
+    if (viewEntryRefused()) {
+      if (store.state.searchMode)
+        store.actions.showToast("Esc ends the search first");
+      return;
+    }
     const repo =
       header.members
         .map((member) => member.session)
@@ -2568,7 +2610,7 @@ export function App(props: AppProps) {
         // the group collapsed underneath.
         id: "collapse",
         label: isCollapsed ? "Expand" : "Collapse",
-        hint: "space",
+        hint: "enter",
         color: theme.text,
         action: groupContextMenuToggleCollapse,
       },
@@ -2622,7 +2664,11 @@ export function App(props: AppProps) {
       {
         id: "kill-group",
         label: "Kill group",
-        hint: "X",
+        // Menu-local (`key`): on the list `x` kills the marked sessions when
+        // any are marked, which may sit in another group, so the fall-through
+        // could disagree with clicking this item. (`X` kills all in view.)
+        hint: "x",
+        key: "x",
         color: theme.red,
         action: groupContextMenuKill,
       },
@@ -3189,7 +3235,8 @@ export function App(props: AppProps) {
    * A spawn's pane, until its session row arrives over SSE and takes the
    * cursor. The row comes from the daemon's next scan, not the spawn reply,
    * so the selection waits for it, but not forever (`SPAWN_SELECT_MS`), and
-   * never over the user: a cursor moved in the meantime wins.
+   * never over the user: a cursor moved in the meantime, or a preview
+   * focused, wins.
    */
   const [pendingSpawn, setPendingSpawn] = createSignal<{
     paneId: string;
@@ -3197,6 +3244,10 @@ export function App(props: AppProps) {
     headerKey: string | null;
   } | null>(null);
   function selectWhenArrives(paneId: string) {
+    // Any session event pins a cursor resting on the band's fallback (the
+    // spawned row's own arrival among them), and the check below would take
+    // that pin for the user moving. Pin it first, so the snapshot holds it.
+    store.actions.commitBandFallback();
     const pending = {
       paneId,
       sessionId: store.state.selectedSessionId,
@@ -3211,7 +3262,11 @@ export function App(props: AppProps) {
   createEffect(() => {
     const pending = pendingSpawn();
     if (!pending) return;
+    // Preview focus is a choice of pane too: it types into the selected
+    // session's, so a row that took the cursor now would send the rest of
+    // the user's keys to an agent they did not pick.
     if (
+      store.state.previewFocused ||
       store.state.selectedSessionId !== pending.sessionId ||
       store.selectedHeaderKey() !== pending.headerKey
     ) {
@@ -4443,14 +4498,16 @@ export function App(props: AppProps) {
           const marked = store
             .filteredSessions()
             .filter((s) => store.state.markedSessions.has(s.session.id))
-            .map((s) => s.session.id);
+            .map((s) => s.session);
           const sessionToKill = store.selectedSession();
           if (marked.length) {
             store.actions.showConfirmDialog(
               null,
               "kill-group",
-              marked,
-              "Marked sessions",
+              marked.map((s) => s.id),
+              marked
+                .map((s) => s.tmuxTarget ?? s.tmuxPane ?? s.project)
+                .join(", "),
             );
             break;
           }
@@ -4752,7 +4809,9 @@ export function App(props: AppProps) {
 
         <Show when={store.state.error}>
           <box paddingLeft={1} height={1}>
-            <Text fg={theme.red}>Error: {store.state.error}</Text>
+            <Text fg={theme.red}>
+              {connectionErrorText(store.state.error ?? "")}
+            </Text>
           </box>
         </Show>
 
@@ -4936,7 +4995,6 @@ export function App(props: AppProps) {
               scope={store.state.scope}
               activeSessionId={store.state.activeSessionId}
               effects={liveEffects}
-              facts={repoFacts.data()}
               showPreview={!props.sidebar && store.state.showPreview}
               previewWidth={store.state.previewWidth}
               previewFocused={store.state.previewFocused}

@@ -3341,6 +3341,117 @@ describe("store", () => {
       expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["a"]);
     });
 
+    it("lands on the first waiting session rather than the band's header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+
+      expect(store.flatItems()[0]).toMatchObject({
+        type: "header",
+        groupKey: NEEDS_YOU_GROUP_KEY,
+      });
+      expect(store.selectedIndex()).toBe(1);
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("follows the waiting session out of the band when its wait ends", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+      expect(store.selectedSession()?.id).toBe("b");
+
+      store.actions.updateSession(
+        createMockSession({ id: "b", project: "beta", status: "idle" }),
+      );
+
+      expect(
+        store
+          .flatItems()
+          .some(
+            (i) => i.type === "header" && i.groupKey === NEEDS_YOU_GROUP_KEY,
+          ),
+      ).toBe(false);
+      expect(store.selectedSession()?.id).toBe("b");
+      expect(store.selectedFlatItem()).toMatchObject({ type: "session" });
+    });
+
+    it("follows it through a full snapshot too", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "waiting" }),
+      ]);
+
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({ id: "b", project: "beta", status: "idle" }),
+      ]);
+
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("stays on the session it opened on when another starts waiting", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+        createMockSession({
+          id: "b",
+          project: "beta",
+          status: "waiting",
+          statusChangedAt: "2024-01-15T12:00:00Z",
+        }),
+      ]);
+
+      store.actions.addSession(
+        createMockSession({
+          id: "c",
+          project: "gamma",
+          status: "waiting",
+          // Waiting longer, so the band sorts it ahead of "b".
+          statusChangedAt: "2024-01-15T11:00:00Z",
+        }),
+      );
+
+      expect(store.selectedSession()?.id).toBe("b");
+    });
+
+    it("leaves the top-row fallback unpinned outside the band", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha" }),
+      ]);
+      store.actions.updateSession(
+        createMockSession({ id: "a", project: "alpha", status: "working" }),
+      );
+
+      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedIndex()).toBe(0);
+    });
+
+    it("stays on a band with nobody in it, since the next row is a header", () => {
+      const store = createTUIStore({ groupBy: "project" });
+      store.actions.setSessions([
+        createMockSession({ id: "a", project: "alpha", mainRepoRoot: "/a" }),
+        createMockSession({
+          id: "b",
+          project: "beta",
+          mainRepoRoot: "/b",
+          status: "waiting",
+        }),
+      ]);
+      store.actions.setScope("/a");
+
+      expect(store.flatItems()[0]).toMatchObject({
+        groupKey: NEEDS_YOU_GROUP_KEY,
+      });
+      expect(store.flatItems()[1]?.type).toBe("header");
+      expect(store.selectedIndex()).toBe(0);
+    });
+
     it("should return session on initial load when groupBy is none", () => {
       const store = createTUIStore({ groupBy: "none" });
       store.actions.setSessions([
@@ -3784,6 +3895,22 @@ describe("store", () => {
         sidebar.actions.toggleGroupCollapse("alpha");
         await sidebar.flushSidebarStateNow();
         expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+
+        // So do a rename (here a merge into beta) and the reset that splits
+        // it back out: both move rows under the recorded offset.
+        sidebar.actions.setLocalScrollTop(18);
+        sidebar.actions.renameGroup("alpha", "beta");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+        sidebar.actions.setLocalScrollTop(21);
+        sidebar.actions.resetGroupName("beta");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBeUndefined();
+        // A rename that changes nothing leaves the offset alone.
+        sidebar.actions.setLocalScrollTop(24);
+        sidebar.actions.renameGroup("alpha", "alpha");
+        await sidebar.flushSidebarStateNow();
+        expect(fetchCalls.at(-1)!.scrollTop).toBe(24);
       } finally {
         globalThis.fetch = origFetch;
       }
@@ -5394,6 +5521,8 @@ describe("scope selection and mark lifetime", () => {
     store.actions.setScope("/b");
     expect(store.selectedHeaderKey()).toBeNull();
     expect(store.selectedGroupSessions().map((s) => s.id)).toEqual(["b"]);
+    store.actions.setScope(null);
+    expect(store.selectedHeaderKey()).toBeNull();
   });
   it("removal clears only that row's mark before its ID can be reused", () => {
     const store = createTUIStore({ groupBy: "none" });
@@ -6631,6 +6760,62 @@ describe("group rename and merge (#42)", () => {
       store.actions.setGroupBy("none");
       store.actions.openRenamePrompt("");
       expect(store.state.palette).toBeNull();
+    });
+  });
+
+  // A selected row the new names push out of the list (here, out of an
+  // alias-only search) must stop being the action target: the preview, a
+  // search Enter and preview focus would otherwise keep acting on a session
+  // nobody can see. Its header takes the cursor only when it is drawn.
+  describe("a selected row the new names hide", () => {
+    function hidden() {
+      const { store, writes } = setup({
+        groupAliases: { project: { beta: "Office" } },
+      });
+      store.actions.setSearchQuery("Office");
+      store.actions.setSelectedSessionId("b");
+      store.actions.enterPreviewFocus();
+      expect(store.selectedSession()?.id).toBe("b");
+      return { store, writes };
+    }
+    function expectCleared(store: ReturnType<typeof createTUIStore>) {
+      expect(
+        store
+          .flatItems()
+          .some(
+            (i) => i.type === "session" && i.filteredSession.session.id === "b",
+          ),
+      ).toBe(false);
+      expect(store.state.selectedSessionId).toBeNull();
+      expect(store.selectedSession()).toBeNull();
+      expect(store.selectedHeaderKey()).toBeNull();
+      expect(store.state.previewFocused).toBe(false);
+    }
+
+    it("clears it when another instance renames the alias away", () => {
+      const { store } = hidden();
+      store.actions.reloadUIState({
+        groupAliases: { project: { beta: "Backend" } },
+      });
+      expectCleared(store);
+    });
+
+    it("clears it when another instance resets the alias", () => {
+      const { store } = hidden();
+      store.actions.reloadUIState({ groupAliases: {} });
+      expectCleared(store);
+    });
+
+    it("clears it on a local rename", () => {
+      const { store } = hidden();
+      store.actions.renameGroup("Office", "Backend");
+      expectCleared(store);
+    });
+
+    it("clears it on a local reset", () => {
+      const { store } = hidden();
+      store.actions.resetGroupName("Office");
+      expectCleared(store);
     });
   });
 });

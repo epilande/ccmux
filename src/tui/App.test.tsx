@@ -452,6 +452,117 @@ describe("App", () => {
     expect(frame).toContain("type to search");
   });
 
+  it("keeps a strip click from switching views under an open search", async () => {
+    // The search input owns the text keys and stays mounted while search is
+    // on, so a view switched in under it would take every typed letter as a
+    // panel key at the same time as the input took it as text.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({})) as unknown as typeof fetch;
+    try {
+      await renderApp(120, 24, { groupBy: "none", persistent: true });
+      sseCallbacks!.onInit(
+        [mockEnrichedSession({ id: "s1", project: "alpha", tmuxPane: "%1" })],
+        null,
+      );
+      await setup.renderOnce();
+      setup.mockInput.pressKey("/");
+      await setup.renderOnce();
+      await setup.mockInput.typeText("al");
+      await setup.renderOnce();
+      const strip = setup.captureCharFrame().split("\n")[0]!;
+      await setup.mockMouse.click(strip.indexOf("Start") + 1, 0);
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+      await setup.mockInput.typeText("pn");
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+      const frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Filter pull requests");
+      expect(frame).not.toContain("New session");
+      expect(frame).toContain("alpn");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("keeps the group menu's Worktrees from opening the panel under an open search", async () => {
+    // The strip refuses a switch under the search, and the group menu's
+    // Worktrees is the same entry into the same view. Taken directly, it
+    // put the panel up disabled (search owns the keys) over a search whose
+    // Esc never ran (the panel's early return comes first), and the strip
+    // refused the way back: nothing recovered.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({})) as unknown as typeof fetch;
+    const settle = async () => {
+      await new Promise((done) => setTimeout(done, 0));
+      await setup.renderOnce();
+    };
+    const lineOf = (text: string) =>
+      setup
+        .captureCharFrame()
+        .split("\n")
+        .findIndex((line) => line.includes(text));
+    const colOf = (line: number, text: string) =>
+      setup.captureCharFrame().split("\n")[line]!.indexOf(text) + 1;
+    try {
+      await renderApp(120, 24, { groupBy: "project", persistent: true });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({
+            id: "s1",
+            project: "alpha",
+            cwd: "/code/alpha",
+            mainRepoRoot: "/code/alpha",
+            tmuxPane: "%1",
+          }),
+        ],
+        null,
+      );
+      await settle();
+      setup.mockInput.pressKey("/");
+      await settle();
+      await setup.mockInput.typeText("al");
+      await settle();
+      const header = lineOf("alpha (1)");
+      expect(header).toBeGreaterThan(-1);
+      await setup.mockMouse.click(5, header, MouseButtons.RIGHT);
+      await settle();
+      const item = lineOf("│ Worktrees");
+      expect(item).toBeGreaterThan(-1);
+      await setup.mockMouse.click(colOf(item, "Worktrees"), item);
+      await settle();
+      let frame = setup.captureCharFrame();
+      // Refused, and said why: still Sessions, unscoped, still searching.
+      expect(frame).toContain("scope: all repos");
+      expect(frame).toContain("/ al");
+      expect(frame).toContain("alpha (1)");
+      expect(frame).not.toContain("│ Worktrees");
+      expect(frame).toContain("Esc ends the search first");
+      // And the search is still the search's: typing lands in it, and Esc
+      // ends it.
+      await setup.mockInput.typeText("p");
+      await settle();
+      expect(setup.captureCharFrame()).toContain("alp");
+      deliverEscape(setup.renderer);
+      await settle();
+      frame = setup.captureCharFrame();
+      expect(frame).not.toContain("Search sessions");
+      expect(frame).not.toContain("alp ");
+      // With the search over, the same menu item opens the panel, narrowed
+      // to the group's repo.
+      await setup.mockMouse.click(5, lineOf("alpha (1)"), MouseButtons.RIGHT);
+      await settle();
+      const again = lineOf("│ Worktrees");
+      await setup.mockMouse.click(colOf(again, "Worktrees"), again);
+      await settle();
+      expect(setup.captureCharFrame()).toContain("scope: alpha");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("toggles help overlay on ? key", async () => {
     await renderApp(120, 24);
     setup.mockInput.pressKey("?");
@@ -2519,6 +2630,40 @@ describe("App kill/restart dispatch routing", () => {
     }
   });
 
+  it("kills the menu's group on its x, whatever is marked elsewhere", async () => {
+    const { calls, restore } = captureFetch();
+    try {
+      await renderApp(120, 24, { groupBy: "project" });
+      sseCallbacks!.onInit(
+        [
+          mockEnrichedSession({ id: "a", project: "alpha", tmuxPane: "%1" }),
+          mockEnrichedSession({ id: "b", project: "beta", tmuxPane: "%2" }),
+        ],
+        null,
+      );
+      await setup.renderOnce();
+      // alpha header, a, beta header, b: mark b, then open alpha's menu.
+      for (const key of ["g", "g", "j", "j", "j", " ", "g", "g", "m"]) {
+        setup.mockInput.pressKey(key);
+        await setup.renderOnce();
+      }
+      expect(setup.captureCharFrame()).toMatch(/Kill group\s+x/);
+      // The advertised key does what clicking the item does: this group.
+      setup.mockInput.pressKey("x");
+      await setup.renderOnce();
+      expect(setup.captureCharFrame()).toContain("alpha");
+      setup.mockInput.pressKey("y");
+      await setup.renderOnce();
+      expect(
+        calls
+          .filter((c) => c.url.endsWith("/kill"))
+          .map((c) => c.url.split("/sessions/")[1]),
+      ).toEqual(["a/kill"]);
+    } finally {
+      restore();
+    }
+  });
+
   it("keeps the flat list's sessions header inert: x, the menu, and Enter reach no group action", async () => {
     const { calls, restore } = captureFetch();
     try {
@@ -2655,7 +2800,7 @@ describe("App kill/restart dispatch routing", () => {
         await setup.renderOnce();
       }
       const frame = setup.captureCharFrame();
-      expect(frame).toContain("Marked sessions (2 sessions)");
+      expect(frame).toContain("2 sessions · ");
     } finally {
       restore();
     }
@@ -7442,6 +7587,9 @@ describe("App row menu (m)", () => {
       // The group menu's own items, and none of the row menu's.
       expect(frame).toContain("Pin to top");
       expect(frame).toContain("Kill group");
+      // Hints name the list's keys: `X` there kills everything, Space marks.
+      expect(frame).toMatch(/Kill group\s+x/);
+      expect(frame).toMatch(/Collapse\s+enter/);
       expect(frame).not.toContain("Attach");
     } finally {
       restore();
@@ -8641,6 +8789,47 @@ describe("App hand off to", () => {
       await settle();
       await setup.renderOnce();
       expect(posted[0]!.body).toMatchObject({ turns: 1, note: "j3" });
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps a strip click and the Start keys off an open handoff dialog", async () => {
+    // The repro: with the note focused, a click on the strip's Start tab
+    // switched views under the dialog, Start's `n` then opened a new-session
+    // dialog, and Enter there submitted the handoff nobody could see.
+    const { posted, restore } = withDaemon();
+    try {
+      await renderRows();
+      await pickTarget();
+      setup.mockInput.pressTab();
+      await settle();
+      await setup.renderOnce();
+      const strip = setup.captureCharFrame().split("\n")[0]!;
+      const start = strip.indexOf("Start");
+      expect(start).toBeGreaterThan(-1);
+      await setup.mockMouse.click(start + 1, 0);
+      await settle();
+      await setup.renderOnce();
+      await press("n");
+      const frame = squish(setup.captureCharFrame());
+      // Still the dialog over Sessions: no Start body under it, and no
+      // new-session dialog stacked on it.
+      expect(frame).toContain("entersend");
+      expect(frame).toContain("Toproj2Claude");
+      expect(frame).not.toContain("Newsession");
+      expect(frame).not.toContain("Filterpullrequests");
+      expect(posted).toEqual([]);
+      // The `n` was the note's, which is where the focus was.
+      setup.mockInput.pressEnter();
+      await settle();
+      await setup.renderOnce();
+      expect(posted).toHaveLength(1);
+      expect(posted[0]!.body).toMatchObject({
+        from: "s1",
+        to: "s2",
+        note: "n",
+      });
     } finally {
       restore();
     }
@@ -10232,6 +10421,73 @@ describe("App worktrees panel (W)", () => {
         expect(spawned).toHaveLength(1);
         // Sessions now, though the new row has not arrived yet.
         expect(isActiveTab("Sessions")).toBe(true);
+        arrive("myapp");
+        await frame();
+        expect(cursorLine()).toContain("dev:2.1");
+      } finally {
+        restore();
+      }
+    });
+
+    // Preview focus types into the selected session's pane, so a row that
+    // arrived and took the cursor mid-typing would send the rest of the keys
+    // to a different agent. Focusing the preview is a choice of pane.
+    it("keeps the keys on the focused pane when the new session arrives", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, {
+          groupBy: "none",
+          persistent: true,
+          initialPreview: true,
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1)], null);
+        await frame();
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
+        setup.mockInput.pressTab();
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("a");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+        arrive("myapp");
+        await frame();
+        sendKeysSpy.mockClear();
+        setup.mockInput.pressKey("b");
+        await frame();
+        expect(sendKeysSpy.mock.calls.map((c) => c[0])).toEqual(["%1"]);
+      } finally {
+        restore();
+      }
+    });
+
+    // The cursor opens on the first waiting row without committing to it,
+    // and any session event pins that fallback; the pin is not the user
+    // moving, so it must not cancel the new row's claim on the cursor.
+    it("moves the cursor to the new session from the waiting row's fallback", async () => {
+      const { spawned, restore } = mockSpawnDaemon();
+      try {
+        await renderApp(120, 24, { groupBy: "none", persistent: true });
+        const waiting = mockEnrichedSession({
+          id: "w1",
+          project: "myapp",
+          cwd: "/code/myapp",
+          mainRepoRoot: "/code/myapp",
+          tmuxPane: "%2",
+          tmuxTarget: "dev:1.2",
+          status: "waiting",
+        });
+        sseCallbacks!.onInit([session("s1", "myapp", 1), waiting], null);
+        await frame();
+        expect(cursorLine()).toContain("dev:1.2");
+        setup.mockInput.pressKey("n");
+        await frame();
+        setup.mockInput.pressEnter();
+        await frame();
+        expect(spawned).toHaveLength(1);
         arrive("myapp");
         await frame();
         expect(cursorLine()).toContain("dev:2.1");

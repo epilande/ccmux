@@ -314,7 +314,7 @@ describe("HelpOverlay narrow and wide picker (issue #200)", () => {
     expect(nav!).not.toContain("Groups");
     expectHelpEntry(frame, "j/k ↑/↓", "Move cursor");
     expectHelpEntry(frame, "gg / G", "First / last row");
-    expectHelpEntry(frame, "1-9", "Go to row N");
+    expectHelpEntry(frame, "1-9", "Jump to row N");
     expectHelpEntry(frame, "Enter", "Go / toggle group");
     // 26 columns against a 40-column single-column budget: one line, whole.
     expectHelpEntry(frame, "y", "Copy response / path / URL");
