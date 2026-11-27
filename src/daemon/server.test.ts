@@ -54,7 +54,7 @@ import { SessionManager } from "./sessions";
 import type { SessionEvent } from "./sessions";
 import type { SSEEvent, DaemonHealth } from "../types";
 import { BUILTIN_AGENTS, type AgentDef } from "../lib/agents";
-import { BUILD_IDENTITY } from "../lib/build-identity";
+import { BUILD_IDENTITY, type PublishedBuild } from "../lib/build-identity";
 import type { SpawnableAgent } from "../lib/spawnable-agents";
 import type { Session, TmuxPane, EnrichedSession } from "../types/session";
 import { AttentionTracker } from "./attention-tracker";
@@ -88,6 +88,8 @@ import { MAX_SPAWN_PROMPT_BYTES } from "./spawn-command";
  * Avoids starting the HTTP server (no port binding needed).
  */
 type ServerInternals = {
+  /** Stubbed to stand in for a daemon whose binary was uninstalled. */
+  publishedBuild: () => PublishedBuild;
   sessionEventToSSE(event: SessionEvent): Promise<SSEEvent | null>;
   enrichSession(session: Session): Promise<EnrichedSession>;
   sweepBranchPRs(): void;
@@ -3560,6 +3562,43 @@ describe("getServerSocketPath and /server-info", () => {
       expect(data.build).toEqual(BUILD_IDENTITY);
       // Nothing invoked, nothing handed off: the CLI may replace this daemon.
       expect(data.busy).toEqual({ invocations: 0, handoffs: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("publishes build: null on GET /server-info once its own binary is gone", async () => {
+    // What lets any older CLI replace a newer daemon whose install was
+    // removed (a downgrade): every shipped CLI reads a missing build as
+    // outdated. `busy` is still there, so a busy orphan is still kept.
+    const { internals } = createServer();
+    internals.publishedBuild = () => ({
+      build: null,
+      orphanedBuild: BUILD_IDENTITY,
+    });
+    const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/sock\n" }]);
+    try {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      const data = (await res.json()) as Record<string, unknown>;
+      expect(data.build).toBeNull();
+      expect(data.orphanedBuild).toEqual(BUILD_IDENTITY);
+      expect(data.busy).toEqual({ invocations: 0, handoffs: 0 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits orphanedBuild while its binary is there", async () => {
+    const { internals } = createServer();
+    const { restore } = withSpawnQueue([{ code: 0, out: "/tmp/sock\n" }]);
+    try {
+      const res = await internals.handleRequest(
+        new Request("http://localhost/server-info"),
+      );
+      const data = (await res.json()) as Record<string, unknown>;
+      expect("orphanedBuild" in data).toBe(false);
     } finally {
       restore();
     }

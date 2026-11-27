@@ -271,7 +271,8 @@ describe("reconcileDaemon", () => {
     });
     expect(await reconcileDaemon(h.deps)).toBe("raced");
     expect(h.launches).toHaveLength(0);
-    expect(h.logs).toEqual(["Daemon is outdated; restarting..."]);
+    // Nothing was restarted, so nothing is announced.
+    expect(h.logs).toEqual([]);
   });
 
   it("race: the re-probe cannot read the daemon, so it is kept (fail open)", async () => {
@@ -322,6 +323,42 @@ describe("reconcileDaemon", () => {
     });
     expect(await reconcileDaemon(h.deps)).toBe("raced");
     expect(h.launches).toHaveLength(0);
+    expect(h.logs).toEqual([]);
+  });
+
+  it("outdated and idle but its listener cannot be found: warns once, launches nothing", async () => {
+    // A machine with neither `lsof` nor `ss` (or a listener owned by another
+    // user). The daemon answers, so it is listening; nothing can name its
+    // process, and a kill needs that pid. This used to print "restarting..."
+    // on every command and then quietly keep the old daemon.
+    const h = harness({
+      routes: {
+        "/server-info": info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+      },
+      listenPids: [null],
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("unidentified");
+    expect(h.launches).toHaveLength(0);
+    expect(h.logs).toEqual([]);
+    expect(h.warns).toHaveLength(1);
+    expect(h.warns[0]).toContain("lsof");
+    expect(h.warns[0]).toContain("ccmux daemon stop");
+  });
+
+  it("an unfindable listener that turned busy is reported as busy", async () => {
+    // Busy is checked first: it is the reason the daemon must stay.
+    const h = harness({
+      routes: {
+        "/server-info": [
+          info(outdatedBuild, { invocations: 0, handoffs: 0 }),
+          info(outdatedBuild, { invocations: 1, handoffs: 0 }),
+        ],
+      },
+      listenPids: [null],
+    });
+    expect(await reconcileDaemon(h.deps)).toBe("busy");
+    expect(h.warns).toHaveLength(1);
+    expect(h.warns[0]).toContain("busy");
   });
 });
 

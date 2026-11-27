@@ -106,7 +106,9 @@ export type ReconcileOutcome =
   | "restarted"
   | "busy"
   | "deferred"
-  | "raced";
+  | "raced"
+  /** Outdated and idle, but no LISTEN pid could be found to kill. */
+  | "unidentified";
 
 async function getDaemonJson(
   path: string,
@@ -280,11 +282,12 @@ export async function settleDaemon(
     );
     return "busy";
   }
-  deps.log("Daemon is outdated; restarting...");
   // Another CLI may have replaced it, or an invoke/handoff may have started,
   // between the probe and now. Snapshot the LISTEN pid, then re-read build
   // *and* busy; kill only that pid. A daemon that is no longer outdated, is
-  // now busy, or is no longer that listener stays.
+  // now busy, or is no longer that listener stays. The "restarting" line
+  // waits until all of that has passed: printed first, it announced a
+  // restart that then silently did not happen.
   const listenPid = await deps.findListenPid();
   const { verdict, info } = await readBuild(deps);
   if (verdict !== "outdated") return "raced";
@@ -296,9 +299,19 @@ export async function settleDaemon(
     );
     return "busy";
   }
-  if (listenPid === null || (await deps.findListenPid()) !== listenPid) {
-    return "raced";
+  if (listenPid === null) {
+    // It answered, so it is listening; the OS just would not say which
+    // process (no `lsof` or `ss`, or a listener owned by another user). A
+    // kill needs that pid. `daemon stop` goes by the pid file instead.
+    deps.warn(
+      `Daemon is outdated, but the process listening on port ${DAEMON_PORT} ` +
+        "could not be found (needs `lsof` or `ss` on PATH); " +
+        "run `ccmux daemon stop`, then `ccmux daemon start`.",
+    );
+    return "unidentified";
   }
+  if ((await deps.findListenPid()) !== listenPid) return "raced";
+  deps.log("Daemon is outdated; restarting...");
   if (!(await deps.launch(listenPid))) return "raced";
   return "restarted";
 }

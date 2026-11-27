@@ -96,7 +96,10 @@ import {
 } from "./gh-spawn-source";
 import { getAgents, type AgentDef } from "../lib/agents";
 import { summaryFromPaneTitle } from "../lib/pane-summary";
-import { BUILD_IDENTITY } from "../lib/build-identity";
+import {
+  ownPublishedBuild,
+  type PublishedBuild,
+} from "../lib/build-identity";
 import { listSpawnableAgents, spawnBinaryFor } from "../lib/spawnable-agents";
 import {
   getMarkerKey,
@@ -796,6 +799,9 @@ export class DaemonServer {
    * the guard silently no-ops. @see resolvedHomeDir
    */
   private homeDir: string = resolvedHomeDir();
+  /** What `/server-info` publishes as `build`: a plain field so a test can
+   *  stand in for a daemon whose binary was uninstalled. */
+  private publishedBuild: () => PublishedBuild = ownPublishedBuild;
   /**
    * Handoffs waiting for their target to finish its turn. Constructed in the
    * constructor rather than here because its expiry callback re-broadcasts the
@@ -1452,12 +1458,14 @@ export class DaemonServer {
       // whether to replace this daemon (issue #163). Both are additive: a
       // missing `build` is outdated, and a missing `busy` on an identified
       // daemon is busy (fail safe — `/invocations` cannot see queued handoffs).
+      // `build` is null once this daemon's own binary is gone, so the CLI
+      // that remains after an uninstall replaces it (`publishBuild`).
       return Response.json(
         {
           socketPath,
           socketError: this.socketError,
           health: this.getScanHealth(),
-          build: BUILD_IDENTITY,
+          ...this.publishedBuild(),
           busy: {
             invocations: this.invocationManager
               .listInvocations()

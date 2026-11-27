@@ -38,19 +38,22 @@ if [[ -n "$CONFLICTS_WITH" ]]; then
 	CONFLICTS_BLOCK="
   conflicts_with \"${CONFLICTS_WITH}\", because: \"both install a ccmux binary\"
 "
-	# The daemon is stopped first because an older ccmux never replaces a newer
-	# daemon; setup runs last so the hooks match the binary that stays.
+	# No daemon or setup step: a daemon whose binary was uninstalled publishes
+	# no build identity, which every shipped CLI reads as outdated, so the CLI
+	# that remains replaces it on its first command. The hooks are the same on
+	# both lines. The exception is Linux without lsof, where a 1.4 CLI cannot
+	# find the daemon's process to replace it; `daemon stop` uses the pid file.
 	CAVEATS_BLOCK="
   def caveats
     <<~EOS
       To switch back to the ${CONFLICTS_WITH} formula:
-        ccmux daemon stop
         brew uninstall ${FORMULA_NAME}
         brew install epilande/tap/${CONFLICTS_WITH}
-        ccmux setup
 
       If ${CONFLICTS_WITH} is already installed but unlinked, use
       \"brew link ${CONFLICTS_WITH}\" in place of the install step.
+
+      On Linux without lsof, run \"ccmux daemon stop\" before switching back.
     EOS
   end
 "

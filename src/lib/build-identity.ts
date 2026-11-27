@@ -95,26 +95,34 @@ export function computeBuildIdentity(
   inputs: BuildIdentityInputs,
 ): BuildIdentity {
   const { execPath, argv1, version } = inputs;
-  const cwd = inputs.cwd ?? process.cwd();
+  const file = executedFile(inputs);
   if (isStandaloneBinary(argv1, execPath)) {
-    const binary = realpathOr(execPath);
-    return { version, artifact: binary, stamp: stampOf(binary) };
+    return { version, artifact: file, stamp: stampOf(file) };
   }
-  const script = realpathOr(resolve(cwd, argv1 ?? ""));
-  return {
-    version,
-    artifact: dirname(dirname(script)),
-    stamp: stampOf(script),
-  };
+  return { version, artifact: dirname(dirname(file)), stamp: stampOf(file) };
 }
+
+/**
+ * The file a process actually executes, which is what its `stamp` measures:
+ * a compiled binary's realpath, or the script `bun` runs. For a binary it is
+ * also the `artifact`; for a script it is not (that is the checkout root).
+ */
+export function executedFile(inputs: BuildIdentityInputs): string {
+  if (isStandaloneBinary(inputs.argv1, inputs.execPath)) {
+    return realpathOr(inputs.execPath);
+  }
+  return realpathOr(resolve(inputs.cwd ?? process.cwd(), inputs.argv1 ?? ""));
+}
+
+const OWN_INPUTS: BuildIdentityInputs = {
+  execPath: process.execPath,
+  argv1: process.argv[1],
+  version: pkg.version,
+};
 
 function computeOwnIdentity(): BuildIdentity {
   try {
-    return computeBuildIdentity({
-      execPath: process.execPath,
-      argv1: process.argv[1],
-      version: pkg.version,
-    });
+    return computeBuildIdentity(OWN_INPUTS);
   } catch {
     return { version: pkg.version, artifact: "", stamp: "" };
   }
@@ -122,6 +130,51 @@ function computeOwnIdentity(): BuildIdentity {
 
 /** This process's identity, frozen at import (see the header). */
 export const BUILD_IDENTITY: BuildIdentity = computeOwnIdentity();
+
+/** This process's executed file, frozen at import for the same reason; "" when unknown. */
+const OWN_EXECUTED_FILE: string = (() => {
+  try {
+    return executedFile(OWN_INPUTS);
+  } catch {
+    return "";
+  }
+})();
+
+/**
+ * The `build` a daemon publishes on `/server-info`, plus the identity it
+ * stopped publishing, if any.
+ */
+export interface PublishedBuild {
+  build: BuildIdentity | null;
+  /** The identity withheld because its executed file is gone. */
+  orphanedBuild?: BuildIdentity;
+}
+
+/**
+ * `identity`, or no build at all once `file` (the daemon's own executed
+ * file) no longer exists.
+ *
+ * An uninstalled daemon can never be restarted from its own install, and the
+ * usual case is a downgrade: `brew uninstall ccmux-rc` leaves a 1.5 daemon
+ * running that a 1.4 CLI keeps as `foreign`, because it is newer. Every
+ * shipped CLI reads a missing identity as `outdated`, so publishing none
+ * lets the CLI that remains replace it (when idle, since `busy` is still
+ * published). The identity moves to `orphanedBuild` for `ccmux daemon
+ * status`, which older CLIs ignore. An unknown file ("") claims nothing.
+ */
+export function publishBuild(
+  identity: BuildIdentity,
+  file: string,
+  exists: (path: string) => boolean = existsSync,
+): PublishedBuild {
+  if (file === "" || exists(file)) return { build: identity };
+  return { build: null, orphanedBuild: identity };
+}
+
+/** `publishBuild` for this process, checked on every call. */
+export function ownPublishedBuild(): PublishedBuild {
+  return publishBuild(BUILD_IDENTITY, OWN_EXECUTED_FILE);
+}
 
 /**
  * A "transient source run": this CLI is executing a source file of a checkout
