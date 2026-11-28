@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -17,6 +17,7 @@ mock.module("../lib/config", () => ({
 
 import { Daemon } from "./index";
 import { SessionManager } from "./sessions";
+import * as paneIo from "./pane-io";
 import { reconcileAll } from "./state-reconciler";
 import type { ProcessInfo, TmuxPane } from "../types/session";
 
@@ -36,6 +37,21 @@ function fakePane(overrides: Partial<TmuxPane> = {}): TmuxPane {
     currentPath: "/Users/test/proj",
     ...overrides,
   };
+}
+
+/**
+ * Run `fn` with the pane showing an idle Claude prompt: Claude up, nothing in
+ * flight, which `detectPaneState` reads as `active`. Stubbed rather than
+ * captured: a real `capture-pane -t %1` reads whatever pane %1 is on the
+ * machine running the tests, and fails outright where no tmux is running.
+ */
+async function withIdlePromptPane(fn: () => Promise<void>): Promise<void> {
+  const capture = spyOn(paneIo, "tryCapturePane").mockResolvedValue("❯ \n");
+  try {
+    await fn();
+  } finally {
+    capture.mockRestore();
+  }
 }
 
 function fakeClaudeProcess(pid: number): ProcessInfo {
@@ -111,11 +127,13 @@ describe("reconcileAll: native Claude state resolution", () => {
     ).sessionManager;
     const sessionId = createStaleClaudeSession(sessionManager, "working");
 
-    await reconcileAll(makeDeps(sessionManager), {
-      processes: [fakeClaudeProcess(12345)],
-      panes: [fakePane()],
-      processTree: { findShellDescendants: () => [] },
-    });
+    await withIdlePromptPane(() =>
+      reconcileAll(makeDeps(sessionManager), {
+        processes: [fakeClaudeProcess(12345)],
+        panes: [fakePane()],
+        processTree: { findShellDescendants: () => [] },
+      }),
+    );
 
     const session = sessionManager.getSession(sessionId)!;
     expect(session.status).toBe("idle");
@@ -143,11 +161,13 @@ describe("reconcileAll: native Claude state resolution", () => {
       lastActivityAt: undefined,
     });
 
-    await reconcileAll(makeDeps(sessionManager), {
-      processes: [fakeClaudeProcess(12345)],
-      panes: [fakePane()],
-      processTree: { findShellDescendants: () => [] },
-    });
+    await withIdlePromptPane(() =>
+      reconcileAll(makeDeps(sessionManager), {
+        processes: [fakeClaudeProcess(12345)],
+        panes: [fakePane()],
+        processTree: { findShellDescendants: () => [] },
+      }),
+    );
 
     const session = sessionManager.getSession(sessionId)!;
     expect(session.status).toBe("idle");
