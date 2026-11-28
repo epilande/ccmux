@@ -1,5 +1,10 @@
 import { describe, it, expect } from "bun:test";
-import { resolvePaneLocation, sendPromptToPane } from "./pane-io";
+import {
+  capturePane,
+  resolvePaneLocation,
+  sendPromptToPane,
+  tryCapturePane,
+} from "./pane-io";
 
 /**
  * Stub `Bun.spawn`, recording argv and replaying one tmux outcome.
@@ -152,6 +157,48 @@ describe("resolvePaneLocation", () => {
     const { restore } = withTmux({ throws: true });
     try {
       expect(await resolvePaneLocation("%12")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("tryCapturePane", () => {
+  it("returns the pane text when tmux succeeds", async () => {
+    const { argv, restore } = withTmux({ out: "❯ \n" });
+    try {
+      expect(await tryCapturePane("%4", 20)).toBe("❯ \n");
+      expect(argv[0]).toContain("capture-pane");
+      expect(argv[0]).toContain("-S-20");
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns null when tmux exits nonzero, so a failed read is not an empty pane", async () => {
+    const { restore } = withTmux({ code: 1 });
+    try {
+      expect(await tryCapturePane("%4")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it("returns null when tmux cannot be spawned", async () => {
+    const { restore } = withTmux({ throws: true });
+    try {
+      expect(await tryCapturePane("%4")).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe("capturePane", () => {
+  it("keeps folding a failed capture to an empty string for its other callers", async () => {
+    const { restore } = withTmux({ code: 1 });
+    try {
+      expect(await capturePane("%4")).toBe("");
     } finally {
       restore();
     }

@@ -32,8 +32,8 @@ mock.module("../lib/config", () => ({
 let mockDetectPaneState: (
   paneId: string,
   pane?: TmuxPane,
-) => Promise<PaneDetectionResult>;
-let mockCapturePane: (paneId: string, lines?: number) => Promise<string>;
+) => Promise<PaneDetectionResult | null>;
+let mockCapturePane: (paneId: string, lines?: number) => Promise<string | null>;
 
 // Captured during the mock-factory's first run so we can hand the real
 // implementations back to the let-bindings in afterAll. Bun's mock.module
@@ -41,7 +41,10 @@ let mockCapturePane: (paneId: string, lines?: number) => Promise<string>;
 // loads pane-classify after this file's tests would otherwise see the stale
 // stub from the last test instead of real behavior.
 let realDetectPaneState: typeof mockDetectPaneState | undefined;
-let realCapturePane: typeof mockCapturePane | undefined;
+// The real `tryCapturePane`, not `capturePane`: both exports below route
+// through `mockCapturePane`, and the real `capturePane` calls the (leaked,
+// mocked) `tryCapturePane`, so restoring to it would recurse forever.
+let realTryCapturePane: typeof mockCapturePane | undefined;
 
 mock.module("./pane-classify", () => {
   const actual = require("./pane-classify");
@@ -55,17 +58,19 @@ mock.module("./pane-classify", () => {
 
 mock.module("./pane-io", () => {
   const actual = require("./pane-io");
-  realCapturePane = actual.capturePane;
+  realTryCapturePane = actual.tryCapturePane;
   return {
     ...actual,
-    capturePane: (...args: Parameters<typeof mockCapturePane>) =>
+    capturePane: async (...args: Parameters<typeof mockCapturePane>) =>
+      (await mockCapturePane(...args)) ?? "",
+    tryCapturePane: (...args: Parameters<typeof mockCapturePane>) =>
       mockCapturePane(...args),
   };
 });
 
 afterAll(() => {
   if (realDetectPaneState) mockDetectPaneState = realDetectPaneState;
-  if (realCapturePane) mockCapturePane = realCapturePane;
+  if (realTryCapturePane) mockCapturePane = realTryCapturePane;
 });
 
 import {
@@ -244,6 +249,31 @@ describe("reconcileAll", () => {
   });
 
   describe("native Claude: stale working pane inspection", () => {
+    // An unreadable pane is not an empty one. When tmux cannot answer (its
+    // socket file deleted under a live server, so `panes` is [] while the
+    // agent's pid is still alive), detection has no verdict. Reading the
+    // failed capture as "active" used to idle a mid-turn session and mark it
+    // unread, a false "finished".
+    it("leaves a stale working session alone when the pane could not be read", async () => {
+      mockDetectPaneState = async () => null;
+
+      const id = makeSession(sessionManager, {
+        status: "working",
+        trackingMode: "native",
+        pid: 12345,
+        tmuxPane: "%1",
+        lastActivityAt: TWO_MINUTES_AGO,
+      });
+
+      await reconcileAll(
+        makeDeps(sessionManager),
+        makeSnapshot({ processes: [fakeProcess()], panes: [] }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("working");
+    });
+
     it("downgrades stale working session when pane shows idle", async () => {
       mockDetectPaneState = async () => ({
         state: "idle",
@@ -353,6 +383,22 @@ describe("reconcileAll", () => {
   });
 
   describe("pane-tracked Claude: fallback", () => {
+    it("leaves a working row alone when the pane could not be read", async () => {
+      mockDetectPaneState = async () => null;
+
+      const id = makeSession(sessionManager, {
+        agentType: "claude",
+        trackingMode: "pane",
+        status: "working",
+        tmuxPane: "%1",
+        lastActivityAt: TWO_MINUTES_AGO,
+      });
+
+      await reconcileAll(makeDeps(sessionManager), makeSnapshot({ panes: [] }));
+
+      expect(sessionManager.getSession(id)!.status).toBe("working");
+    });
+
     it("derives state from pane inspection for pane-tracked Claude", async () => {
       mockDetectPaneState = async () => ({
         state: "working",
@@ -2061,9 +2107,7 @@ describe("reconcileAll", () => {
     });
 
     it("keeps waiting when the pane cannot be read (fail-open)", async () => {
-      mockCapturePane = async () => {
-        throw new Error("pane is gone");
-      };
+      mockCapturePane = async () => null;
       const id = makeSession(sessionManager, {
         trackingMode: "native",
         status: "waiting",

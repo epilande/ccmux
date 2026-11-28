@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -17,6 +17,7 @@ mock.module("../lib/config", () => ({
 
 import { Daemon } from "./index";
 import { SessionManager } from "./sessions";
+import * as paneIo from "./pane-io";
 import { reconcileAll } from "./state-reconciler";
 import type { ProcessInfo, TmuxPane } from "../types/session";
 
@@ -36,6 +37,22 @@ function fakePane(overrides: Partial<TmuxPane> = {}): TmuxPane {
     currentPath: "/Users/test/proj",
     ...overrides,
   };
+}
+
+/**
+ * Run `fn` with the pane showing an idle Claude prompt: Claude up, nothing in
+ * flight, which `detectPaneState` reads as `active`. Stubbed rather than
+ * captured: a real `capture-pane -t %1` reads whatever pane %1 is on the
+ * machine running the tests, and fails outright where no tmux is running.
+ */
+async function withIdlePromptPane(fn: () => Promise<void>): Promise<void> {
+  const capture = spyOn(paneIo, "tryCapturePane").mockResolvedValue("❯ \n");
+  try {
+    await fn();
+    expect(capture).toHaveBeenCalled();
+  } finally {
+    capture.mockRestore();
+  }
 }
 
 function fakeClaudeProcess(pid: number): ProcessInfo {
@@ -111,15 +128,44 @@ describe("reconcileAll: native Claude state resolution", () => {
     ).sessionManager;
     const sessionId = createStaleClaudeSession(sessionManager, "working");
 
-    await reconcileAll(makeDeps(sessionManager), {
-      processes: [fakeClaudeProcess(12345)],
-      panes: [fakePane()],
-      processTree: { findShellDescendants: () => [] },
-    });
+    await withIdlePromptPane(() =>
+      reconcileAll(makeDeps(sessionManager), {
+        processes: [fakeClaudeProcess(12345)],
+        panes: [fakePane()],
+        processTree: { findShellDescendants: () => [] },
+      }),
+    );
 
     const session = sessionManager.getSession(sessionId)!;
     expect(session.status).toBe("idle");
     expect(session.attentionType).toBeNull();
+  });
+
+  // The reported bug, end to end through the real `detectPaneState`: a tmux
+  // server whose socket file was deleted keeps the agent alive while every
+  // tmux call fails. The scan sees no panes, the binder only PROPOSES the
+  // unbind, so this first reconcile still holds the pane and asks tmux for
+  // it. That failed read used to classify as `active` and end the turn.
+  it("keeps a stale working session working when tmux cannot capture its pane", async () => {
+    const daemon = new Daemon();
+    const sessionManager = (
+      daemon as unknown as { sessionManager: SessionManager }
+    ).sessionManager;
+    const sessionId = createStaleClaudeSession(sessionManager, "working");
+
+    const capture = spyOn(paneIo, "tryCapturePane").mockResolvedValue(null);
+    try {
+      await reconcileAll(makeDeps(sessionManager), {
+        processes: [fakeClaudeProcess(12345)],
+        panes: [],
+        processTree: { findShellDescendants: () => [] },
+      });
+      expect(capture).toHaveBeenCalled();
+    } finally {
+      capture.mockRestore();
+    }
+
+    expect(sessionManager.getSession(sessionId)!.status).toBe("working");
   });
 
   it("downgrades working sessions with no lastActivityAt when pane indicates not working", async () => {
@@ -143,11 +189,13 @@ describe("reconcileAll: native Claude state resolution", () => {
       lastActivityAt: undefined,
     });
 
-    await reconcileAll(makeDeps(sessionManager), {
-      processes: [fakeClaudeProcess(12345)],
-      panes: [fakePane()],
-      processTree: { findShellDescendants: () => [] },
-    });
+    await withIdlePromptPane(() =>
+      reconcileAll(makeDeps(sessionManager), {
+        processes: [fakeClaudeProcess(12345)],
+        panes: [fakePane()],
+        processTree: { findShellDescendants: () => [] },
+      }),
+    );
 
     const session = sessionManager.getSession(sessionId)!;
     expect(session.status).toBe("idle");
