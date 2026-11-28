@@ -329,7 +329,7 @@ function fakeClassifyPane(overrides: Partial<TmuxPane> = {}): TmuxPane {
 
 describe("detectPaneState", () => {
   it("keeps a session working when the title is static ✳ and the pane still shows a spinner", async () => {
-    const capture = spyOn(paneIo, "capturePane").mockResolvedValue(
+    const capture = spyOn(paneIo, "tryCapturePane").mockResolvedValue(
       [
         "⏺ I'll keep going.",
         "· Mustering… (9m 19s · ↓ 23.1k tokens)",
@@ -338,7 +338,27 @@ describe("detectPaneState", () => {
     );
     try {
       const result = await detectPaneState("%1", fakeClassifyPane());
-      expect(result.state).toBe("working");
+      expect(result?.state).toBe("working");
+    } finally {
+      capture.mockRestore();
+    }
+  });
+});
+
+describe("detectPaneState: unreadable pane", () => {
+  it("returns no verdict when tmux cannot capture the pane", async () => {
+    const capture = spyOn(paneIo, "tryCapturePane").mockResolvedValue(null);
+    try {
+      expect(await detectPaneState("%1")).toBeNull();
+    } finally {
+      capture.mockRestore();
+    }
+  });
+
+  it("still classifies a genuinely empty capture", async () => {
+    const capture = spyOn(paneIo, "tryCapturePane").mockResolvedValue("");
+    try {
+      expect((await detectPaneState("%1"))?.state).toBe("active");
     } finally {
       capture.mockRestore();
     }

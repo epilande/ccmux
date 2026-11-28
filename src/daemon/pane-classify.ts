@@ -1,7 +1,7 @@
 import type { AttentionType, TmuxPane } from "../types/session";
 import { CLAUDE_AGENT_DEF } from "../lib/agents";
 import { detectTerminalStatus } from "./terminal-detector";
-import { capturePane } from "./pane-io";
+import { tryCapturePane } from "./pane-io";
 import { stripAnsi } from "../lib/strip-ansi";
 
 type PaneState = "plan_approval" | "working" | "waiting" | "idle" | "active";
@@ -317,11 +317,17 @@ export function classifyPaneContent(content: string): PaneDetectionResult {
  * `reconcilePaneTrackedClaudeSession` idles a `working` or `waiting`
  * pane-tracked row on it — for that arm this is the ONLY idle source, since
  * the watcher is a deliberate no-op for Claude in `claude-no-hooks` mode.
+ *
+ * Null means no verdict: tmux could not capture the pane. Because `active` is
+ * an end-of-turn signal, reading that failure as an empty screen would end a
+ * live turn. That happened at the onset of a socket-deleted outage, when the
+ * agent's pid is alive, the pane list is empty, and every capture fails.
+ * Both consumers leave the row untouched on null.
  */
 export async function detectPaneState(
   paneId: string,
   pane?: TmuxPane,
-): Promise<PaneDetectionResult> {
+): Promise<PaneDetectionResult | null> {
   if (pane) {
     if (isNonAgentCommand(pane.currentCommand)) {
       return paneDetectionResult("idle");
@@ -333,5 +339,6 @@ export async function detectPaneState(
     }
   }
 
-  return classifyPaneContent(await capturePane(paneId, 20));
+  const content = await tryCapturePane(paneId, 20);
+  return content === null ? null : classifyPaneContent(content);
 }

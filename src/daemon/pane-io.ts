@@ -1,10 +1,17 @@
 import { DaemonPerf } from "./perf";
 import { tmuxArgv } from "../lib/tmux-exec";
 
-export async function capturePane(
+/**
+ * Capture a pane's recent lines, or null when tmux could not answer: a pane
+ * that no longer exists, a server that is down, or a socket deleted under a
+ * live server. Callers that turn a capture into STATE need this distinction,
+ * because classifying a failed read as an empty screen manufactures evidence
+ * (an empty capture reads as an agent with nothing in flight).
+ */
+export async function tryCapturePane(
   paneId: string,
   lines: number = 50,
-): Promise<string> {
+): Promise<string | null> {
   DaemonPerf.incPaneCapture();
   DaemonPerf.incSubprocessSpawn("tmux-capture-pane");
   const captureStartNs = DaemonPerf.paneCaptureStart();
@@ -17,14 +24,28 @@ export async function capturePane(
       },
     );
 
-    const output = await new Response(proc.stdout).text();
-    await proc.exited;
-    DaemonPerf.paneCaptureEnd(captureStartNs);
-    return output;
+    const [output, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return exitCode === 0 ? output : null;
   } catch {
+    return null;
+  } finally {
     DaemonPerf.paneCaptureEnd(captureStartNs);
-    return "";
   }
+}
+
+/**
+ * {@link tryCapturePane} with a failed read folded into "". For callers that
+ * only search or display the text, where nothing to show and nothing read
+ * mean the same thing.
+ */
+export async function capturePane(
+  paneId: string,
+  lines: number = 50,
+): Promise<string> {
+  return (await tryCapturePane(paneId, lines)) ?? "";
 }
 
 /**

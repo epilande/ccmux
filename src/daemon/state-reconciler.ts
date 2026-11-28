@@ -641,6 +641,8 @@ async function resolveNativeClaudeStates(
   );
 
   for (const { id, detection, wasWorking } of results) {
+    // No verdict (tmux could not capture the pane): leave the row as it is.
+    if (!detection) continue;
     const { state, attentionType, pendingTool } = detection;
     if (state === "plan_approval") {
       deps.sessionManager.updateSession(id, {
@@ -763,6 +765,8 @@ async function reconcilePaneTrackedClaudeSession(
   const paneId = session.tmuxPane!;
   const pane = paneById.get(paneId);
   const detection = await detectPaneState(paneId, pane);
+  // No verdict (tmux could not capture the pane): leave the row as it is.
+  if (!detection) return;
   const { state, attentionType, pendingTool } = detection;
 
   if (state === "plan_approval") {

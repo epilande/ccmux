@@ -32,7 +32,7 @@ mock.module("../lib/config", () => ({
 let mockDetectPaneState: (
   paneId: string,
   pane?: TmuxPane,
-) => Promise<PaneDetectionResult>;
+) => Promise<PaneDetectionResult | null>;
 let mockCapturePane: (paneId: string, lines?: number) => Promise<string>;
 
 // Captured during the mock-factory's first run so we can hand the real
@@ -244,6 +244,32 @@ describe("reconcileAll", () => {
   });
 
   describe("native Claude: stale working pane inspection", () => {
+    // An unreadable pane is not an empty one. When tmux cannot answer (its
+    // socket file deleted under a live server, so `panes` is [] while the
+    // agent's pid is still alive), detection has no verdict. Reading the
+    // failed capture as "active" used to idle a mid-turn session and mark it
+    // unread, a false "finished".
+    it("leaves a stale working session alone when the pane could not be read", async () => {
+      mockDetectPaneState = async () => null;
+
+      const id = makeSession(sessionManager, {
+        status: "working",
+        trackingMode: "native",
+        pid: 12345,
+        tmuxPane: "%1",
+        lastActivityAt: TWO_MINUTES_AGO,
+      });
+
+      await reconcileAll(
+        makeDeps(sessionManager),
+        makeSnapshot({ processes: [fakeProcess()], panes: [] }),
+      );
+
+      const session = sessionManager.getSession(id)!;
+      expect(session.status).toBe("working");
+      expect(session.attentionState).not.toBe("unread");
+    });
+
     it("downgrades stale working session when pane shows idle", async () => {
       mockDetectPaneState = async () => ({
         state: "idle",
@@ -353,6 +379,22 @@ describe("reconcileAll", () => {
   });
 
   describe("pane-tracked Claude: fallback", () => {
+    it("leaves a working row alone when the pane could not be read", async () => {
+      mockDetectPaneState = async () => null;
+
+      const id = makeSession(sessionManager, {
+        agentType: "claude",
+        trackingMode: "pane",
+        status: "working",
+        tmuxPane: "%1",
+        lastActivityAt: TWO_MINUTES_AGO,
+      });
+
+      await reconcileAll(makeDeps(sessionManager), makeSnapshot({ panes: [] }));
+
+      expect(sessionManager.getSession(id)!.status).toBe("working");
+    });
+
     it("derives state from pane inspection for pane-tracked Claude", async () => {
       mockDetectPaneState = async () => ({
         state: "working",
