@@ -26,7 +26,7 @@ import {
 import { isPaneTrackedSession, isBackgroundSession } from "./sessions";
 import { resolveDeadProcessState } from "./status-machine";
 import { matchTerminalRule } from "./terminal-detector";
-import { capturePane } from "./pane-io";
+import { capturePane, tryCapturePane } from "./pane-io";
 import { tmuxArgv } from "../lib/tmux-exec";
 import { detectPaneState, showsIdleClaudeComposer } from "./pane-classify";
 import { normalizeTty } from "./pane-discovery";
@@ -229,7 +229,7 @@ async function reconcileNativeSession(
  *    covered there either. The row then sits at `waiting` until the next
  *    real turn, refusing every handoff (issue #117).
  *
- * Both corrections mutate `sources` in place; any capture failure is a
+ * Both corrections mutate `sources` in place; a pane tmux cannot capture is a
  * fail-open no-op (the marker's `permission` stands).
  *
  * AskUserQuestion disambiguation, in full: for an agent flagged
@@ -253,7 +253,10 @@ async function applyPermissionPaneEvidence(
   deps: Pick<ReconcilerDeps, "agents" | "now">,
   session: Session,
   sources: CascadeSource[],
-  capture: (paneId: string, lines?: number) => Promise<string> = capturePane,
+  capture: (
+    paneId: string,
+    lines?: number,
+  ) => Promise<string | null> = tryCapturePane,
 ): Promise<void> {
   const agent = deps.agents.find((a) => a.name === session.agentType);
   if (!agent) return;
@@ -281,12 +284,8 @@ async function applyPermissionPaneEvidence(
     now - marker.timestamp >= STALE_PERMISSION_GRACE_MS;
   if (!disambiguates && !downgrades) return;
 
-  let content: string;
-  try {
-    content = await capture(session.tmuxPane, 50);
-  } catch {
-    return;
-  }
+  const content = await capture(session.tmuxPane, 50);
+  if (content === null) return;
 
   if (disambiguates) {
     // `matchTerminalRule` is first-match-wins over all rules, so a permission
